@@ -1,0 +1,26 @@
+# local symlink to reference material (no trailing slash: it's a symlink)
+.reference
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+
+# typescript
+node_modules/
+
+# vercel
+.vercel/
+
+# env
+.env
+.env.*
+!.env.example
+
+# os / editor
+.DS_Store

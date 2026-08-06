@@ -1,0 +1,38 @@
+[project]
+name = "e2e-bot"
+version = "0.1.0"
+description = "GitHub bot that ports e2e tests from js sdks to python sdks."
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "httpx>=0.28",
+    "pydantic>=2.7",
+    "vercel-connect",
+    "vercel-internal-core",
+    "vercel-oidc[verify]",
+]
+
+[tool.uv.sources]
+# vercel-connect is not on pypi yet; its git main also needs git main of the
+# other two (pypi releases lag), so all three pin to the same checkout
+vercel-connect = { git = "https://github.com/vercel/vercel-py.git", subdirectory = "src/vercel-connect" }
+vercel-internal-core = { git = "https://github.com/vercel/vercel-py.git", subdirectory = "src/vercel-internal-core" }
+vercel-oidc = { git = "https://github.com/vercel/vercel-py.git", subdirectory = "src/vercel-oidc" }
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "uvicorn>=0.30",
+]
+
+[tool.vercel]
+entrypoint = "main:app"
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+asyncio_mode = "auto"
+testpaths = ["tests"]
