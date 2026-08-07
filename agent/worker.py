@@ -39,6 +39,23 @@ app = vercel.queue.asgi_app(
     region=os.environ.get("VERCEL_REGION", "iad1"),  # same fallback as the workflow world
 )
 
+# The deployed builder names the queue trigger's consumer group after this
+# module's pyproject entrypoint ("agent.worker:app", encoded) instead of
+# copying the sdk's "default" group (fixed in vercel/vercel#17236, not live
+# yet). Dispatch keys on (consumer_group, topic), so mirror the workflow
+# world's subscriptions under the platform's group too. SanitizedName keeps
+# the group literal (a str would get re-encoded and never match). Delete this
+# once deploys arrive with group "default"; update it if the entrypoint moves.
+_PLATFORM_GROUP = vercel.queue.SanitizedName("__py__workflows_Sagent-worker____app")
+import vercel._internal.workflow.world as _wkf_world  # noqa: E402
+
+if os.environ.get("VERCEL_DEPLOYMENT_ID"):  # local world delivers to every group: skip
+    for _callback in getattr(_wkf_world.get_world(), "_queue_callbacks", []):
+        try:
+            vercel.queue.subscribe(topic="__wkf_*", consumer_group=_PLATFORM_GROUP)(_callback)
+        except vercel.queue.DuplicateSubscriptionError:
+            pass  # the workflow host re-imports this module; the registry is process-global
+
 MODEL_ID = "gateway:anthropic/claude-sonnet-4.6"
 SYSTEM_PROMPT = """\
 You are the e2e parity bot for vercel's python sdks. You receive a scan
