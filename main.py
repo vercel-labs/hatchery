@@ -1,6 +1,7 @@
 """Vercel entrypoint (see [tool.vercel] in pyproject.toml).
 
-Echo handler for now — replaces with the porting agent later. Channels:
+Say "parity" to the bot to run the e2e parity scan; anything else echoes.
+Channels:
 - /chat/v1/slack   needs SLACK_CONNECTOR (connect uid, e.g. "slack/e2e-bot")
 - /chat/v1/github  needs GITHUB_CONNECTOR + GITHUB_APP_SLUG
 """
@@ -8,10 +9,16 @@ Echo handler for now — replaces with the porting agent later. Channels:
 import fastapi
 
 import chat
+from agent import parity
 from chat.channels import github, slack
 
 
 async def handler(turn: chat.Turn) -> None:
+    if "parity" in turn.message.content.lower():
+        await turn.status("scanning repos...")
+        report = await parity.scan()
+        await turn.reply(report.summary())
+        return
     await turn.status("thinking...")
     await turn.reply(f"echo from {turn.channel} (turn {len(turn.session.history) // 2}): {turn.message.content}")
 
