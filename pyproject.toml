@@ -34,8 +34,13 @@ dev = [
 [tool.vercel]
 entrypoint = "main:app"
 
+# the entrypoint names the served asgi app, not the Workflows registry: the
+# docs' `module:registry` form relies on vercel<=0.7.x registering consumers
+# via vercel-workers, which the runtime's worker bootstrap discovers and
+# serves. vercel 0.8.x registers via vercel.queue, which that bootstrap can't
+# see, so the module exports the queue push app itself (agent/worker.py).
 [[tool.vercel.workflows]]
-entrypoint = "agent.worker:workflow"
+entrypoint = "agent.worker:app"
 
 [tool.uv]
 package = false
