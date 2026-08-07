@@ -4,9 +4,11 @@ version = "0.1.0"
 description = "GitHub bot that ports e2e tests from js sdks to python sdks."
 requires-python = ">=3.12"
 dependencies = [
+    "ai",
     "fastapi>=0.115",
     "httpx>=0.28",
     "pydantic>=2.7",
+    "vercel",
     "vercel-connect",
     "vercel-internal-core",
     "vercel-oidc[verify]",
@@ -15,11 +17,12 @@ dependencies = [
 
 [tool.uv.sources]
 # vercel-connect is not on pypi yet; its git main also needs git main of the
-# others (pypi releases lag), so all four pin to the same checkout
-vercel-connect = { git = "https://github.com/vercel/vercel-py.git", subdirectory = "src/vercel-connect" }
-vercel-internal-core = { git = "https://github.com/vercel/vercel-py.git", subdirectory = "src/vercel-internal-core" }
-vercel-oidc = { git = "https://github.com/vercel/vercel-py.git", subdirectory = "src/vercel-oidc" }
-vercel-sandbox = { git = "https://github.com/vercel/vercel-py.git", subdirectory = "src/vercel-sandbox" }
+# others (pypi releases lag), so all five pin to the same checkout
+vercel = { git = "https://github.com/vercel/vercel-py.git", branch = "main", subdirectory = "src/vercel" }
+vercel-connect = { git = "https://github.com/vercel/vercel-py.git", branch = "main", subdirectory = "src/vercel-connect" }
+vercel-internal-core = { git = "https://github.com/vercel/vercel-py.git", branch = "main", subdirectory = "src/vercel-internal-core" }
+vercel-oidc = { git = "https://github.com/vercel/vercel-py.git", branch = "main", subdirectory = "src/vercel-oidc" }
+vercel-sandbox = { git = "https://github.com/vercel/vercel-py.git", branch = "main", subdirectory = "src/vercel-sandbox" }
 
 [dependency-groups]
 dev = [
@@ -30,6 +33,14 @@ dev = [
 
 [tool.vercel]
 entrypoint = "main:app"
+
+# the entrypoint names the served asgi app, not the Workflows registry: the
+# docs' `module:registry` form relies on vercel<=0.7.x registering consumers
+# via vercel-workers, which the runtime's worker bootstrap discovers and
+# serves. vercel 0.8.x registers via vercel.queue, which that bootstrap can't
+# see, so the module exports the queue push app itself (agent/worker.py).
+[[tool.vercel.workflows]]
+entrypoint = "agent.worker:app"
 
 [tool.uv]
 package = false

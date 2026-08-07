@@ -19,7 +19,7 @@ import re
 from vercel import sandbox
 
 JS_REPO = "https://github.com/vercel/workflow.git"
-JS_TESTS = "/vercel/sandbox/packages/core/e2e"  # GitSource clones to /vercel/sandbox
+JS_TESTS = "/vercel/workflow/packages/core/e2e"  # GitSource clones to /vercel/<repo name>
 JS_FILTER = '-name "*.test.ts"'
 PY_REPO = "https://github.com/vercel/vercel-py.git"
 PY_CLONE = "/tmp/vercel-py"
