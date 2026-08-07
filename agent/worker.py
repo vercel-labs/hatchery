@@ -12,9 +12,11 @@ a @workflow.step like llm_step (max_retries=0 for non-idempotent ones).
 
 import dataclasses
 import json
+import os
 import typing
 
 import ai
+import vercel.queue
 import vercel.workflow
 
 from agent import parity
@@ -24,6 +26,17 @@ workflow = vercel.workflow.Workflows(
         passthrough_modules=frozenset({"ai"}),
         cleanups=vercel.workflow.sandbox.ALL_CLEANUPS,
     )
+)
+
+# The deployed runtime bootstraps a worker service by looking for celery/
+# dramatiq actors or vercel-workers subscriptions; the vercel.queue consumers
+# that Workflows() registers are neither, so it needs an exported asgi app.
+# Queue pushes arrive as POSTs; this app dispatches them to those consumers.
+# ALL_DEPLOYMENTS matches the workflow world's own client: runs started by an
+# older deployment keep getting acked after a redeploy.
+app = vercel.queue.asgi_app(
+    deployment=vercel.queue.ALL_DEPLOYMENTS,
+    region=os.environ.get("VERCEL_REGION", "iad1"),  # same fallback as the workflow world
 )
 
 MODEL_ID = "gateway:anthropic/claude-sonnet-4.6"
