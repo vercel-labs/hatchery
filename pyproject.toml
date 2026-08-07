@@ -10,14 +10,16 @@ dependencies = [
     "vercel-connect",
     "vercel-internal-core",
     "vercel-oidc[verify]",
+    "vercel-sandbox",
 ]
 
 [tool.uv.sources]
 # vercel-connect is not on pypi yet; its git main also needs git main of the
-# other two (pypi releases lag), so all three pin to the same checkout
+# others (pypi releases lag), so all four pin to the same checkout
 vercel-connect = { git = "https://github.com/vercel/vercel-py.git", subdirectory = "src/vercel-connect" }
 vercel-internal-core = { git = "https://github.com/vercel/vercel-py.git", subdirectory = "src/vercel-internal-core" }
 vercel-oidc = { git = "https://github.com/vercel/vercel-py.git", subdirectory = "src/vercel-oidc" }
+vercel-sandbox = { git = "https://github.com/vercel/vercel-py.git", subdirectory = "src/vercel-sandbox" }
 
 [dependency-groups]
 dev = [

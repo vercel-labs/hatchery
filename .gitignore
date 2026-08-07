@@ -24,3 +24,5 @@ node_modules/
 
 # os / editor
 .DS_Store
+.vercel
+.env*
