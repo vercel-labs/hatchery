@@ -20,7 +20,6 @@ import os
 import typing
 
 import ai
-import vercel.queue
 import vercel.workflow
 from ai.providers.anthropic import tools as anthropic_tools
 from vercel import connect, sandbox
@@ -29,38 +28,10 @@ from agent import parity
 
 workflow = vercel.workflow.Workflows(
     sandbox_policy=vercel.workflow.SandboxPolicy(
-        passthrough_modules=frozenset({"ai"}),
+        passthrough_modules=frozenset({"ai", "opentelemetry"}),
         cleanups=vercel.workflow.sandbox.ALL_CLEANUPS,
     )
 )
-
-# The deployed runtime bootstraps a worker service by looking for celery/
-# dramatiq actors or vercel-workers subscriptions; the vercel.queue consumers
-# that Workflows() registers are neither, so it needs an exported asgi app.
-# Queue pushes arrive as POSTs; this app dispatches them to those consumers.
-# ALL_DEPLOYMENTS matches the workflow world's own client: runs started by an
-# older deployment keep getting acked after a redeploy.
-app = vercel.queue.asgi_app(
-    deployment=vercel.queue.ALL_DEPLOYMENTS,
-    region=os.environ.get("VERCEL_REGION", "iad1"),  # same fallback as the workflow world
-)
-
-# The deployed builder names the queue trigger's consumer group after this
-# module's pyproject entrypoint ("agent.worker:app", encoded) instead of
-# copying the sdk's "default" group (fixed in vercel/vercel#17236, not live
-# yet). Dispatch keys on (consumer_group, topic), so mirror the workflow
-# world's subscriptions under the platform's group too. SanitizedName keeps
-# the group literal (a str would get re-encoded and never match). Delete this
-# once deploys arrive with group "default"; update it if the entrypoint moves.
-_PLATFORM_GROUP = vercel.queue.SanitizedName("__py__workflows_Sagent-worker____app")
-import vercel._internal.workflow.world as _wkf_world  # noqa: E402
-
-if os.environ.get("VERCEL_DEPLOYMENT_ID"):  # local world delivers to every group: skip
-    for _callback in getattr(_wkf_world.get_world(), "_queue_callbacks", []):
-        try:
-            vercel.queue.subscribe(topic="__wkf_*", consumer_group=_PLATFORM_GROUP)(_callback)
-        except vercel.queue.DuplicateSubscriptionError:
-            pass  # the workflow host re-imports this module; the registry is process-global
 
 MODEL_ID = "gateway:anthropic/claude-sonnet-4.6"
 MAX_TURNS = 50  # the first live run used 29 turns; the cap is a runaway stop, not a budget
@@ -146,6 +117,83 @@ async def teardown_step(sandbox_name: str) -> None:
     await box.destroy()
 
 
+@workflow.step(max_retries=0)
+async def start_trace_step() -> dict[str, object] | None:
+    if not ai.experimental_telemetry.is_enabled():
+        return None
+    trace = ai.experimental_telemetry.create_span("parity_workflow").stamp_start()
+    trace.trace_attrs["braintrust.metadata.model"] = MODEL_ID
+    trace.set_attrs(
+        {"braintrust.input": "compare workflow e2e tests across js and python"}
+    )
+    return trace.model_dump(mode="json")
+
+
+@workflow.step(max_retries=0)
+async def finish_trace_step(
+    spans_data: list[dict[str, object]],
+    trace_data: dict[str, object] | None,
+    report: str | None,
+    error_type: str | None,
+    error_message: str | None,
+) -> None:
+    import agent.telemetry as telemetry
+
+    await ai.experimental_telemetry.push_all(spans_data)
+    if trace_data is not None:
+        trace = ai.experimental_telemetry.Span.model_validate(trace_data)
+        if report is not None:
+            trace.set_attrs({"braintrust.output": report})
+        trace.stamp_end(
+            error=ai.experimental_telemetry.SpanError(
+                type=error_type,
+                message=error_message or "",
+            )
+            if error_type is not None
+            else None
+        )
+        await trace.push()
+    telemetry.flush()
+
+
+@workflow.step(max_retries=0)
+async def channel_event_step(
+    delivery_data: dict[str, object],
+    event_type: str,
+    text: str,
+) -> None:
+    import chat
+    import chat.channels.github as github
+    import chat.channels.slack as slack
+
+    channel_name = str(delivery_data["channel"])
+    state = delivery_data["state"]
+    if not isinstance(state, dict):
+        raise TypeError("delivery state must be a dict")
+    if channel_name == "github":
+        channel = github.channel()
+    elif channel_name == "slack":
+        channel = slack.channel()
+    else:
+        raise ValueError(f"unknown delivery channel: {channel_name}")
+    session = chat.Session(
+        id="",
+        token="",
+        channel=channel_name,
+        channel_state=state,
+        created_at="",
+    )
+    if event_type == chat.protocol.MESSAGE_COMPLETED:
+        event = chat.event(event_type, message=text)
+    elif event_type == chat.protocol.STATUS_UPDATED:
+        event = chat.event(event_type, status=text)
+    elif event_type == chat.protocol.TURN_FAILED:
+        event = chat.event(event_type, error=text)
+    else:
+        raise ValueError(f"unsupported channel event: {event_type}")
+    await channel.on_event(event, session)
+
+
 @workflow.step(max_retries=0)  # bash isn't idempotent: let the agent see the failure
 async def bash_step(sandbox_name: str, command: str, timeout: int) -> str:
     box = await sandbox.get_sandbox(name=sandbox_name)
@@ -212,26 +260,52 @@ async def llm_step(
     model_data: dict[str, object],
     messages_data: list[dict[str, object]],
     tools_data: list[dict[str, object]],
+    parent_span_data: dict[str, object] | None,
 ) -> dict[str, object]:
     model = ai.Model.model_validate(model_data)
     messages = [ai.messages.Message.model_validate(m) for m in messages_data]
     tools = [ai.Tool.model_validate(t) for t in tools_data]
-    async with ai.stream(model, messages, tools=tools) as model_stream:
+    parent_span = (
+        ai.experimental_telemetry.Span.model_validate(parent_span_data)
+        if parent_span_data is not None
+        else None
+    )
+    async with (
+        ai.experimental_telemetry.use_span(parent_span),
+        ai.stream(model, messages, tools=tools) as model_stream,
+    ):
         async for _event in model_stream:
             pass
     return model_stream.message.model_dump(mode="json")
 
 
 class ParityAgent(ai.Agent):
+    def __init__(
+        self,
+        *,
+        tools: typing.Sequence[ai.AgentTool | ai.Tool],
+        delivery_data: dict[str, object] | None,
+    ) -> None:
+        super().__init__(tools=tools)
+        self.delivery_data = delivery_data
+
     async def loop(self, context: ai.Context) -> typing.AsyncGenerator[ai.events.AgentEvent, None]:
         tools_data = [tool.model_dump(mode="json") for tool in context.tools]
         for _turn in range(MAX_TURNS):
             if not context.keep_running():
                 return
+            if self.delivery_data is not None:
+                await channel_event_step(
+                    self.delivery_data,
+                    "status.updated",
+                    f"checking parity... turn {_turn + 1}",
+                )
+            parent_span = ai.experimental_telemetry.current_span()
             result = await llm_step(
                 context.model.model_dump(mode="json"),
                 [message.model_dump(mode="json") for message in context.messages],
                 tools_data,
+                parent_span.model_dump(mode="json") if parent_span is not None else None,
             )
             assistant_message = ai.messages.Message.model_validate(result)
             context.add(assistant_message)
@@ -252,18 +326,95 @@ class ParityAgent(ai.Agent):
 
 @workflow.workflow
 @ai.messages.use_random(vercel.workflow.random)
-async def parity_workflow() -> str:
-    box_name = await setup_step()
-    scan = await scan_step(box_name)
-    agent = ParityAgent(tools=[*sandbox_tools(box_name), anthropic_tools.web_search(max_uses=5)])
-    messages = [
-        ai.system_message(SYSTEM_PROMPT),
-        ai.user_message(f"parity scan for {vercel.workflow.now():%Y-%m-%d}:\n" + json.dumps(scan)),
-    ]
-    async with agent.run(ai.get_model(MODEL_ID), messages) as run:
-        async for _event in run:
-            pass
-        final = run.messages[-1]
-        report = final.text if final.role == "assistant" else "agent hit MAX_TURNS without a final report"
-    await teardown_step(box_name)
+@ai.experimental_telemetry.use_time(vercel.workflow.time_ns)
+async def parity_workflow(
+    delivery_data: dict[str, object] | None = None,
+) -> str:
+    trace_data = await start_trace_step()
+    trace = (
+        ai.experimental_telemetry.Span.model_validate(trace_data)
+        if trace_data is not None
+        else None
+    )
+    sink = ai.experimental_telemetry.DictSink() if trace is not None else None
+    box_name: str | None = None
+    try:
+        box_name = await setup_step()
+        scan = await scan_step(box_name)
+        if trace is not None:
+            trace.trace_attrs.update(
+                {
+                    "braintrust.metadata.js_total": scan["js_total"],
+                    "braintrust.metadata.py_total": scan["py_total"],
+                    "braintrust.metadata.missing_count": len(scan["missing"]),
+                }
+            )
+
+        agent = ParityAgent(
+            tools=[
+                *sandbox_tools(box_name),
+                anthropic_tools.web_search(max_uses=5),
+            ],
+            delivery_data=delivery_data,
+        )
+        messages = [
+            ai.system_message(SYSTEM_PROMPT),
+            ai.user_message(
+                f"parity scan for {vercel.workflow.now():%Y-%m-%d}:\n"
+                + json.dumps(scan)
+            ),
+        ]
+        async with (
+            ai.experimental_telemetry.use_sink(sink),
+            ai.experimental_telemetry.use_span(trace),
+            agent.run(ai.get_model(MODEL_ID), messages) as run,
+        ):
+            async for _event in run:
+                pass
+            final = run.messages[-1]
+            report = (
+                final.text
+                if final.role == "assistant"
+                else "agent hit MAX_TURNS without a final report"
+            )
+
+        if delivery_data is not None:
+            await channel_event_step(delivery_data, "message.completed", report)
+        await teardown_step(box_name)
+        box_name = None
+    except Exception as error:
+        if delivery_data is not None:
+            await channel_event_step(
+                delivery_data,
+                "turn.failed",
+                f"{type(error).__name__}: {error}",
+            )
+        if box_name is not None:
+            await teardown_step(box_name)
+        finished = (
+            [span.model_dump(mode="json") for span in sink.finished_spans]
+            if sink is not None
+            else []
+        )
+        await finish_trace_step(
+            finished,
+            trace.model_dump(mode="json") if trace is not None else None,
+            None,
+            type(error).__name__,
+            str(error),
+        )
+        raise
+
+    finished = (
+        [span.model_dump(mode="json") for span in sink.finished_spans]
+        if sink is not None
+        else []
+    )
+    await finish_trace_step(
+        finished,
+        trace.model_dump(mode="json") if trace is not None else None,
+        report,
+        None,
+        None,
+    )
     return report

@@ -17,8 +17,13 @@ from chat.channels import github, slack
 async def handler(turn: chat.Turn) -> None:
     if "parity" in turn.message.content.lower():
         await turn.status("scanning repos...")
-        run = await vercel.workflow.start(worker.parity_workflow)
-        await turn.reply(await run.return_value())
+        await vercel.workflow.start(
+            worker.parity_workflow,
+            {
+                "channel": turn.channel,
+                "state": dict(turn.session.channel_state),
+            },
+        )
         return
     await turn.status("thinking...")
     await turn.reply(f"echo from {turn.channel} (turn {len(turn.session.history) // 2}): {turn.message.content}")

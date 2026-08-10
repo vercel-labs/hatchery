@@ -1,8 +1,12 @@
+import asyncio
+import contextlib
 import dataclasses
 import json
 from unittest import mock
 
-from agent import parity, worker
+import pytest
+
+from agent import parity, telemetry, worker
 
 
 @dataclasses.dataclass
@@ -73,6 +77,106 @@ async def test_teardown_step_destroys(monkeypatch):
     assert box.destroyed
 
 
+async def test_llm_step_exports_spans_under_serialized_parent(monkeypatch):
+    class FakeModelStream:
+        message = worker.ai.assistant_message("done")
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    @contextlib.asynccontextmanager
+    async def fake_stream(*args, **kwargs):
+        async with worker.ai.experimental_telemetry.span("fake_model"):
+            yield FakeModelStream()
+
+    monkeypatch.setattr(worker.ai, "stream", fake_stream)
+    sink = worker.ai.experimental_telemetry.DictSink()
+    async with worker.ai.experimental_telemetry.use_sink(sink):
+        parent = worker.ai.experimental_telemetry.create_span("agent").stamp_start()
+
+    child_sink = worker.ai.experimental_telemetry.DictSink()
+    async with worker.ai.experimental_telemetry.use_sink(child_sink):
+        result = await worker.llm_step.func(
+            worker.ai.get_model(worker.MODEL_ID).model_dump(mode="json"),
+            [worker.ai.user_message("hello").model_dump(mode="json")],
+            [],
+            parent.model_dump(mode="json"),
+        )
+
+    assert worker.ai.messages.Message.model_validate(result).text == "done"
+    [span] = child_sink.finished_spans
+    assert span.name == "fake_model"
+    assert span.parent_id == parent.id
+    assert span.trace_id == parent.trace_id
+
+
+async def test_finish_trace_pushes_and_flushes(monkeypatch):
+    push_all = mock.AsyncMock()
+    flush = mock.Mock()
+    monkeypatch.setattr(worker.ai.experimental_telemetry, "push_all", push_all)
+    monkeypatch.setattr(telemetry, "flush", flush)
+    sink = worker.ai.experimental_telemetry.DictSink()
+    async with worker.ai.experimental_telemetry.use_sink(sink):
+        trace = worker.ai.experimental_telemetry.create_span("root").stamp_start()
+
+    spans = [{"id": "span-1"}]
+    await worker.finish_trace_step.func(
+        spans,
+        trace.model_dump(mode="json"),
+        "done",
+        None,
+        None,
+    )
+
+    push_all.assert_awaited_once_with(spans)
+    flush.assert_called_once_with()
+
+
+async def test_channel_event_step_sends_completed_event(monkeypatch):
+    import chat.channels.github as github
+    import chat.channels.slack as slack
+
+    slack_channel = mock.Mock()
+    slack_channel.on_event = mock.AsyncMock()
+    monkeypatch.setattr(slack, "channel", mock.Mock(return_value=slack_channel))
+    monkeypatch.setattr(github, "channel", mock.Mock())
+
+    state = {"channel_id": "C1", "thread_ts": "1.0"}
+    await worker.channel_event_step.func(
+        {"channel": "slack", "state": state}, "message.completed", "done"
+    )
+
+    event = slack_channel.on_event.await_args.args[0]
+    session = slack_channel.on_event.await_args.args[1]
+    assert event.type == "message.completed"
+    assert event.data["message"] == "done"
+    assert session.channel_state == state
+
+
+async def test_workflow_suspension_does_not_finish_trace_or_deliver(monkeypatch):
+    monkeypatch.setattr(worker, "start_trace_step", mock.AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        worker, "setup_step", mock.AsyncMock(side_effect=asyncio.CancelledError)
+    )
+    teardown = mock.AsyncMock()
+    finish_trace = mock.AsyncMock()
+    channel_event = mock.AsyncMock()
+    monkeypatch.setattr(worker, "teardown_step", teardown)
+    monkeypatch.setattr(worker, "finish_trace_step", finish_trace)
+    monkeypatch.setattr(worker, "channel_event_step", channel_event)
+    workflow_body = worker.parity_workflow.func.__wrapped__.__wrapped__
+
+    with pytest.raises(asyncio.CancelledError):
+        await workflow_body({"channel": "slack", "state": {}})
+
+    teardown.assert_not_awaited()
+    finish_trace.assert_not_awaited()
+    channel_event.assert_not_awaited()
+
+
 def test_sandbox_tools_hide_the_sandbox_name():
     tools = worker.sandbox_tools("box-1")
     assert [t.name for t in tools] == ["bash", "read_file", "write_file"]
@@ -95,5 +199,8 @@ def test_registry():
         worker.read_file_step,
         worker.write_file_step,
         worker.teardown_step,
+        worker.start_trace_step,
+        worker.finish_trace_step,
+        worker.channel_event_step,
     ):
         assert step.name in worker.workflow._steps
