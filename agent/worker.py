@@ -92,6 +92,10 @@ by normalized name). Spot-check a few missing tests against the real files,
 check github for existing porting issues or prs, then write a short parity
 report: the counts, one or two sentences on what the missing tests cover,
 and anything surprising. Be terse. Plain sentences, no headers.
+
+Note that this is a test run. If something doesn't work as stated here, e.g.
+repos aren't where they belong, tools don't work, etc., include that with details
+in the report for debugging.
 """
 
 
