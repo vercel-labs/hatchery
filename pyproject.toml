@@ -39,9 +39,9 @@ entrypoint = "main:app"
 # docs' `module:registry` form relies on vercel<=0.7.x registering consumers
 # via vercel-workers, which the runtime's worker bootstrap discovers and
 # serves. vercel 0.8.x registers via vercel.queue, which that bootstrap can't
-# see, so the module exports the queue push app itself (agent/worker.py).
+# see, so the runtime module exports the queue push app itself.
 [[tool.vercel.workflows]]
-entrypoint = "agent.worker:app"
+entrypoint = "agent.runtime:app"
 
 [tool.uv]
 package = false

@@ -20,8 +20,6 @@ import os
 import typing
 
 import ai
-import ai.experimental_telemetry.otel
-import vercel.queue
 import vercel.workflow
 from ai.providers.anthropic import tools as anthropic_tools
 from vercel import connect, sandbox
@@ -30,38 +28,10 @@ from agent import parity
 
 workflow = vercel.workflow.Workflows(
     sandbox_policy=vercel.workflow.SandboxPolicy(
-        passthrough_modules=frozenset({"ai"}),
+        passthrough_modules=frozenset({"ai", "opentelemetry"}),
         cleanups=vercel.workflow.sandbox.ALL_CLEANUPS,
     )
 )
-
-# The deployed runtime bootstraps a worker service by looking for celery/
-# dramatiq actors or vercel-workers subscriptions; the vercel.queue consumers
-# that Workflows() registers are neither, so it needs an exported asgi app.
-# Queue pushes arrive as POSTs; this app dispatches them to those consumers.
-# ALL_DEPLOYMENTS matches the workflow world's own client: runs started by an
-# older deployment keep getting acked after a redeploy.
-app = vercel.queue.asgi_app(
-    deployment=vercel.queue.ALL_DEPLOYMENTS,
-    region=os.environ.get("VERCEL_REGION", "iad1"),  # same fallback as the workflow world
-)
-
-# The deployed builder names the queue trigger's consumer group after this
-# module's pyproject entrypoint ("agent.worker:app", encoded) instead of
-# copying the sdk's "default" group (fixed in vercel/vercel#17236, not live
-# yet). Dispatch keys on (consumer_group, topic), so mirror the workflow
-# world's subscriptions under the platform's group too. SanitizedName keeps
-# the group literal (a str would get re-encoded and never match). Delete this
-# once deploys arrive with group "default"; update it if the entrypoint moves.
-_PLATFORM_GROUP = vercel.queue.SanitizedName("__py__workflows_Sagent-worker____app")
-import vercel._internal.workflow.world as _wkf_world  # noqa: E402
-
-if os.environ.get("VERCEL_DEPLOYMENT_ID"):  # local world delivers to every group: skip
-    for _callback in getattr(_wkf_world.get_world(), "_queue_callbacks", []):
-        try:
-            vercel.queue.subscribe(topic="__wkf_*", consumer_group=_PLATFORM_GROUP)(_callback)
-        except vercel.queue.DuplicateSubscriptionError:
-            pass  # the workflow host re-imports this module; the registry is process-global
 
 MODEL_ID = "gateway:anthropic/claude-sonnet-4.6"
 MAX_TURNS = 50  # the first live run used 29 turns; the cap is a runaway stop, not a budget
@@ -98,51 +68,6 @@ Note that this is a test run. If something doesn't work as stated here, e.g.
 repos aren't where they belong, tools don't work, etc., include that with details
 in the report for debugging.
 """
-
-
-class _BraintrustAdapter(ai.experimental_telemetry.otel.OtelAdapter):
-    def span_attrs(self, span: ai.experimental_telemetry.Span) -> dict[str, object]:
-        return super().span_attrs(span) | {
-            "braintrust.metadata.vercel_deployment_id": os.environ.get(
-                "VERCEL_DEPLOYMENT_ID", "local"
-            ),
-            "braintrust.metadata.vercel_environment": os.environ.get(
-                "VERCEL_ENV", "development"
-            ),
-            "braintrust.metadata.git_commit_sha": os.environ.get(
-                "VERCEL_GIT_COMMIT_SHA", ""
-            ),
-        }
-
-
-_TELEMETRY_ADAPTER: _BraintrustAdapter | None = None
-
-
-def _configure_telemetry() -> _BraintrustAdapter | None:
-    global _TELEMETRY_ADAPTER
-    if _TELEMETRY_ADAPTER is not None:
-        return _TELEMETRY_ADAPTER
-
-    api_key = os.environ.get("BRAINTRUST_API_KEY")
-    project_id = os.environ.get("BRAINTRUST_PROJECT_ID")
-    if not api_key or not project_id:
-        return None
-
-    import braintrust.otel
-    import opentelemetry.sdk.trace
-
-    provider = opentelemetry.sdk.trace.TracerProvider()
-    provider.add_span_processor(
-        braintrust.otel.BraintrustSpanProcessor(
-            api_key=api_key,
-            parent=f"project_id:{project_id}",
-            filter_ai_spans=False,
-        )
-    )
-    adapter = _BraintrustAdapter(tracer_provider=provider)
-    ai.experimental_telemetry.register(adapter)
-    _TELEMETRY_ADAPTER = adapter
-    return _TELEMETRY_ADAPTER
 
 
 @workflow.step
@@ -192,12 +117,12 @@ async def teardown_step(sandbox_name: str) -> None:
     await box.destroy()
 
 
-@workflow.step
+@workflow.step(max_retries=0)
 async def report_spans_step(spans_data: list[dict[str, object]]) -> None:
-    adapter = _configure_telemetry()
+    import agent.telemetry as telemetry
+
     await ai.experimental_telemetry.push_all(spans_data)
-    if adapter is not None:
-        adapter.flush()
+    telemetry.flush()
 
 
 @workflow.step(max_retries=0)  # bash isn't idempotent: let the agent see the failure
@@ -276,18 +201,13 @@ async def llm_step(
         if parent_span_data is not None
         else None
     )
-    sink = ai.experimental_telemetry.DictSink()
     async with (
-        ai.experimental_telemetry.use_sink(sink),
         ai.experimental_telemetry.use_span(parent_span),
+        ai.stream(model, messages, tools=tools) as model_stream,
     ):
-        async with ai.stream(model, messages, tools=tools) as model_stream:
-            async for _event in model_stream:
-                pass
-    return {
-        "message": model_stream.message.model_dump(mode="json"),
-        "spans": [span.model_dump(mode="json") for span in sink.finished_spans],
-    }
+        async for _event in model_stream:
+            pass
+    return model_stream.message.model_dump(mode="json")
 
 
 class ParityAgent(ai.Agent):
@@ -303,8 +223,7 @@ class ParityAgent(ai.Agent):
                 tools_data,
                 parent_span.model_dump(mode="json") if parent_span is not None else None,
             )
-            await ai.experimental_telemetry.push_all(result["spans"])
-            assistant_message = ai.messages.Message.model_validate(result["message"])
+            assistant_message = ai.messages.Message.model_validate(result)
             context.add(assistant_message)
 
             async with ai.Stream.replay_message(assistant_message) as replay:
@@ -383,6 +302,6 @@ async def parity_workflow() -> str:
                         async with ai.experimental_telemetry.span("teardown"):
                             await teardown_step(box_name)
     finally:
-        await report_spans_step(
-            [span.model_dump(mode="json") for span in sink.finished_spans]
-        )
+        finished = [span.model_dump(mode="json") for span in sink.finished_spans]
+        if finished:
+            await report_spans_step(finished)
