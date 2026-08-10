@@ -20,6 +20,9 @@ import os
 import typing
 
 import ai
+import ai.experimental_telemetry.otel
+import braintrust.otel
+import opentelemetry.sdk.trace
 import vercel.queue
 import vercel.workflow
 from ai.providers.anthropic import tools as anthropic_tools
@@ -99,6 +102,43 @@ in the report for debugging.
 """
 
 
+class _BraintrustAdapter(ai.experimental_telemetry.otel.OtelAdapter):
+    def span_attrs(self, span: ai.experimental_telemetry.Span) -> dict[str, object]:
+        return super().span_attrs(span) | {
+            "braintrust.metadata.vercel_deployment_id": os.environ.get(
+                "VERCEL_DEPLOYMENT_ID", "local"
+            ),
+            "braintrust.metadata.vercel_environment": os.environ.get(
+                "VERCEL_ENV", "development"
+            ),
+            "braintrust.metadata.git_commit_sha": os.environ.get(
+                "VERCEL_GIT_COMMIT_SHA", ""
+            ),
+        }
+
+
+def _configure_telemetry() -> _BraintrustAdapter | None:
+    api_key = os.environ.get("BRAINTRUST_API_KEY")
+    project_id = os.environ.get("BRAINTRUST_PROJECT_ID")
+    if not api_key or not project_id:
+        return None
+
+    provider = opentelemetry.sdk.trace.TracerProvider()
+    provider.add_span_processor(
+        braintrust.otel.BraintrustSpanProcessor(
+            api_key=api_key,
+            parent=f"project_id:{project_id}",
+            filter_ai_spans=False,
+        )
+    )
+    adapter = _BraintrustAdapter(tracer_provider=provider)
+    ai.experimental_telemetry.register(adapter)
+    return adapter
+
+
+_TELEMETRY_ADAPTER = _configure_telemetry()
+
+
 @workflow.step
 async def setup_step() -> str:
     """Create this run's sandbox with both repos in it; return its name.
@@ -144,6 +184,13 @@ async def scan_step(sandbox_name: str) -> dict:
 async def teardown_step(sandbox_name: str) -> None:
     box = await sandbox.get_sandbox(name=sandbox_name)
     await box.destroy()
+
+
+@workflow.step
+async def report_spans_step(spans_data: list[dict[str, object]]) -> None:
+    await ai.experimental_telemetry.push_all(spans_data)
+    if _TELEMETRY_ADAPTER is not None:
+        _TELEMETRY_ADAPTER.flush()
 
 
 @workflow.step(max_retries=0)  # bash isn't idempotent: let the agent see the failure
@@ -212,14 +259,28 @@ async def llm_step(
     model_data: dict[str, object],
     messages_data: list[dict[str, object]],
     tools_data: list[dict[str, object]],
+    parent_span_data: dict[str, object] | None,
 ) -> dict[str, object]:
     model = ai.Model.model_validate(model_data)
     messages = [ai.messages.Message.model_validate(m) for m in messages_data]
     tools = [ai.Tool.model_validate(t) for t in tools_data]
-    async with ai.stream(model, messages, tools=tools) as model_stream:
-        async for _event in model_stream:
-            pass
-    return model_stream.message.model_dump(mode="json")
+    parent_span = (
+        ai.experimental_telemetry.Span.model_validate(parent_span_data)
+        if parent_span_data is not None
+        else None
+    )
+    sink = ai.experimental_telemetry.DictSink()
+    async with (
+        ai.experimental_telemetry.use_sink(sink),
+        ai.experimental_telemetry.use_span(parent_span),
+    ):
+        async with ai.stream(model, messages, tools=tools) as model_stream:
+            async for _event in model_stream:
+                pass
+    return {
+        "message": model_stream.message.model_dump(mode="json"),
+        "spans": [span.model_dump(mode="json") for span in sink.finished_spans],
+    }
 
 
 class ParityAgent(ai.Agent):
@@ -228,12 +289,15 @@ class ParityAgent(ai.Agent):
         for _turn in range(MAX_TURNS):
             if not context.keep_running():
                 return
+            parent_span = ai.experimental_telemetry.current_span()
             result = await llm_step(
                 context.model.model_dump(mode="json"),
                 [message.model_dump(mode="json") for message in context.messages],
                 tools_data,
+                parent_span.model_dump(mode="json") if parent_span is not None else None,
             )
-            assistant_message = ai.messages.Message.model_validate(result)
+            await ai.experimental_telemetry.push_all(result["spans"])
+            assistant_message = ai.messages.Message.model_validate(result["message"])
             context.add(assistant_message)
 
             async with ai.Stream.replay_message(assistant_message) as replay:
@@ -252,18 +316,66 @@ class ParityAgent(ai.Agent):
 
 @workflow.workflow
 @ai.messages.use_random(vercel.workflow.random)
+@ai.experimental_telemetry.use_time(vercel.workflow.time_ns)
 async def parity_workflow() -> str:
-    box_name = await setup_step()
-    scan = await scan_step(box_name)
-    agent = ParityAgent(tools=[*sandbox_tools(box_name), anthropic_tools.web_search(max_uses=5)])
-    messages = [
-        ai.system_message(SYSTEM_PROMPT),
-        ai.user_message(f"parity scan for {vercel.workflow.now():%Y-%m-%d}:\n" + json.dumps(scan)),
-    ]
-    async with agent.run(ai.get_model(MODEL_ID), messages) as run:
-        async for _event in run:
-            pass
-        final = run.messages[-1]
-        report = final.text if final.role == "assistant" else "agent hit MAX_TURNS without a final report"
-    await teardown_step(box_name)
-    return report
+    sink = ai.experimental_telemetry.DictSink()
+    try:
+        async with ai.experimental_telemetry.use_sink(sink):
+            async with ai.experimental_telemetry.span("parity_workflow") as trace:
+                trace.trace_attrs["braintrust.metadata.model"] = MODEL_ID
+                trace.set_attrs(
+                    {"braintrust.input": "compare workflow e2e tests across js and python"}
+                )
+                box_name: str | None = None
+                try:
+                    async with ai.experimental_telemetry.span("setup") as setup_span:
+                        box_name = await setup_step()
+                        setup_span.set_attrs(sandbox_name=box_name)
+
+                    async with ai.experimental_telemetry.span("scan") as scan_span:
+                        scan = await scan_step(box_name)
+                        counts = {
+                            "js_total": scan["js_total"],
+                            "py_total": scan["py_total"],
+                            "missing_count": len(scan["missing"]),
+                        }
+                        scan_span.set_attrs(counts)
+                        trace.trace_attrs.update(
+                            {
+                                f"braintrust.metadata.{key}": value
+                                for key, value in counts.items()
+                            }
+                        )
+
+                    agent = ParityAgent(
+                        tools=[
+                            *sandbox_tools(box_name),
+                            anthropic_tools.web_search(max_uses=5),
+                        ]
+                    )
+                    messages = [
+                        ai.system_message(SYSTEM_PROMPT),
+                        ai.user_message(
+                            f"parity scan for {vercel.workflow.now():%Y-%m-%d}:\n"
+                            + json.dumps(scan)
+                        ),
+                    ]
+                    async with agent.run(ai.get_model(MODEL_ID), messages) as run:
+                        async for _event in run:
+                            pass
+                        final = run.messages[-1]
+                        report = (
+                            final.text
+                            if final.role == "assistant"
+                            else "agent hit MAX_TURNS without a final report"
+                        )
+                    trace.set_attrs({"braintrust.output": report})
+                    return report
+                finally:
+                    if box_name is not None:
+                        async with ai.experimental_telemetry.span("teardown"):
+                            await teardown_step(box_name)
+    finally:
+        await report_spans_step(
+            [span.model_dump(mode="json") for span in sink.finished_spans]
+        )
