@@ -118,11 +118,80 @@ async def teardown_step(sandbox_name: str) -> None:
 
 
 @workflow.step(max_retries=0)
-async def report_spans_step(spans_data: list[dict[str, object]]) -> None:
+async def start_trace_step() -> dict[str, object] | None:
+    if not ai.experimental_telemetry.is_enabled():
+        return None
+    trace = ai.experimental_telemetry.create_span("parity_workflow").stamp_start()
+    trace.trace_attrs["braintrust.metadata.model"] = MODEL_ID
+    trace.set_attrs(
+        {"braintrust.input": "compare workflow e2e tests across js and python"}
+    )
+    return trace.model_dump(mode="json")
+
+
+@workflow.step(max_retries=0)
+async def finish_trace_step(
+    spans_data: list[dict[str, object]],
+    trace_data: dict[str, object] | None,
+    report: str | None,
+    error_type: str | None,
+    error_message: str | None,
+) -> None:
     import agent.telemetry as telemetry
 
     await ai.experimental_telemetry.push_all(spans_data)
+    if trace_data is not None:
+        trace = ai.experimental_telemetry.Span.model_validate(trace_data)
+        if report is not None:
+            trace.set_attrs({"braintrust.output": report})
+        trace.stamp_end(
+            error=ai.experimental_telemetry.SpanError(
+                type=error_type,
+                message=error_message or "",
+            )
+            if error_type is not None
+            else None
+        )
+        await trace.push()
     telemetry.flush()
+
+
+@workflow.step(max_retries=0)
+async def channel_event_step(
+    delivery_data: dict[str, object],
+    event_type: str,
+    text: str,
+) -> None:
+    import chat
+    import chat.channels.github as github
+    import chat.channels.slack as slack
+
+    channel_name = str(delivery_data["channel"])
+    state = delivery_data["state"]
+    if not isinstance(state, dict):
+        raise TypeError("delivery state must be a dict")
+    if channel_name == "github":
+        channel = github.channel()
+    elif channel_name == "slack":
+        channel = slack.channel()
+    else:
+        raise ValueError(f"unknown delivery channel: {channel_name}")
+    session = chat.Session(
+        id="",
+        token="",
+        channel=channel_name,
+        channel_state=state,
+        created_at="",
+    )
+    if event_type == chat.protocol.MESSAGE_COMPLETED:
+        event = chat.event(event_type, message=text)
+    elif event_type == chat.protocol.STATUS_UPDATED:
+        event = chat.event(event_type, status=text)
+    elif event_type == chat.protocol.TURN_FAILED:
+        event = chat.event(event_type, error=text)
+    else:
+        raise ValueError(f"unsupported channel event: {event_type}")
+    await channel.on_event(event, session)
 
 
 @workflow.step(max_retries=0)  # bash isn't idempotent: let the agent see the failure
@@ -211,11 +280,26 @@ async def llm_step(
 
 
 class ParityAgent(ai.Agent):
+    def __init__(
+        self,
+        *,
+        tools: typing.Sequence[ai.AgentTool | ai.Tool],
+        delivery_data: dict[str, object] | None,
+    ) -> None:
+        super().__init__(tools=tools)
+        self.delivery_data = delivery_data
+
     async def loop(self, context: ai.Context) -> typing.AsyncGenerator[ai.events.AgentEvent, None]:
         tools_data = [tool.model_dump(mode="json") for tool in context.tools]
         for _turn in range(MAX_TURNS):
             if not context.keep_running():
                 return
+            if self.delivery_data is not None:
+                await channel_event_step(
+                    self.delivery_data,
+                    "status.updated",
+                    f"checking parity... turn {_turn + 1}",
+                )
             parent_span = ai.experimental_telemetry.current_span()
             result = await llm_step(
                 context.model.model_dump(mode="json"),
@@ -243,65 +327,94 @@ class ParityAgent(ai.Agent):
 @workflow.workflow
 @ai.messages.use_random(vercel.workflow.random)
 @ai.experimental_telemetry.use_time(vercel.workflow.time_ns)
-async def parity_workflow() -> str:
-    sink = ai.experimental_telemetry.DictSink()
+async def parity_workflow(
+    delivery_data: dict[str, object] | None = None,
+) -> str:
+    trace_data = await start_trace_step()
+    trace = (
+        ai.experimental_telemetry.Span.model_validate(trace_data)
+        if trace_data is not None
+        else None
+    )
+    sink = ai.experimental_telemetry.DictSink() if trace is not None else None
+    box_name: str | None = None
     try:
-        async with ai.experimental_telemetry.use_sink(sink):
-            async with ai.experimental_telemetry.span("parity_workflow") as trace:
-                trace.trace_attrs["braintrust.metadata.model"] = MODEL_ID
-                trace.set_attrs(
-                    {"braintrust.input": "compare workflow e2e tests across js and python"}
-                )
-                box_name: str | None = None
-                try:
-                    async with ai.experimental_telemetry.span("setup") as setup_span:
-                        box_name = await setup_step()
-                        setup_span.set_attrs(sandbox_name=box_name)
+        box_name = await setup_step()
+        scan = await scan_step(box_name)
+        if trace is not None:
+            trace.trace_attrs.update(
+                {
+                    "braintrust.metadata.js_total": scan["js_total"],
+                    "braintrust.metadata.py_total": scan["py_total"],
+                    "braintrust.metadata.missing_count": len(scan["missing"]),
+                }
+            )
 
-                    async with ai.experimental_telemetry.span("scan") as scan_span:
-                        scan = await scan_step(box_name)
-                        counts = {
-                            "js_total": scan["js_total"],
-                            "py_total": scan["py_total"],
-                            "missing_count": len(scan["missing"]),
-                        }
-                        scan_span.set_attrs(counts)
-                        trace.trace_attrs.update(
-                            {
-                                f"braintrust.metadata.{key}": value
-                                for key, value in counts.items()
-                            }
-                        )
+        agent = ParityAgent(
+            tools=[
+                *sandbox_tools(box_name),
+                anthropic_tools.web_search(max_uses=5),
+            ],
+            delivery_data=delivery_data,
+        )
+        messages = [
+            ai.system_message(SYSTEM_PROMPT),
+            ai.user_message(
+                f"parity scan for {vercel.workflow.now():%Y-%m-%d}:\n"
+                + json.dumps(scan)
+            ),
+        ]
+        async with (
+            ai.experimental_telemetry.use_sink(sink),
+            ai.experimental_telemetry.use_span(trace),
+            agent.run(ai.get_model(MODEL_ID), messages) as run,
+        ):
+            async for _event in run:
+                pass
+            final = run.messages[-1]
+            report = (
+                final.text
+                if final.role == "assistant"
+                else "agent hit MAX_TURNS without a final report"
+            )
 
-                    agent = ParityAgent(
-                        tools=[
-                            *sandbox_tools(box_name),
-                            anthropic_tools.web_search(max_uses=5),
-                        ]
-                    )
-                    messages = [
-                        ai.system_message(SYSTEM_PROMPT),
-                        ai.user_message(
-                            f"parity scan for {vercel.workflow.now():%Y-%m-%d}:\n"
-                            + json.dumps(scan)
-                        ),
-                    ]
-                    async with agent.run(ai.get_model(MODEL_ID), messages) as run:
-                        async for _event in run:
-                            pass
-                        final = run.messages[-1]
-                        report = (
-                            final.text
-                            if final.role == "assistant"
-                            else "agent hit MAX_TURNS without a final report"
-                        )
-                    trace.set_attrs({"braintrust.output": report})
-                    return report
-                finally:
-                    if box_name is not None:
-                        async with ai.experimental_telemetry.span("teardown"):
-                            await teardown_step(box_name)
-    finally:
-        finished = [span.model_dump(mode="json") for span in sink.finished_spans]
-        if finished:
-            await report_spans_step(finished)
+        if delivery_data is not None:
+            await channel_event_step(delivery_data, "message.completed", report)
+        await teardown_step(box_name)
+        box_name = None
+    except Exception as error:
+        if delivery_data is not None:
+            await channel_event_step(
+                delivery_data,
+                "turn.failed",
+                f"{type(error).__name__}: {error}",
+            )
+        if box_name is not None:
+            await teardown_step(box_name)
+        finished = (
+            [span.model_dump(mode="json") for span in sink.finished_spans]
+            if sink is not None
+            else []
+        )
+        await finish_trace_step(
+            finished,
+            trace.model_dump(mode="json") if trace is not None else None,
+            None,
+            type(error).__name__,
+            str(error),
+        )
+        raise
+
+    finished = (
+        [span.model_dump(mode="json") for span in sink.finished_spans]
+        if sink is not None
+        else []
+    )
+    await finish_trace_step(
+        finished,
+        trace.model_dump(mode="json") if trace is not None else None,
+        report,
+        None,
+        None,
+    )
+    return report
