@@ -101,22 +101,14 @@ class FakeBox:
         self.calls.append((command, tuple(args or ())))
         return FakeProcess(stdout=self.dumps.pop(0) if command == "sh" else "")
 
-    async def __aenter__(self):
-        return self
 
-    async def __aexit__(self, *exc):
-        return False
-
-
-async def test_scan_clones_dumps_and_diffs(monkeypatch):
+async def test_scan_dumps_and_diffs():
     js_dump = "\x00./e2e.test.ts\ntest('fooWorkflow', fn);\ntest('barWorkflow', fn);"
     py_dump = "\x00./src/vercel/tests/e2e/test_e2e.py\ndef test_foo_workflow():\n    pass"
     box = FakeBox(dumps=[js_dump, py_dump])
-    monkeypatch.setattr(parity.sandbox, "create_sandbox", lambda **kwargs: box)
 
-    result = await parity.scan()
+    result = await parity.scan(box)
 
-    assert box.calls[0] == ("git", ("clone", "--depth=1", parity.PY_REPO, parity.PY_CLONE))
     assert result.js == [
         parity.Test("e2e.test.ts", "fooWorkflow"),
         parity.Test("e2e.test.ts", "barWorkflow"),
@@ -125,11 +117,10 @@ async def test_scan_clones_dumps_and_diffs(monkeypatch):
     assert [t.title for t in result.missing] == ["barWorkflow"]
 
 
-async def test_scan_with_no_python_tests(monkeypatch):
+async def test_scan_with_no_python_tests():
     box = FakeBox(dumps=["\x00./e2e.test.ts\ntest('fooWorkflow', fn);", ""])
-    monkeypatch.setattr(parity.sandbox, "create_sandbox", lambda **kwargs: box)
 
-    result = await parity.scan()
+    result = await parity.scan(box)
 
     assert result.py == []
     assert [t.title for t in result.missing] == ["fooWorkflow"]
