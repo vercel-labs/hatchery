@@ -1,11 +1,12 @@
 """The parity scan: which js e2e tests have no python counterpart.
 
-Plain code, no llm. `scan()` spins up a Vercel Sandbox with the js workflow
-repo as its git source, clones the python repo next to it, dumps the test
-files, and diffs test declarations by normalized name (`fooBarWorkflow`
-matches `test_foo_bar_workflow`). The python side has no e2e tests yet, so
-today the report lists every js test; the porting agent will consume this
-diff one test at a time.
+Plain code, no llm. `scan(box)` runs against a sandbox that already has both
+repos in it (the workflow's setup step provisions it: js repo as the git
+source, python repo cloned to PY_CLONE), dumps the test files, and diffs test
+declarations by normalized name (`fooBarWorkflow` matches
+`test_foo_bar_workflow`). The python side has no e2e tests yet, so today the
+report lists every js test; the porting agent will consume this diff one test
+at a time.
 
 Parsing is regex over file contents, so exotic vitest constructs (deeply
 nested `test.each` tables) can be missed — fine for a signal, the porting
@@ -13,7 +14,6 @@ step reads the real files anyway.
 """
 
 import dataclasses
-import datetime
 import re
 
 from vercel import sandbox
@@ -66,16 +66,9 @@ class Report:
         return "\n".join(lines)
 
 
-async def scan() -> Report:
-    async with sandbox.create_sandbox(
-        source=sandbox.GitSource(url=JS_REPO, depth=1),
-        execution_time_limit=datetime.timedelta(minutes=5),
-    ) as box:
-        await box.run_process(
-            "git", ["clone", "--depth=1", PY_REPO, PY_CLONE], capture_output=True, check=True
-        )
-        js_files = await _files(box, JS_TESTS, JS_FILTER)
-        py_files = await _files(box, PY_CLONE, PY_FILTER)
+async def scan(box: sandbox.Sandbox) -> Report:
+    js_files = await _files(box, JS_TESTS, JS_FILTER)
+    py_files = await _files(box, PY_CLONE, PY_FILTER)
     return Report(
         js=[Test(f, m.group(2)) for f, c in js_files.items() for m in _VITEST.finditer(c)],
         py=[Test(f, m.group(1)) for f, c in py_files.items() for m in _PYTEST.finditer(c)],
