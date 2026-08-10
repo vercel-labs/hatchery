@@ -1,7 +1,10 @@
 import contextlib
 import dataclasses
+import importlib
 import json
 from unittest import mock
+
+import vercel._internal.workflow.py_sandbox
 
 from agent import parity, worker
 
@@ -146,3 +149,13 @@ def test_registry():
         worker.report_spans_step,
     ):
         assert step.name in worker.workflow._steps
+
+
+def test_worker_imports_inside_workflow_sandbox():
+    policy = vercel._internal.workflow.py_sandbox.SandboxPolicy(
+        passthrough_modules=frozenset({"ai"})
+    )
+    with vercel._internal.workflow.py_sandbox.workflow_sandbox(policy=policy):
+        imported = importlib.import_module("agent.worker")
+
+    assert imported.parity_workflow.workflow_id

@@ -21,8 +21,6 @@ import typing
 
 import ai
 import ai.experimental_telemetry.otel
-import braintrust.otel
-import opentelemetry.sdk.trace
 import vercel.queue
 import vercel.workflow
 from ai.providers.anthropic import tools as anthropic_tools
@@ -117,11 +115,21 @@ class _BraintrustAdapter(ai.experimental_telemetry.otel.OtelAdapter):
         }
 
 
+_TELEMETRY_ADAPTER: _BraintrustAdapter | None = None
+
+
 def _configure_telemetry() -> _BraintrustAdapter | None:
+    global _TELEMETRY_ADAPTER
+    if _TELEMETRY_ADAPTER is not None:
+        return _TELEMETRY_ADAPTER
+
     api_key = os.environ.get("BRAINTRUST_API_KEY")
     project_id = os.environ.get("BRAINTRUST_PROJECT_ID")
     if not api_key or not project_id:
         return None
+
+    import braintrust.otel
+    import opentelemetry.sdk.trace
 
     provider = opentelemetry.sdk.trace.TracerProvider()
     provider.add_span_processor(
@@ -133,10 +141,8 @@ def _configure_telemetry() -> _BraintrustAdapter | None:
     )
     adapter = _BraintrustAdapter(tracer_provider=provider)
     ai.experimental_telemetry.register(adapter)
-    return adapter
-
-
-_TELEMETRY_ADAPTER = _configure_telemetry()
+    _TELEMETRY_ADAPTER = adapter
+    return _TELEMETRY_ADAPTER
 
 
 @workflow.step
@@ -188,9 +194,10 @@ async def teardown_step(sandbox_name: str) -> None:
 
 @workflow.step
 async def report_spans_step(spans_data: list[dict[str, object]]) -> None:
+    adapter = _configure_telemetry()
     await ai.experimental_telemetry.push_all(spans_data)
-    if _TELEMETRY_ADAPTER is not None:
-        _TELEMETRY_ADAPTER.flush()
+    if adapter is not None:
+        adapter.flush()
 
 
 @workflow.step(max_retries=0)  # bash isn't idempotent: let the agent see the failure
