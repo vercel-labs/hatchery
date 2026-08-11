@@ -6,10 +6,12 @@ vercel has python sdks that match the javascript sdks:
 - sandbox
 - connect
 - blob
-- ... whatever else
+- oidc
 
-this is a github bot that automatically detects new e2e tests that are in the js version
-but not in python, and makes a pr that ports the test.
+those consume the same backend api.
+
+this is a github bot that automatically detects new e2e tests for this sdk to backend
+interaction, both in js and python, and makes a pr that creates a counterpart.
 
 1. deplyed to vercel, uses vercel cron for periodic invocation
 2. fastapi
