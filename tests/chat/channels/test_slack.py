@@ -66,7 +66,7 @@ def mention(text: str = "<@UBOT> hello", **overrides) -> dict:
 
 async def handled(webhook: chat.Webhook, bus: FakeBus | None = None) -> tuple[chat.Ack, FakeBus]:
     bus = bus or FakeBus()
-    ack = await slack.channel(connector="slack/e2e-bot").handle(webhook, bus)
+    ack = await slack.channel(connector="slack/fabricator").handle(webhook, bus)
     if ack.work is not None:
         await ack.work
     return ack, bus
@@ -136,7 +136,7 @@ def api_channel(calls: list) -> slack.SlackChannel:
         calls.append(request)
         return httpx.Response(200, json={"ok": True})
 
-    return slack.channel(connector="slack/e2e-bot", transport=httpx.MockTransport(responder))
+    return slack.channel(connector="slack/fabricator", transport=httpx.MockTransport(responder))
 
 
 def sess() -> chat.Session:
@@ -154,7 +154,7 @@ async def test_turn_started_sets_typing_status_with_connect_token(connect_stub):
     params = dict(urllib.parse.parse_qsl(request.read().decode()))
     assert params == {"channel_id": "C1", "thread_ts": "100.1", "status": "is thinking..."}
     assert request.headers["authorization"] == "Bearer xoxb-connect"
-    assert connect_stub == ["slack/e2e-bot"]  # token minted from the connector
+    assert connect_stub == ["slack/fabricator"]  # token minted from the connector
 
 
 async def test_reply_posts_into_thread():
@@ -184,6 +184,6 @@ async def test_api_error_raises():
     def responder(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"ok": False, "error": "channel_not_found"})
 
-    ch = slack.channel(connector="slack/e2e-bot", transport=httpx.MockTransport(responder))
+    ch = slack.channel(connector="slack/fabricator", transport=httpx.MockTransport(responder))
     with pytest.raises(RuntimeError, match="channel_not_found"):
         await ch.on_event(chat.event(chat.protocol.MESSAGE_COMPLETED, message="hi"), sess())

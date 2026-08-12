@@ -11,11 +11,11 @@ branch="$(git branch --show-current)"
 : "${branch:?detached head — check out a branch first}"
 
 for svc in github slack; do
-  vercel connect detach "$svc/e2e-bot" --yes
+  vercel connect detach "$svc/fabricator" --yes
   if [ "$branch" = "main" ]; then
-    vercel connect attach "$svc/e2e-bot" --triggers --trigger-path "/chat/v1/$svc" --yes
+    vercel connect attach "$svc/fabricator" --triggers --trigger-path "/chat/v1/$svc" --yes
   else
-    vercel connect attach "$svc/e2e-bot" --triggers --trigger-branch "$branch" --trigger-path "/chat/v1/$svc" --yes
+    vercel connect attach "$svc/fabricator" --triggers --trigger-branch "$branch" --trigger-path "/chat/v1/$svc" --yes
   fi
 done
 echo "triggers -> $branch"

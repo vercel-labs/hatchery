@@ -2,7 +2,7 @@
 
 Say "parity" to the bot to run the durable parity workflow (scan + agent
 report); anything else echoes. Channels:
-- /chat/v1/slack   needs SLACK_CONNECTOR (connect uid, e.g. "slack/e2e-bot")
+- /chat/v1/slack   needs SLACK_CONNECTOR (connect uid, e.g. "slack/fabricator")
 - /chat/v1/github  needs GITHUB_CONNECTOR + GITHUB_APP_SLUG
 """
 

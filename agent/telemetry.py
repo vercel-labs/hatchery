@@ -43,7 +43,7 @@ def install() -> otel_adapter.OtelAdapter | None:
 
     provider = opentelemetry.sdk.trace.TracerProvider(
         resource=opentelemetry.sdk.resources.Resource.create(
-            {"service.name": "e2e-bot"}
+            {"service.name": "fabricator"}
         )
     )
     provider.add_span_processor(

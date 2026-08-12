@@ -46,7 +46,7 @@ def channel(
     api_base: str = "https://api.github.com",
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> "GitHubChannel":
-    """connector is the Connect UID, e.g. "github/e2e-bot"; falls back to
+    """connector is the Connect UID, e.g. "github/fabricator"; falls back to
     GITHUB_CONNECTOR. bot_name is the invocation token to watch for
     (@bot_name); falls back to GITHUB_APP_SLUG."""
     return GitHubChannel(connector, bot_name, name, api_base, transport)

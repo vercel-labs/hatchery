@@ -89,7 +89,7 @@ async def setup_step() -> str:
         except Exception:
             pass  # public-repo reads still work; the agent reports gh as unauthenticated
     box, _created = await sandbox.get_or_create_sandbox(
-        name="e2e-bot-" + run_id.lower().replace("_", "-"),
+        name="fabricator-" + run_id.lower().replace("_", "-"),
         source=sandbox.GitSource(url=parity.JS_REPO, depth=1),
         execution_time_limit=SANDBOX_LIMIT,
         persistent=True,

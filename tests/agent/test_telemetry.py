@@ -45,7 +45,7 @@ def test_install_configures_and_registers_adapter(monkeypatch):
 
     assert telemetry.install() is adapter
     opentelemetry.sdk.resources.Resource.create.assert_called_once_with(
-        {"service.name": "e2e-bot"}
+        {"service.name": "fabricator"}
     )
     opentelemetry.sdk.trace.TracerProvider.assert_called_once_with(
         resource=resource

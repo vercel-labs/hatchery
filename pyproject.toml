@@ -1,5 +1,5 @@
 [project]
-name = "e2e-bot"
+name = "fabricator"
 version = "0.1.0"
 description = "GitHub bot that ports e2e tests from js sdks to python sdks."
 requires-python = ">=3.12"

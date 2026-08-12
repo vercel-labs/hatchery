@@ -39,7 +39,7 @@ def channel(
     name: str = "slack",
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> "SlackChannel":
-    """connector is the Connect UID, e.g. "slack/e2e-bot"; falls back to SLACK_CONNECTOR."""
+    """connector is the Connect UID, e.g. "slack/fabricator"; falls back to SLACK_CONNECTOR."""
     return SlackChannel(connector, name, transport)
 
 

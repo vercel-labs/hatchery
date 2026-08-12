@@ -1,4 +1,4 @@
-# e2e-bot
+# fabricator
 
 vercel has python sdks that match the javascript sdks:
 
@@ -43,5 +43,4 @@ do not overcomplicate. this is a test application, it should prioritize clarity.
 
 1. use uv to manage python
 2. use pnpm to manage typescript
-
 

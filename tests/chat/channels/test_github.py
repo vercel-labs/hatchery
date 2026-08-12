@@ -48,7 +48,7 @@ def forwarded(payload: dict, event: str, delivery: str = "d1", auth: str = "Bear
     )
 
 
-def issue_comment(body: str = "@e2e-bot please port this", pull: bool = False, **overrides) -> dict:
+def issue_comment(body: str = "@fabricator please port this", pull: bool = False, **overrides) -> dict:
     issue: dict = {"number": 5}
     if pull:
         issue["pull_request"] = {"url": "..."}
@@ -65,7 +65,7 @@ def issue_comment(body: str = "@e2e-bot please port this", pull: bool = False, *
 
 async def handled(webhook: chat.Webhook, bus: FakeBus | None = None) -> tuple[chat.Ack, FakeBus]:
     bus = bus or FakeBus()
-    ack = await github.channel(connector="github/e2e-bot", bot_name="e2e-bot").handle(webhook, bus)
+    ack = await github.channel(connector="github/fabricator", bot_name="fabricator").handle(webhook, bus)
     if ack.work is not None:
         await ack.work
     return ack, bus
@@ -87,7 +87,7 @@ async def test_issue_comment_mention_dispatches():
     [inbound] = bus.dispatched
     assert inbound.token == "repo:42:issue:5"
     assert "please port this" in inbound.text
-    assert "@e2e-bot" not in inbound.text  # mention stripped
+    assert "@fabricator" not in inbound.text  # mention stripped
     assert 'repository="vercel/repo"' in inbound.text
     assert inbound.state["kind"] == "issue"
     assert inbound.state["number"] == 5
@@ -102,7 +102,7 @@ async def test_pr_comment_gets_pull_token():
 async def test_review_comment_threads_on_root():
     payload = {
         "action": "created",
-        "comment": {"id": 901, "in_reply_to_id": 800, "body": "@e2e-bot fix", "html_url": "u"},
+        "comment": {"id": 901, "in_reply_to_id": 800, "body": "@fabricator fix", "html_url": "u"},
         "pull_request": {"number": 9},
         "repository": {"id": 42, "full_name": "vercel/repo"},
         "sender": {"login": "andrey", "type": "User"},
@@ -117,11 +117,11 @@ async def test_review_comment_threads_on_root():
 async def test_ignores_no_mention_bots_own_marker_and_other_events():
     cases = [
         forwarded(issue_comment(body="no mention here"), "issue_comment"),
-        forwarded(issue_comment(sender={"login": "e2e-bot[bot]", "type": "Bot"}), "issue_comment"),
-        forwarded(issue_comment(body=f"@e2e-bot hi\n\n{github.MARKER}"), "issue_comment"),
+        forwarded(issue_comment(sender={"login": "fabricator[bot]", "type": "Bot"}), "issue_comment"),
+        forwarded(issue_comment(body=f"@fabricator hi\n\n{github.MARKER}"), "issue_comment"),
         forwarded(issue_comment(action="edited"), "issue_comment"),
         forwarded(issue_comment(), "issues"),
-        forwarded(issue_comment(body="@e2e-bottle not us"), "issue_comment"),
+        forwarded(issue_comment(body="@fabricator-extra not us"), "issue_comment"),
     ]
     for webhook in cases:
         _, bus = await handled(webhook)
@@ -141,7 +141,7 @@ def api_channel(calls: list) -> github.GitHubChannel:
         calls.append(request)
         return httpx.Response(201, json={"id": 1})
 
-    return github.channel(connector="github/e2e-bot", bot_name="e2e-bot", transport=httpx.MockTransport(responder))
+    return github.channel(connector="github/fabricator", bot_name="fabricator", transport=httpx.MockTransport(responder))
 
 
 def sess(kind: str = "issue") -> chat.Session:
@@ -159,7 +159,7 @@ async def test_turn_started_reacts_eyes_with_connect_token(connect_stub):
     assert request.url.path == "/repos/vercel/repo/issues/comments/900/reactions"
     assert json.loads(request.read()) == {"content": "eyes"}
     assert request.headers["authorization"] == "Bearer ghs_connect"
-    assert connect_stub == ["github/e2e-bot"]  # token minted from the connector
+    assert connect_stub == ["github/fabricator"]  # token minted from the connector
 
 
 async def test_reply_posts_issue_comment_with_marker():
@@ -191,6 +191,6 @@ async def test_api_error_raises():
     def responder(request: httpx.Request) -> httpx.Response:
         return httpx.Response(403, json={"message": "Resource not accessible"})
 
-    ch = github.channel(connector="github/e2e-bot", bot_name="e2e-bot", transport=httpx.MockTransport(responder))
+    ch = github.channel(connector="github/fabricator", bot_name="fabricator", transport=httpx.MockTransport(responder))
     with pytest.raises(RuntimeError, match="403"):
         await ch.on_event(chat.event(chat.protocol.MESSAGE_COMPLETED, message="hi"), sess())
