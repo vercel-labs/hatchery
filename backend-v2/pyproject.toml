@@ -1,0 +1,31 @@
+[project]
+name = "fabricator"
+version = "0.1.0"
+description = "a software factory: an agent reachable from slack, github, and its own ui."
+requires-python = ">=3.12"
+dependencies = [
+    "ai",
+    "fastapi>=0.115",
+    "httpx>=0.28",
+    "pydantic>=2.7",
+    "vercel",
+    "vercel-connect",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "uvicorn>=0.30",
+]
+
+[tool.vercel]
+entrypoint = "app.server:app"
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+asyncio_mode = "auto"
+testpaths = ["tests"]

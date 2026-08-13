@@ -6,10 +6,10 @@
   },
   "services": {
     "frontend": {
-      "root": "frontend/"
+      "root": "frontend-v2/"
     },
     "backend": {
-      "root": "backend/",
+      "root": "backend-v2/",
       "entrypoint": "pyproject.toml"
     }
   },
@@ -17,6 +17,5 @@
     { "source": "/api/(.*)", "destination": { "service": "backend" } },
     { "source": "/channels/(.*)", "destination": { "service": "backend" } },
     { "source": "/(.*)", "destination": { "service": "frontend" } }
-  ],
-  "crons": [{ "path": "/api/cron/parity", "schedule": "0 9 * * *" }]
+  ]
 }
