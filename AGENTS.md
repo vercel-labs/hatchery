@@ -21,6 +21,7 @@ do not overcomplicate. this is a test application, it should prioritize clarity.
 2. minimize the number of helper functions, prioritize locality of behavior.
 3. keep apis as small as possible. keep public apis even smaller, try to shrink them to one function / object.
 4. test file structure should mirror app's file structure, e.g. `agent/turn.py` -> `tests/agent/test_turn.py`. this helps project navigation a lot.
+5. do not write tests that test mocks, codify broken behavior, repeat third-party library tests, or do typechecker's job.
 
 ## project setup
 
