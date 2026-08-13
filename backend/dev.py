@@ -2,9 +2,7 @@
 
 The slack and github channels are vercel connect-only: inbound webhooks are
 forwarded by connect to a deployment, so locally this only verifies the app
-boots and the routes mount. Without DATABASE_URL the store falls back to
-files under backend/.data. The UI dev server (frontend/, `pnpm dev`) proxies
-/api here.
+boots and the routes mount.
 
     uv run dev.py
     curl -s localhost:8000/api/health

@@ -6,10 +6,10 @@
   },
   "services": {
     "frontend": {
-      "root": "frontend-v2/"
+      "root": "frontend/"
     },
     "backend": {
-      "root": "backend-v2/",
+      "root": "backend/",
       "entrypoint": "pyproject.toml"
     }
   },

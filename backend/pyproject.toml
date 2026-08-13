@@ -1,30 +1,16 @@
 [project]
-name = "e2e-bot"
+name = "fabricator"
 version = "0.1.0"
-description = "GitHub bot that ports e2e tests from js sdks to python sdks."
+description = "a software factory: an agent reachable from slack, github, and its own ui."
 requires-python = ">=3.12"
 dependencies = [
-    "ai[otel]",
-    "asyncpg>=0.30",
-    "braintrust[otel]",
+    "ai",
     "fastapi>=0.115",
     "httpx>=0.28",
     "pydantic>=2.7",
     "vercel",
     "vercel-connect",
-    "vercel-internal-core",
-    "vercel-oidc[verify]",
-    "vercel-sandbox",
 ]
-
-[tool.uv.sources]
-# vercel-connect is not on pypi yet; its git main also needs git main of the
-# others (pypi releases lag), so all five pin to the same checkout
-vercel = { git = "https://github.com/vercel/vercel-py.git", branch = "main", subdirectory = "src/vercel" }
-vercel-connect = { git = "https://github.com/vercel/vercel-py.git", branch = "main", subdirectory = "src/vercel-connect" }
-vercel-internal-core = { git = "https://github.com/vercel/vercel-py.git", branch = "main", subdirectory = "src/vercel-internal-core" }
-vercel-oidc = { git = "https://github.com/vercel/vercel-py.git", branch = "main", subdirectory = "src/vercel-oidc" }
-vercel-sandbox = { git = "https://github.com/vercel/vercel-py.git", branch = "main", subdirectory = "src/vercel-sandbox" }
 
 [dependency-groups]
 dev = [
@@ -35,9 +21,6 @@ dev = [
 
 [tool.vercel]
 entrypoint = "app.server:app"
-
-[[tool.vercel.workflows]]
-entrypoint = "app.worker:workflow"
 
 [tool.uv]
 package = false

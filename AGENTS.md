@@ -7,29 +7,20 @@ issue is also visible (and answerable) in the ui, and vice versa.
 
 grew out of the e2e-bot: vercel has python sdks (workflow, sandbox, connect,
 blob, oidc) that mirror the javascript sdks and consume the same backend api.
-the first factory task compares e2e tests across the two and reports what is
-missing in python; it runs once a day via vercel cron.
+this is the second iteration, restarted from a clean slate; only the channel
+adapters survived the first poc.
 
 1. deployed to vercel as two services (frontend + backend, see vercel.json)
-2. fastapi backend; react/vite frontend
+2. fastapi backend; next.js frontend (stock shadcn on base-ui primitives)
 3. dogfoods ai sdk for python, workflows, sandbox, connect
-4. postgres (neon) when DATABASE_URL is set, local files under backend/.data otherwise
 
 ## layout
 
-- `backend/app` — http surface: server (entrypoint), ui api, workflow worker
-- `backend/store` — durable state: projects (repos + memory), chats (+ channel
-  bindings, dedupe), per-chat append-only event streams
-- `backend/channels` — platform adapters (slack, github) and the App that
-  routes webhooks into chats; the event protocol
-- `backend/agent` — durable workflows: turn (one per user message) and
-  tasks/parity (the daily scan + report agent)
-- `frontend/` — project view (memory, repos, chats) and chat view (live
-  stream tail)
-
-everything durable is an event in the chat's stream; the ui tails it and
-channel bindings are fed from the same appends, so every surface sees the
-same conversation.
+- `backend/app` — http surface: server (vercel entrypoint), health
+- `backend/channels` — platform adapters (slack, github; vercel connect-only)
+  and the App that mounts them; inbound messages land in a `Hub` protocol,
+  which the store/agent side will implement later
+- `frontend/` — next.js app, dummy page for now
 
 ## answer style
 
@@ -50,9 +41,10 @@ do not overcomplicate. this is a test application, it should prioritize clarity.
 
 ## dev
 
-    cd backend && uv run pytest          # tests (file-backed store, no db needed)
+    cd backend && uv run pytest          # tests
     cd backend && uv run dev.py          # api on :8000
-    cd frontend && pnpm dev              # ui on :5173, /api proxied to :8000
+    cd frontend && pnpm dev              # ui on :3000, /api proxied to :8000
+    vercel dev                           # or both services behind one port
 
 slack/github webhooks only reach deployments (vercel connect); point them at
 the current branch with `scripts/triggers.sh`.
