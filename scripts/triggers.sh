@@ -13,9 +13,9 @@ branch="$(git branch --show-current)"
 for svc in github slack; do
   vercel connect detach "$svc/e2e-bot" --yes
   if [ "$branch" = "main" ]; then
-    vercel connect attach "$svc/e2e-bot" --triggers --trigger-path "/chat/v1/$svc" --yes
+    vercel connect attach "$svc/e2e-bot" --triggers --trigger-path "/channels/v1/$svc" --yes
   else
-    vercel connect attach "$svc/e2e-bot" --triggers --trigger-branch "$branch" --trigger-path "/chat/v1/$svc" --yes
+    vercel connect attach "$svc/e2e-bot" --triggers --trigger-branch "$branch" --trigger-path "/channels/v1/$svc" --yes
   fi
 done
 echo "triggers -> $branch"
