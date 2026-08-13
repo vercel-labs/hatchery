@@ -1,26 +1,14 @@
-# factory
+# fabricator
 
-a software factory: an agent that runs on the cloud, mostly unattended,
-reachable from slack, github, and its own ui. people and the agent share
-project-scoped chats; a conversation started in a slack thread or a github
-issue is also visible (and answerable) in the ui, and vice versa.
+agent deployed to cloud, running mostly unattended. reachable from slack,
+github, and its own ui.
 
-grew out of the e2e-bot: vercel has python sdks (workflow, sandbox, connect,
-blob, oidc) that mirror the javascript sdks and consume the same backend api.
-this is the second iteration, restarted from a clean slate; only the channel
-adapters survived the first poc.
+fabricator monitors repos, can respond to issues, pings on slack, or cron
+schedule. the output artifacts include reports, notifications, issues, and prs.
 
 1. deployed to vercel as two services (frontend + backend, see vercel.json)
 2. fastapi backend; next.js frontend (stock shadcn on base-ui primitives)
 3. dogfoods ai sdk for python, workflows, sandbox, connect
-
-## layout
-
-- `backend/app` — http surface: server (vercel entrypoint), health
-- `backend/channels` — platform adapters (slack, github; vercel connect-only)
-  and the App that mounts them; inbound messages land in a `Hub` protocol,
-  which the store/agent side will implement later
-- `frontend/` — next.js app, dummy page for now
 
 ## answer style
 
@@ -38,13 +26,6 @@ do not overcomplicate. this is a test application, it should prioritize clarity.
 
 1. use uv to manage python (run inside `backend/`)
 2. use pnpm to manage typescript (run inside `frontend/`)
-
-## dev
-
-    cd backend && uv run pytest          # tests
-    cd backend && uv run dev.py          # api on :8000
-    cd frontend && pnpm dev              # ui on :3000, /api proxied to :8000
-    vercel dev                           # or both services behind one port
 
 slack/github webhooks only reach deployments (vercel connect); point them at
 the current branch with `scripts/triggers.sh`.
