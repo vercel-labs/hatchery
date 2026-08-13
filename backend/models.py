@@ -1,4 +1,4 @@
-"""Core entities: projects and chats."""
+"""Core entities: projects and chats. (Named models.py: types.py would shadow stdlib types.)"""
 
 import pydantic
 
