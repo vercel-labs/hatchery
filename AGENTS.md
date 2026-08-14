@@ -31,6 +31,16 @@ do not overcomplicate. this is a test application, it should prioritize clarity.
 slack/github webhooks only reach deployments (vercel connect); point them at
 the current branch with `scripts/triggers.sh`.
 
+## store
+
+everything durable lives in backend/store/ (neon postgres via DATABASE_URL,
+jsonl/json files under backend/.data without it — tests always use files).
+the primitive is an append-only stream keyed by (stream_id, namespace),
+seal's shape: a chat's transcript is its (chat_id, "messages") stream (one
+model message per event, source of truth), its devbox record the tail of
+(chat_id, "worker"). chats/spaces/bindings/dedupe are rows next to it.
+schema is idempotent DDL, created on startup — no migrations.
+
 ## devbox
 
 the worker layer: the dispatcher (backend/agent/) hands coding tasks to a

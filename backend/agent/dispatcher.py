@@ -13,6 +13,7 @@ import time
 import ai
 
 from agent import devbox
+from store import events
 
 SYSTEM = """\
 You are fabricator's dispatcher. You coordinate coding work; you never write
@@ -34,8 +35,9 @@ def model() -> ai.Model:
 def agent_for(chat: dict) -> ai.Agent:
     """Build the dispatcher agent bound to one chat's worker state.
 
-    `chat` is the server's in-memory record; the tool reads and writes the
-    box / set / session ids on it so the tty proxy can find them.
+    `chat` is the tail of the chat's (chat_id, "worker") stream; the tool
+    writes the box / set / session ids on it and snapshots after each change,
+    so the tty proxy and later turns find them across restarts.
     """
 
     @ai.tool
@@ -46,11 +48,13 @@ def agent_for(chat: dict) -> ai.Agent:
         "done" looks like. The coder is a real claude code session; the user
         observes it live and can type into its terminal while it runs.
         """
-        if not chat.get("set_id"):
-            chat["set_id"] = await devbox.create_taskset(f"fab {chat['id']}")
-        if not chat.get("box"):
-            yield "creating devbox (cold boot, about a minute)…"
-            chat["box"] = await devbox.create_box(f"fab-{chat['id']}")
+        if not chat.get("set_id") or not chat.get("box"):
+            if not chat.get("set_id"):
+                chat["set_id"] = await devbox.create_taskset(f"fab {chat['id']}")
+            if not chat.get("box"):
+                yield "creating devbox (cold boot, about a minute)…"
+                chat["box"] = await devbox.create_box(f"fab-{chat['id']}")
+            await events.append(chat["id"], "worker", dict(chat))
 
         # a fresh box reports READY before devboxd finishes installing the
         # assistants, so the first task can race the claude install and error
@@ -61,6 +65,7 @@ def agent_for(chat: dict) -> ai.Agent:
             created = await devbox.create_task(chat["box"]["id"], chat["set_id"], task)
             chat["task_id"] = created["task_id"]
             chat["session_id"] = created["session_id"]
+            await events.append(chat["id"], "worker", dict(chat))
 
             state = created["state"]
             summary = ""  # the coder's own completion summary, pushed on the stream

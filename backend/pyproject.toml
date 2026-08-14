@@ -5,6 +5,7 @@ description = "a software factory: an agent reachable from slack, github, and it
 requires-python = ">=3.12"
 dependencies = [
     "ai[vercel]",
+    "asyncpg>=0.31.0",
     "fastapi>=0.115",
     "httpx>=0.28",
     "pydantic>=2.7",

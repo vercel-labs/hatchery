@@ -23,12 +23,15 @@ import { apiBase } from "@/lib/api";
 import type { ChatUIMessage } from "@/lib/messages";
 
 // Trimmed port of seal's ChatView: no uploads, models, resume, or approvals.
-// Keyed by chatId at the call site so it remounts on chat switch.
+// Keyed by chatId at the call site so it remounts on chat switch;
+// initialMessages is the stored transcript, fetched before mount.
 export function ChatView({
   chatId,
+  initialMessages,
   onMessagesChange,
 }: {
   chatId: string;
+  initialMessages: ChatUIMessage[];
   onMessagesChange?: (messages: ChatUIMessage[]) => void;
 }) {
   const transport = useMemo(
@@ -46,6 +49,7 @@ export function ChatView({
     useChat<ChatUIMessage>({
       id: chatId,
       transport,
+      messages: initialMessages,
     });
 
   useEffect(() => {

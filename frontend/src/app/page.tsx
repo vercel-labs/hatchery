@@ -5,6 +5,7 @@ import {
   BookMarkedIcon,
   FolderGitIcon,
   LinkIcon,
+  PlusIcon,
   TerminalIcon,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
@@ -27,6 +28,7 @@ import {
   Sidebar,
   SidebarContent,
   SidebarGroup,
+  SidebarGroupAction,
   SidebarGroupContent,
   SidebarGroupLabel,
   SidebarHeader,
@@ -96,6 +98,19 @@ export default function Home() {
         )
       : chats;
 
+  const createChat = async () => {
+    const spaceId = selectedSpace?.id ?? sortSpaceId ?? spaces?.[0]?.id ?? null;
+    const res = await fetch("/api/chats", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ space_id: spaceId }),
+    });
+    if (!res.ok) return;
+    const chat: Chat = await res.json();
+    setChats((prev) => [chat, ...(prev ?? [])]);
+    setSelection({ kind: "chat", id: chat.id });
+  };
+
   return (
     <SidebarProvider>
       <Sidebar>
@@ -139,6 +154,9 @@ export default function Home() {
 
           <SidebarGroup>
             <SidebarGroupLabel>Chats</SidebarGroupLabel>
+            <SidebarGroupAction title="New chat" onClick={createChat}>
+              <PlusIcon />
+            </SidebarGroupAction>
             <SidebarGroupContent>
               <SidebarMenu>
                 {sortedChats === null
@@ -270,10 +288,21 @@ function SpacePane({ space }: { space: Space }) {
 
 // The chat pane, with the coder terminal splitting in on the right once the
 // dispatcher launches work. Keyed by chat.id at the call site so useChat
-// remounts per chat.
+// remounts per chat. The stored transcript loads first: useChat only takes
+// initial messages at construction.
 function LiveChat({ chat }: { chat: Chat }) {
+  const [initialMessages, setInitialMessages] = useState<
+    ChatUIMessage[] | null
+  >(null);
   const [coderActive, setCoderActive] = useState(false);
   const [showTerminal, setShowTerminal] = useState(false);
+
+  useEffect(() => {
+    fetch(`/api/chats/${chat.id}/messages`)
+      .then((res) => (res.ok ? res.json() : []))
+      .then(setInitialMessages)
+      .catch(() => setInitialMessages([]));
+  }, [chat.id]);
 
   const onMessagesChange = useCallback((messages: ChatUIMessage[]) => {
     const launched = messages.some((message) =>
@@ -286,10 +315,16 @@ function LiveChat({ chat }: { chat: Chat }) {
     if (coderActive) setShowTerminal(true);
   }, [coderActive]);
 
+  if (initialMessages === null) return <div className="flex-1" />;
+
   return (
     <div className="relative flex min-h-0 flex-1">
       <div className="flex min-w-0 flex-1 basis-[28rem] flex-col">
-        <ChatView chatId={chat.id} onMessagesChange={onMessagesChange} />
+        <ChatView
+          chatId={chat.id}
+          initialMessages={initialMessages}
+          onMessagesChange={onMessagesChange}
+        />
       </div>
       {coderActive && !showTerminal && (
         <Button
