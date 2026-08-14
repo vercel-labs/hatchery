@@ -182,7 +182,10 @@ async def tty(ws: fastapi.WebSocket, chat_id: str) -> None:
         f"&offset={q.get('offset', '0')}&cols={q.get('cols', '80')}&rows={q.get('rows', '24')}"
     )
     try:
-        async with websockets.connect(url) as box:
+        # no max_size: the box replays the whole scrollback as one frame,
+        # which can be many MB — the default 1MB cap kills the connection
+        # right after the handshake, forever (the replay never shrinks).
+        async with websockets.connect(url, max_size=None) as box:
 
             async def down():
                 async for frame in box:

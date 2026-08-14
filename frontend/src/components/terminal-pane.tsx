@@ -66,6 +66,9 @@ export function TerminalPane({
 
       term.onData((data) => send("tty-input", { data: b64encode(data) }));
       const observer = new ResizeObserver(() => {
+        const dims = fit.proposeDimensions();
+        if (!dims || (dims.cols === term.cols && dims.rows === term.rows))
+          return;
         fit.fit();
         send("resize", { cols: term.cols, rows: term.rows });
       });

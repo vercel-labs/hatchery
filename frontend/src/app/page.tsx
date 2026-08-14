@@ -112,7 +112,7 @@ export default function Home() {
   };
 
   return (
-    <SidebarProvider>
+    <SidebarProvider className="h-svh overflow-hidden">
       <Sidebar>
         <SidebarHeader className="px-4 py-3">
           <span className="text-sm font-semibold">fabricator</span>
