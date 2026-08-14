@@ -318,8 +318,8 @@ function LiveChat({ chat }: { chat: Chat }) {
   if (initialMessages === null) return <div className="flex-1" />;
 
   return (
-    <div className="relative flex min-h-0 flex-1">
-      <div className="flex min-w-0 flex-1 basis-[28rem] flex-col">
+    <div className="@container relative flex min-h-0 flex-1 flex-col @5xl:flex-row">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col @5xl:basis-[28rem]">
         <ChatView
           chatId={chat.id}
           initialMessages={initialMessages}

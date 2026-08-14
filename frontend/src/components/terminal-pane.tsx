@@ -48,9 +48,17 @@ export function TerminalPane({
       ]);
       if (disposed) return;
 
+      // xterm measures the character cell by setting this string on a canvas
+      // context, where var() is invalid — resolve Geist Mono to its concrete
+      // families and make sure it's loaded before the first measurement.
+      const fontFamily =
+        `${getComputedStyle(host).getPropertyValue("--font-geist-mono").trim() || "ui-monospace"}, monospace`;
+      await document.fonts.load(`12px ${fontFamily}`).catch(() => {});
+      if (disposed) return;
+
       const term = new Terminal({
         fontSize: 12,
-        fontFamily: "var(--font-geist-mono, ui-monospace), monospace",
+        fontFamily,
         theme: { background: "#0a0a0a" },
         scrollback: 10000,
       });
@@ -120,7 +128,7 @@ export function TerminalPane({
   }, [chatId]);
 
   return (
-    <div className="flex min-w-0 flex-1 flex-col border-l">
+    <div className="flex h-2/5 min-w-0 flex-none flex-col border-t @5xl:h-auto @5xl:flex-1 @5xl:border-t-0 @5xl:border-l">
       <div className="flex h-10 shrink-0 items-center gap-2 border-b px-3">
         <span
           className={`size-2 rounded-full ${
