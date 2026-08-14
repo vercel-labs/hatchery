@@ -19,19 +19,21 @@ from channels import github, slack
 log = logging.getLogger("app")
 
 # hardcoded stubs until the store lands
-STUB_PROJECTS = [
-    models.Project(
-        id="prj_self",
+STUB_SPACES = [
+    models.Space(
+        id="spc_self",
         name="fabricator",
         goal="work on itself: respond to issues, ship prs to its own repo",
         repos=["anbuzin/fabricator"],
+        color="#38bdf8",
         created_at="2026-08-10T09:00:00+00:00",
     ),
-    models.Project(
-        id="prj_wfjs",
+    models.Space(
+        id="spc_wfjs",
         name="workflows watch",
         goal="monitor workflows js, notify python team on change",
         repos=["vercel/workflows"],
+        color="#fbbf24",
         created_at="2026-08-11T14:30:00+00:00",
     ),
 ]
@@ -39,7 +41,7 @@ STUB_PROJECTS = [
 STUB_CHATS = [
     models.Chat(
         id="chat_a1",
-        project_id="prj_self",
+        space_id="spc_self",
         title="wire up the two-pane ui",
         trigger="ui",
         status="running",
@@ -48,7 +50,7 @@ STUB_CHATS = [
     ),
     models.Chat(
         id="chat_a2",
-        project_id="prj_self",
+        space_id="spc_self",
         title="fix flaky slack channel test",
         trigger="slack:T024BE7LD",
         status="done",
@@ -57,7 +59,7 @@ STUB_CHATS = [
     ),
     models.Chat(
         id="chat_a3",
-        project_id="prj_self",
+        space_id="spc_self",
         title="nightly repo sweep",
         trigger="cron",
         status="failed",
@@ -66,7 +68,7 @@ STUB_CHATS = [
     ),
     models.Chat(
         id="chat_b1",
-        project_id="prj_wfjs",
+        space_id="spc_wfjs",
         title="weekly changelog digest",
         trigger="cron",
         status="queued",
@@ -104,19 +106,11 @@ async def health() -> dict:
     return {"ok": True, "channels": list(bot.channels)}
 
 
-@app.get("/api/projects")
-async def list_projects() -> list[models.Project]:
-    return STUB_PROJECTS
+@app.get("/api/spaces")
+async def list_spaces() -> list[models.Space]:
+    return STUB_SPACES
 
 
-@app.get("/api/projects/{project_id}")
-async def get_project(project_id: str) -> models.Project:
-    for project in STUB_PROJECTS:
-        if project.id == project_id:
-            return project
-    raise fastapi.HTTPException(status_code=404, detail="unknown project")
-
-
-@app.get("/api/projects/{project_id}/chats")
-async def list_chats(project_id: str) -> list[models.Chat]:
-    return [chat for chat in STUB_CHATS if chat.project_id == project_id]
+@app.get("/api/chats")
+async def list_chats() -> list[models.Chat]:
+    return STUB_CHATS
