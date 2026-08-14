@@ -3,11 +3,19 @@
 import pydantic
 
 
+class Resource(pydantic.BaseModel):
+    title: str
+    url: str
+    kind: str = "link"  # link | reference | ...
+
+
 class Space(pydantic.BaseModel):
     id: str  # "spc_<hex>"
     name: str
     goal: str  # "monitor workflows js, notify python team on change"
+    about: str = ""  # markdown, the space's canvas
     repos: list[str] = []  # "owner/repo", autocloned into the sandbox
+    resources: list[Resource] = []  # extra links; repos show up alongside these
     color: str  # hex; the ui codes the space and its chats with it
     created_at: str  # utc isoformat, same as Event.meta.at
 

@@ -24,7 +24,33 @@ STUB_SPACES = [
         id="spc_self",
         name="fabricator",
         goal="work on itself: respond to issues, ship prs to its own repo",
+        about=(
+            "# fabricator\n\n"
+            "An agent deployed to the cloud, running mostly unattended. Reachable "
+            "from slack, github, and this ui.\n\n"
+            "## Goal\n\n"
+            "Work on itself: respond to issues, ping on slack, and ship prs to its "
+            "own repo.\n\n"
+            "## How it runs\n\n"
+            "- two vercel services: fastapi backend, next.js frontend\n"
+            "- chats spawn from slack, github, cron, or the ui\n"
+            "- each chat gets a sandbox with the space's repos cloned\n\n"
+            "## Conventions\n\n"
+            "Keep changes small and reviewable. Prefer a report over a pr when "
+            "uncertain."
+        ),
         repos=["anbuzin/fabricator"],
+        resources=[
+            models.Resource(
+                title="ai sdk for python",
+                url="https://vercel.com/docs/ai-sdk-python",
+                kind="reference",
+            ),
+            models.Resource(
+                title="deployment",
+                url="https://fabricator.vercel.app",
+            ),
+        ],
         color="#38bdf8",
         created_at="2026-08-10T09:00:00+00:00",
     ),
@@ -32,7 +58,24 @@ STUB_SPACES = [
         id="spc_wfjs",
         name="workflows watch",
         goal="monitor workflows js, notify python team on change",
+        about=(
+            "# workflows watch\n\n"
+            "Monitor `vercel/workflows` and keep the python team in the loop.\n\n"
+            "## What to watch\n\n"
+            "- api changes in the js sdk that the python port should mirror\n"
+            "- changelog entries and breaking releases\n\n"
+            "## Output\n\n"
+            "A short slack digest per notable change; an issue when the python "
+            "port needs work."
+        ),
         repos=["vercel/workflows"],
+        resources=[
+            models.Resource(
+                title="workflows changelog",
+                url="https://github.com/vercel/workflows/releases",
+                kind="reference",
+            ),
+        ],
         color="#fbbf24",
         created_at="2026-08-11T14:30:00+00:00",
     ),
