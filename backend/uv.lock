@@ -21,6 +21,11 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/8e/8a/7f7e48978ae40215f260e19517161b153b32ad6afc22df06a8bc8c1fcbb2/ai-0.4.2-py3-none-any.whl", hash = "sha256:55bd0d35213e202fd60632b788c29f3556e86ab8face1d9216ccdb224a1b21f0", size = 179861, upload-time = "2026-08-05T16:54:30.889Z" },
 ]
 
+[package.optional-dependencies]
+vercel = [
+    { name = "vercel" },
+]
+
 [[package]]
 name = "annotated-doc"
 version = "0.0.5"
@@ -262,12 +267,13 @@ name = "fabricator"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
-    { name = "ai" },
+    { name = "ai", extra = ["vercel"] },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "pydantic" },
     { name = "vercel" },
     { name = "vercel-connect" },
+    { name = "websockets" },
 ]
 
 [package.dev-dependencies]
@@ -279,12 +285,13 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ai" },
+    { name = "ai", extras = ["vercel"] },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "vercel" },
     { name = "vercel-connect" },
+    { name = "websockets", specifier = ">=13" },
 ]
 
 [package.metadata.requires-dev]

@@ -9,10 +9,20 @@ boots and the routes mount.
 """
 
 import os
+import pathlib
 
 import uvicorn
 
-from app import server
+# `vercel env pull backend/.env.local` supplies VERCEL_OIDC_TOKEN (ai gateway
+# auth) and friends; load it before the app imports anything that reads env.
+env = pathlib.Path(__file__).parent / ".env.local"
+if env.exists():
+    for line in env.read_text().splitlines():
+        if line and not line.startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            os.environ.setdefault(key, value.strip('"'))
+
+from app import server  # noqa: E402
 
 if __name__ == "__main__":
     print(f"channels: {', '.join(server.bot.channels)}")

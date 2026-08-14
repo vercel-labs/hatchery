@@ -30,3 +30,16 @@ do not overcomplicate. this is a test application, it should prioritize clarity.
 
 slack/github webhooks only reach deployments (vercel connect); point them at
 the current branch with `scripts/triggers.sh`.
+
+## devbox
+
+the worker layer: the dispatcher (backend/agent/) hands coding tasks to a
+devbox over api.vercel.com (`POST /v1/tasks`, assistant=claude-code), gets
+state pushed back over the task watch websocket, and the ui attaches to the
+task's pty via the backend's tty proxy. no polling anywhere.
+
+.reference/api — primary implementation
+- services/api-devbox — DevBox and Tasks HTTP APIs
+- packages/devbox — domain logic, repositories, credentials, lifecycle, tasks
+- services/subscriber-devbox — asynchronous provisioning and lifecycle events
+- cli/devboxd — the in-box daemon: SSH, MCP, task execution, cloning, heartbeats, and lifecycle hooks

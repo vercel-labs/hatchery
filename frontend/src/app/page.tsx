@@ -1,13 +1,21 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { BookMarkedIcon, FolderGitIcon, LinkIcon } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import {
+  BookMarkedIcon,
+  FolderGitIcon,
+  LinkIcon,
+  TerminalIcon,
+} from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import type { Chat, Resource, Space } from "@/lib/api";
-import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import type { ChatUIMessage } from "@/lib/messages";
+import { ChatView } from "@/components/chat";
+import { TerminalPane } from "@/components/terminal-pane";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
 import {
   Empty,
   EmptyDescription,
@@ -31,12 +39,6 @@ import {
   SidebarSeparator,
   SidebarTrigger,
 } from "@/components/ui/sidebar";
-const statusVariant = {
-  queued: "outline",
-  running: "default",
-  done: "secondary",
-  failed: "destructive",
-} as const;
 
 type Selection =
   | { kind: "space"; id: string }
@@ -181,34 +183,34 @@ export default function Home() {
             {selectedSpace?.name ?? selectedChat?.title ?? "fabricator"}
           </span>
         </header>
-        <div className="flex-1 overflow-y-auto p-6 md:p-10">
-          {failed ? (
-            <Empty>
-              <EmptyHeader>
-                <EmptyTitle>Backend unreachable</EmptyTitle>
-                <EmptyDescription>
-                  Could not load spaces and chats. Locally: run `uv run dev.py`
-                  in backend/ and reload.
-                </EmptyDescription>
-              </EmptyHeader>
-            </Empty>
-          ) : selectedSpace ? (
-            <SpacePane space={selectedSpace} />
-          ) : selectedChat ? (
-            <ChatPane chat={selectedChat} space={
-              spaces?.find((s) => s.id === selectedChat.space_id) ?? null
-            } />
-          ) : (
-            <Empty>
-              <EmptyHeader>
-                <EmptyTitle>Nothing selected</EmptyTitle>
-                <EmptyDescription>
-                  Pick a space or a chat from the sidebar.
-                </EmptyDescription>
-              </EmptyHeader>
-            </Empty>
-          )}
-        </div>
+        {selectedChat && !failed ? (
+          <LiveChat key={selectedChat.id} chat={selectedChat} />
+        ) : (
+          <div className="flex-1 overflow-y-auto p-6 md:p-10">
+            {failed ? (
+              <Empty>
+                <EmptyHeader>
+                  <EmptyTitle>Backend unreachable</EmptyTitle>
+                  <EmptyDescription>
+                    Could not load spaces and chats. Locally: run `uv run
+                    dev.py` in backend/ and reload.
+                  </EmptyDescription>
+                </EmptyHeader>
+              </Empty>
+            ) : selectedSpace ? (
+              <SpacePane space={selectedSpace} />
+            ) : (
+              <Empty>
+                <EmptyHeader>
+                  <EmptyTitle>Nothing selected</EmptyTitle>
+                  <EmptyDescription>
+                    Pick a space or a chat from the sidebar.
+                  </EmptyDescription>
+                </EmptyHeader>
+              </Empty>
+            )}
+          </div>
+        )}
       </SidebarInset>
     </SidebarProvider>
   );
@@ -266,52 +268,42 @@ function SpacePane({ space }: { space: Space }) {
   );
 }
 
-function ChatPane({ chat, space }: { chat: Chat; space: Space | null }) {
+// The chat pane, with the coder terminal splitting in on the right once the
+// dispatcher launches work. Keyed by chat.id at the call site so useChat
+// remounts per chat.
+function LiveChat({ chat }: { chat: Chat }) {
+  const [coderActive, setCoderActive] = useState(false);
+  const [showTerminal, setShowTerminal] = useState(false);
+
+  const onMessagesChange = useCallback((messages: ChatUIMessage[]) => {
+    const launched = messages.some((message) =>
+      message.parts.some((part) => part.type === "tool-launch_coder"),
+    );
+    if (launched) setCoderActive(true);
+  }, []);
+
+  useEffect(() => {
+    if (coderActive) setShowTerminal(true);
+  }, [coderActive]);
+
   return (
-    <div className="mx-auto flex w-full max-w-2xl flex-col gap-4">
-      <div className="flex flex-wrap items-center gap-2">
-        {space && (
-          <Badge variant="outline">
-            <Dot color={space.color} />
-            {space.name}
-          </Badge>
-        )}
-        <Badge variant={statusVariant[chat.status]}>{chat.status}</Badge>
-        <Badge variant="outline">{chat.trigger}</Badge>
-        {chat.sandbox_id && <Badge variant="outline">{chat.sandbox_id}</Badge>}
-        <span className="text-sm text-muted-foreground">
-          {new Date(chat.created_at).toLocaleString()}
-        </span>
+    <div className="relative flex min-h-0 flex-1">
+      <div className="flex min-w-0 flex-1 basis-[28rem] flex-col">
+        <ChatView chatId={chat.id} onMessagesChange={onMessagesChange} />
       </div>
-      {chat.artifact ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>Artifact</CardTitle>
-          </CardHeader>
-          <CardContent className="text-sm">
-            {chat.artifact.startsWith("http") ? (
-              <a
-                href={chat.artifact}
-                target="_blank"
-                rel="noreferrer"
-                className="underline underline-offset-4"
-              >
-                {chat.artifact}
-              </a>
-            ) : (
-              <p className="text-muted-foreground">{chat.artifact}</p>
-            )}
-          </CardContent>
-        </Card>
-      ) : (
-        <Empty>
-          <EmptyHeader>
-            <EmptyTitle>No artifact yet</EmptyTitle>
-            <EmptyDescription>
-              This chat has not produced a report, issue, or PR.
-            </EmptyDescription>
-          </EmptyHeader>
-        </Empty>
+      {coderActive && !showTerminal && (
+        <Button
+          variant="outline"
+          size="sm"
+          className="absolute top-2 right-2 z-10"
+          onClick={() => setShowTerminal(true)}
+        >
+          <TerminalIcon className="size-4" />
+          terminal
+        </Button>
+      )}
+      {showTerminal && (
+        <TerminalPane chatId={chat.id} onClose={() => setShowTerminal(false)} />
       )}
     </div>
   );
