@@ -97,7 +97,12 @@ async def create_task(box_id: str, set_id: str, prompt: str) -> dict:
 
 
 async def get_task(task_id: str) -> dict:
-    """The authoritative task row (state + result), box-independent."""
+    """The durable task row (state + result), box-independent.
+
+    Synced asynchronously from the box: right after a state change the row can
+    lag the watch websocket by seconds. Treat pushed frames as the truth on
+    state; use the row for what only it has (error reason, pr urls).
+    """
     async with httpx.AsyncClient(timeout=30) as http:
         r = await http.get(
             f"{API}/v1/tasks/{task_id}", headers={"Authorization": f"Bearer {token()}"}

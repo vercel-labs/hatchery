@@ -63,12 +63,16 @@ def agent_for(chat: dict) -> ai.Agent:
             chat["session_id"] = created["session_id"]
 
             state = created["state"]
+            summary = ""  # the coder's own completion summary, pushed on the stream
             yield f"coder started — terminal attached [{state}]"
             last_yield = time.monotonic()
             try:
                 async with asyncio.timeout(WATCH_TIMEOUT):
                     async for frame in devbox.watch(chat["box"]["url"], created["task_id"]):
-                        transition = frame and (frame.get("body") or {}).get("stateTransition")
+                        body = (frame or {}).get("body") or {}
+                        if (event := body.get("assistantEvent")) and event.get("name") == "complete":
+                            summary = (event.get("body") or {}).get("summary") or summary
+                        transition = body.get("stateTransition")
                         if not transition:
                             # assistant events (or watch quiet) — the sse goes
                             # silent for minutes while the coder works, and
@@ -89,14 +93,21 @@ def agent_for(chat: dict) -> ai.Agent:
             except TimeoutError:
                 pass
 
+            # the durable row syncs behind the box (its state PATCH can land
+            # seconds after the watch's terminal frame), so the pushed state
+            # and summary above are the truth; the row only enriches — error
+            # reason, pr urls — and never regresses a terminal state we saw.
             row = await devbox.get_task(created["task_id"])
             result = row.get("result") or {}
+            if row.get("state") in devbox.TERMINAL_STATES:
+                state = row["state"]
             if "executable file not found" in (result.get("error") or "") and attempt < 3:
                 yield "devbox is still installing its tools — retrying in a moment…"
                 await asyncio.sleep(20)
                 continue
-            parts = [f"[{row.get('state', state)}]"]
-            if summary := result.get("summary") or result.get("error"):
+            parts = [f"[{state}]"]
+            summary = summary or result.get("summary") or result.get("error")
+            if summary:
                 parts.append(summary)
             parts += [pr["url"] for pr in result.get("prs") or [] if pr.get("url")]
             yield " ".join(parts)
