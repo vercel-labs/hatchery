@@ -29,5 +29,5 @@ node_modules/
 .vercel
 .env*
 
-# factory local store (no DATABASE_URL)
+# fabricator local store (no DATABASE_URL)
 backend/.data/

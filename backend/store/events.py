@@ -1,12 +1,17 @@
-"""Append-only event stream, one per chat.
+"""Append-only event streams, keyed by (stream_id, namespace).
 
-The stream is the chat's single source of truth: user messages, assistant
-replies, and progress all land here (see channels.protocol for the event
-shapes). The UI tails it; channel bindings are fed from the same appends; the
-agent derives its message history from it.
+seal's storage shape: the stream is the source of truth, snapshots are just
+streams whose tail wins. One stream per chat per concern:
 
-Postgres when DATABASE_URL is set, otherwise one jsonl file per chat under
-FACTORY_DATA_DIR. The jsonl locks are threading.Locks on purpose: the workflow
+- (chat_id, "messages"): the transcript, one model message per event. The UI
+  loads it on open, turns derive their history from it, channel inbound
+  appends to it.
+- (chat_id, "worker"): snapshots of the chat's devbox record (box / taskset /
+  task / session ids). The tail is current, so the tty proxy and launch_coder
+  survive restarts.
+
+Postgres when DATABASE_URL is set, otherwise one jsonl file per stream under
+FAB_DATA_DIR. The jsonl locks are threading.Locks on purpose: a workflow
 worker runs each queue message on a fresh event loop (often another thread),
 so an asyncio.Lock would bind to the first loop and raise on the next. They
 are only ever held across synchronous file I/O — never across an await.
@@ -20,22 +25,25 @@ import urllib.parse
 import store
 
 _SCHEMA = """\
-CREATE TABLE IF NOT EXISTS factory_streams (
-    chat_id    TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS fab_streams (
+    stream_id  TEXT NOT NULL,
+    ns         TEXT NOT NULL,
     tail_index INTEGER NOT NULL DEFAULT 0,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (stream_id, ns)
 );
 
-CREATE TABLE IF NOT EXISTS factory_events (
-    chat_id    TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS fab_events (
+    stream_id  TEXT NOT NULL,
+    ns         TEXT NOT NULL,
     idx        INTEGER NOT NULL,
     data       JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (chat_id, idx)
+    PRIMARY KEY (stream_id, ns, idx)
 );
 """
 
-_locks: dict[str, threading.Lock] = {}
+_locks: dict[tuple[str, str], threading.Lock] = {}
 _schema_ready = False
 
 
@@ -49,10 +57,10 @@ async def ensure_ready() -> None:
             await (await db.pool()).execute(_SCHEMA)
             _schema_ready = True
     else:
-        _path("_probe").parent.mkdir(parents=True, exist_ok=True)
+        (store.data_dir() / "events").mkdir(parents=True, exist_ok=True)
 
 
-async def append(chat_id: str, data: dict[str, typing.Any]) -> int:
+async def append(stream_id: str, ns: str, data: dict[str, typing.Any]) -> int:
     """Append one event and return its 0-based index."""
     if store.use_postgres():
         from store import db
@@ -60,25 +68,28 @@ async def append(chat_id: str, data: dict[str, typing.Any]) -> int:
         pool = await db.pool()
         async with pool.acquire() as conn, conn.transaction():
             await conn.execute(
-                "INSERT INTO factory_streams (chat_id) VALUES ($1) ON CONFLICT DO NOTHING",
-                chat_id,
+                "INSERT INTO fab_streams (stream_id, ns) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                stream_id,
+                ns,
             )
             row = await conn.fetchrow(
-                "UPDATE factory_streams SET tail_index = tail_index + 1, updated_at = now() "
-                "WHERE chat_id = $1 RETURNING tail_index - 1 AS idx",
-                chat_id,
+                "UPDATE fab_streams SET tail_index = tail_index + 1, updated_at = now() "
+                "WHERE stream_id = $1 AND ns = $2 RETURNING tail_index - 1 AS idx",
+                stream_id,
+                ns,
             )
             index = int(row["idx"])
             await conn.execute(
-                "INSERT INTO factory_events (chat_id, idx, data) VALUES ($1, $2, $3::jsonb)",
-                chat_id,
+                "INSERT INTO fab_events (stream_id, ns, idx, data) VALUES ($1, $2, $3, $4::jsonb)",
+                stream_id,
+                ns,
                 index,
                 json.dumps(data, separators=(",", ":")),
             )
             return index
 
-    path = _path(chat_id)
-    with _lock(chat_id):
+    path = _path(stream_id, ns)
+    with _lock(stream_id, ns):
         index = sum(1 for line in path.read_text().splitlines() if line) if path.exists() else 0
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as fh:
@@ -86,23 +97,24 @@ async def append(chat_id: str, data: dict[str, typing.Any]) -> int:
         return index
 
 
-async def read(chat_id: str, start_index: int = 0) -> list[tuple[int, dict[str, typing.Any]]]:
+async def read(
+    stream_id: str, ns: str, start_index: int = 0
+) -> list[tuple[int, dict[str, typing.Any]]]:
     """Return (index, data) pairs with index >= start_index."""
     if store.use_postgres():
         from store import db
 
         rows = await (await db.pool()).fetch(
-            "SELECT idx, data FROM factory_events WHERE chat_id = $1 AND idx >= $2 ORDER BY idx",
-            chat_id,
+            "SELECT idx, data FROM fab_events "
+            "WHERE stream_id = $1 AND ns = $2 AND idx >= $3 ORDER BY idx",
+            stream_id,
+            ns,
             start_index,
         )
-        return [
-            (int(row["idx"]), json.loads(row["data"]) if isinstance(row["data"], str) else row["data"])
-            for row in rows
-        ]
+        return [(int(row["idx"]), _data(row["data"])) for row in rows]
 
-    path = _path(chat_id)
-    with _lock(chat_id):
+    path = _path(stream_id, ns)
+    with _lock(stream_id, ns):
         if not path.exists():
             return []
         return [
@@ -112,27 +124,37 @@ async def read(chat_id: str, start_index: int = 0) -> list[tuple[int, dict[str, 
         ]
 
 
-async def tail_index(chat_id: str) -> int:
-    """Index of the last event, -1 when the stream is empty."""
+async def tail(stream_id: str, ns: str) -> dict[str, typing.Any] | None:
+    """Data of the last event, None when the stream is empty."""
     if store.use_postgres():
         from store import db
 
         row = await (await db.pool()).fetchrow(
-            "SELECT tail_index FROM factory_streams WHERE chat_id = $1", chat_id
+            "SELECT data FROM fab_events WHERE stream_id = $1 AND ns = $2 "
+            "ORDER BY idx DESC LIMIT 1",
+            stream_id,
+            ns,
         )
-        return int(row["tail_index"]) - 1 if row is not None else -1
+        return _data(row["data"]) if row is not None else None
 
-    path = _path(chat_id)
-    with _lock(chat_id):
+    path = _path(stream_id, ns)
+    with _lock(stream_id, ns):
         if not path.exists():
-            return -1
-        return sum(1 for line in path.read_text().splitlines() if line) - 1
+            return None
+        lines = [line for line in path.read_text().splitlines() if line]
+        return json.loads(lines[-1]) if lines else None
 
 
-def _path(chat_id: str):
-    return store.data_dir() / "events" / f"{urllib.parse.quote(chat_id, safe='')}.jsonl"
+def _data(raw: typing.Any) -> dict[str, typing.Any]:
+    # asyncpg returns jsonb as str unless a codec is installed
+    return json.loads(raw) if isinstance(raw, str) else raw
 
 
-def _lock(chat_id: str) -> threading.Lock:
+def _path(stream_id: str, ns: str):
+    quote = lambda s: urllib.parse.quote(s, safe="")  # noqa: E731
+    return store.data_dir() / "events" / f"{quote(stream_id)}.{quote(ns)}.jsonl"
+
+
+def _lock(stream_id: str, ns: str) -> threading.Lock:
     # setdefault is an atomic get-or-create, so racing threads share one lock
-    return _locks.setdefault(chat_id, threading.Lock())
+    return _locks.setdefault((stream_id, ns), threading.Lock())

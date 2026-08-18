@@ -1,8 +1,8 @@
-"""store: everything durable — projects, chats, and their event streams.
+"""store: everything durable — spaces, chats, and their event streams.
 
 Each module is one entity with one postgres and one local-files backend,
 selected by DATABASE_URL (seal's pattern). Local files live under
-FACTORY_DATA_DIR (default backend/.data) so tests and dev need no database.
+FAB_DATA_DIR (default backend/.data) so tests and dev need no database.
 """
 
 import os
@@ -10,7 +10,7 @@ import pathlib
 
 
 def data_dir() -> pathlib.Path:
-    configured = os.environ.get("FACTORY_DATA_DIR")
+    configured = os.environ.get("FAB_DATA_DIR")
     if configured:
         return pathlib.Path(configured)
     return pathlib.Path(__file__).resolve().parents[1] / ".data"
@@ -22,8 +22,8 @@ def use_postgres() -> bool:
 
 async def ensure_ready() -> None:
     """Prepare all stores (idempotent DDL / local dirs). Call once at startup."""
-    from store import chats, events, projects
+    from store import chats, events, spaces
 
-    await projects.ensure_ready()
+    await spaces.ensure_ready()
     await chats.ensure_ready()
     await events.ensure_ready()
