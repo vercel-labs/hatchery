@@ -104,8 +104,14 @@ export function TerminalPane({
             term.write(`\r\n[session exited: ${frame.body.code}]\r\n`);
           }
         };
-        ws.onclose = () => {
+        ws.onclose = (event) => {
           if (disposed || exited) return;
+          if (event.code === 4409) {
+            exited = true;
+            setStatus("exited");
+            term.write(`\r\n[${event.reason || "coder exited"}]\r\n`);
+            return;
+          }
           setStatus("connecting");
           retry = setTimeout(connect, 1500);
         };
