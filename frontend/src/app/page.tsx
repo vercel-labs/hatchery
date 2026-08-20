@@ -14,7 +14,7 @@ import remarkGfm from "remark-gfm";
 import type { Chat, Resource, Space } from "@/lib/api";
 import type { ChatUIMessage } from "@/lib/messages";
 import { ChatView } from "@/components/chat";
-import { TerminalPane } from "@/components/terminal-pane";
+import { TerminalPane, type CoderTask } from "@/components/terminal-pane";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
@@ -294,26 +294,41 @@ function LiveChat({ chat }: { chat: Chat }) {
   const [initialMessages, setInitialMessages] = useState<
     ChatUIMessage[] | null
   >(null);
-  const [coderActive, setCoderActive] = useState(false);
+  const [tasks, setTasks] = useState<CoderTask[]>([]);
   const [showTerminal, setShowTerminal] = useState(false);
+
+  const loadTasks = useCallback(() => {
+    fetch(`/api/chats/${chat.id}/tasks`)
+      .then((res) => (res.ok ? res.json() : []))
+      .then((found: CoderTask[]) => {
+        setTasks(found);
+        if (found.length) setShowTerminal(true);
+      })
+      .catch(() => setTasks([]));
+  }, [chat.id]);
 
   useEffect(() => {
     fetch(`/api/chats/${chat.id}/messages`)
       .then((res) => (res.ok ? res.json() : []))
       .then(setInitialMessages)
       .catch(() => setInitialMessages([]));
-  }, [chat.id]);
+    loadTasks();
+  }, [chat.id, loadTasks]);
 
-  const onMessagesChange = useCallback((messages: ChatUIMessage[]) => {
-    const launched = messages.some((message) =>
-      message.parts.some((part) => part.type === "tool-launch_coder"),
-    );
-    if (launched) setCoderActive(true);
-  }, []);
-
-  useEffect(() => {
-    if (coderActive) setShowTerminal(true);
-  }, [coderActive]);
+  const onMessagesChange = useCallback(
+    (messages: ChatUIMessage[]) => {
+      const accepted = messages.some((message) =>
+        message.parts.some(
+          (part) =>
+            part.type === "tool-launch_coder" &&
+            part.state === "output-available" &&
+            !part.preliminary,
+        ),
+      );
+      if (accepted) loadTasks();
+    },
+    [loadTasks],
+  );
 
   if (initialMessages === null) return <div className="flex-1" />;
 
@@ -326,7 +341,7 @@ function LiveChat({ chat }: { chat: Chat }) {
           onMessagesChange={onMessagesChange}
         />
       </div>
-      {coderActive && !showTerminal && (
+      {tasks.length > 0 && !showTerminal && (
         <Button
           variant="outline"
           size="sm"
@@ -337,8 +352,12 @@ function LiveChat({ chat }: { chat: Chat }) {
           terminal
         </Button>
       )}
-      {showTerminal && (
-        <TerminalPane chatId={chat.id} onClose={() => setShowTerminal(false)} />
+      {showTerminal && tasks.length > 0 && (
+        <TerminalPane
+          chatId={chat.id}
+          tasks={tasks}
+          onClose={() => setShowTerminal(false)}
+        />
       )}
     </div>
   );

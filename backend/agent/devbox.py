@@ -105,7 +105,7 @@ async def create_task(
     set_id: str,
     prompt: str,
     webhook_secret: str | None = None,
-    webhook_chat_id: str | None = None,
+    webhook_task_id: str | None = None,
 ) -> dict:
     """Start a claude-code task on the box: {task_id, session_id, state}.
 
@@ -119,9 +119,9 @@ async def create_task(
     if url := webhook_url():
         if not webhook_secret:
             raise RuntimeError("deployed task webhooks require a per-task secret")
-        if not webhook_chat_id:
-            raise RuntimeError("DEVBOX_WEBHOOK_URL requires the owning chat id")
-        query = urllib.parse.urlencode({"chat_id": webhook_chat_id, "secret": webhook_secret})
+        if not webhook_task_id:
+            raise RuntimeError("DEVBOX_WEBHOOK_URL requires the owning launch id")
+        query = urllib.parse.urlencode({"launch_id": webhook_task_id, "secret": webhook_secret})
         separator = "&" if urllib.parse.urlsplit(url).query else "?"
         body["webhooks"] = [{"url": f"{url}{separator}{query}"}]
     async with httpx.AsyncClient(timeout=60) as http:

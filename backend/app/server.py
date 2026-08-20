@@ -8,8 +8,9 @@ Health check, channel webhooks, and the dispatcher chat:
 - /api/chats/{id}/tty  websocket proxy to the chat's devbox pty (adds auth)
 
 State lives in the store (postgres via DATABASE_URL, local files without):
-a chat's transcript is its (chat_id, "messages") stream, its devbox record
-the (chat_id, "worker") tail. Slack/github inbound lands in its chat via
+a chat's transcript is its (chat_id, "messages") stream, its shared devbox
+the (chat_id, "worker") tail, and coder launches are separate task rows.
+Slack/github inbound lands in its chat via
 _StoreHub (dedupe, claim binding, append); no turn runs on inbound yet.
 """
 
@@ -32,7 +33,7 @@ import store
 import vercel.functions
 from agent import devbox, dispatcher
 from channels import github, slack
-from store import chats, events, spaces
+from store import chats, events, spaces, tasks
 
 log = logging.getLogger("app")
 _background: set[asyncio.Task] = set()
@@ -151,9 +152,9 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
     history = [ai.system_message(dispatcher.SYSTEM), *stored]
     record = await events.tail(request.chat_id, "worker") or {"id": request.chat_id}
 
-    def observe_task(worker: dict, created: dict) -> None:
+    def observe_task(launch: dict, created: dict) -> None:
         if devbox.webhook_url() is None:
-            _spawn(_watch_local_task(request.chat_id, worker, created))
+            _spawn(_watch_local_task(request.chat_id, launch, created))
 
     agent = dispatcher.agent_for(record, observe_task)
 
@@ -201,34 +202,40 @@ def _dedupe_tool_history(messages: list[ai.messages.Message]) -> list[ai.message
     return repaired
 
 
-@app.websocket("/api/chats/{chat_id}/tty")
-async def tty(ws: fastapi.WebSocket, chat_id: str) -> None:
-    """Bridge the browser to the chat's devbox pty session.
+@app.get("/api/chats/{chat_id}/tasks")
+async def chat_tasks(chat_id: str) -> list[dict]:
+    """Coder launches for the chat, oldest first for stable terminal tabs."""
+    return [
+        {
+            key: record.get(key)
+            for key in ("id", "title", "task_id", "session_id", "state", "created_at")
+        }
+        for record in await tasks.list_for_chat(chat_id)
+    ]
 
-    Exists because the box wants the bearer token (query param on /__tty)
-    and the browser shouldn't hold it. Frames pass through verbatim in both
-    directions; devboxd's own protocol (handshake/tty-output/…) does the rest.
-    """
-    record = await events.tail(chat_id, "worker") or {}
+
+@app.websocket("/api/chats/{chat_id}/tasks/{launch_id}/tty")
+async def task_tty(ws: fastapi.WebSocket, chat_id: str, launch_id: str) -> None:
+    """Bridge the browser to one task's durable devbox PTY session."""
+    workspace = await events.tail(chat_id, "worker") or {}
+    launch = await tasks.get(launch_id)
     await ws.accept()
-    if not record.get("box") or not record.get("session_id"):
-        await ws.close(code=4404, reason="no coder session for this chat")
+    if launch is None or launch.get("chat_id") != chat_id:
+        await ws.close(code=4404, reason="unknown coder task")
         return
-    if record.get("task_state") in devbox.TERMINAL_STATES:
-        await ws.close(code=4409, reason=f"coder {record['task_state']}")
+    if not workspace.get("box") or not launch.get("session_id"):
+        await ws.close(code=4404, reason="coder session not on the box yet")
         return
     q = ws.query_params
     url = devbox.tty_url(
-        record["box"]["url"],
-        record["session_id"],
+        workspace["box"]["url"],
+        launch["session_id"],
         q.get("offset", "0"),
         q.get("cols", "80"),
         q.get("rows", "24"),
     )
     try:
-        # no max_size: the box replays the whole scrollback as one frame,
-        # which can be many MB — the default 1MB cap kills the connection
-        # right after the handshake, forever (the replay never shrinks).
+        # no max_size: the box may replay many MB of scrollback in one frame.
         async with websockets.connect(url, max_size=None) as box:
 
             async def down():
@@ -243,20 +250,14 @@ async def tty(ws: fastapi.WebSocket, chat_id: str) -> None:
                 [asyncio.ensure_future(down()), asyncio.ensure_future(up())],
                 return_when=asyncio.FIRST_COMPLETED,
             )
-            for p in pending:
-                p.cancel()
-            for d in done:  # retrieve, or the disconnect logs as an error
-                d.exception()
+            for pending_task in pending:
+                pending_task.cancel()
+            for done_task in done:
+                done_task.exception()
     except (fastapi.WebSocketDisconnect, websockets.ConnectionClosed):
         pass
     except (OSError, websockets.InvalidHandshake):
-        # A real task session 404s until the agent PTY starts. If the task has
-        # already settled there will never be a session, so stop retrying.
-        latest = await events.tail(chat_id, "worker") or record
-        if latest.get("task_state") in devbox.TERMINAL_STATES:
-            await ws.close(code=4409, reason=f"coder {latest['task_state']}")
-        else:
-            await ws.close(code=4404, reason="coder session not on the box yet")
+        await ws.close(code=4404, reason="coder session not on the box yet")
     finally:
         try:
             await ws.close()
@@ -264,13 +265,20 @@ async def tty(ws: fastapi.WebSocket, chat_id: str) -> None:
             pass
 
 
-@app.post("/channels/v1/devbox")
-async def devbox_webhook(body: dict, chat_id: str = "", secret: str = "") -> dict:
-    """Persist and deliver a devbox task transition.
+@app.websocket("/api/chats/{chat_id}/tty")
+async def tty(ws: fastapi.WebSocket, chat_id: str) -> None:
+    """Compatibility route: attach to the chat's newest coder task."""
+    launches = await tasks.list_for_chat(chat_id)
+    if not launches:
+        await ws.accept()
+        await ws.close(code=4404, reason="no coder session for this chat")
+        return
+    await task_tty(ws, chat_id, launches[-1]["id"])
 
-    Devbox delivery is at-most-once, so the durable api-devbox task remains the
-    recovery source. seq makes retries and out-of-order transitions harmless.
-    """
+
+@app.post("/channels/v1/devbox")
+async def devbox_webhook(body: dict, launch_id: str = "", secret: str = "") -> dict:
+    """Persist one task's transition without disturbing sibling tasks."""
     if body.get("kind") != "taskStateChange" or not isinstance(body.get("taskStateChange"), dict):
         raise fastapi.HTTPException(400, "unsupported devbox event")
     change = body["taskStateChange"]
@@ -278,7 +286,7 @@ async def devbox_webhook(body: dict, chat_id: str = "", secret: str = "") -> dic
     if not task_id:
         raise fastapi.HTTPException(400, "missing task id")
 
-    record = await events.tail(chat_id, "worker") if chat_id else None
+    record = await tasks.get(launch_id) if launch_id else None
     if record is None:
         raise fastapi.HTTPException(404, "unknown task")
     expected = str(record.get("webhook_secret", ""))
@@ -299,34 +307,26 @@ async def devbox_webhook(body: dict, chat_id: str = "", secret: str = "") -> dic
 
     result = change.get("result") if isinstance(change.get("result"), dict) else {}
     record["webhook_seq"] = seq
-    record["task_state"] = state
+    record["state"] = state
     if result:
         record["result"] = result
-    await events.append(chat_id, "worker", dict(record))
-
+    await tasks.save(record)
     if state not in devbox.TERMINAL_STATES:
         return {"ok": True}
 
-    if not record.get("completion_recorded"):
-        completion = (
-            f'<coder_completion task_id="{task_id}" state="{state}">\n'
-            f"{json.dumps(result, separators=(',', ':'))}\n"
-            "</coder_completion>"
-        )
-        await events.append(chat_id, "messages", ai.user_message(completion).model_dump(mode="json"))
-        record["completion_recorded"] = True
-        await events.append(chat_id, "worker", dict(record))
+    await _record_task_completion(record, state, result)
     if not record.get("completion_delivered"):
-        vercel.functions.wait_until(_finish_task(chat_id, record, state, result))
+        vercel.functions.wait_until(_finish_task(record["id"]))
     return {"ok": True}
 
 
 async def _watch_local_task(chat_id: str, record: dict, created: dict) -> None:
-    """Observe local work after the chat response, then use the webhook finisher."""
+    """Observe local work after the chat response, then use the same finisher."""
+    workspace = await events.tail(chat_id, "worker") or {}
     for attempt in (1, 2, 3):
         state = str(created.get("state", "pending"))
         summary = ""
-        async for frame in devbox.watch(record["box"]["url"], created["task_id"]):
+        async for frame in devbox.watch(workspace["box"]["url"], created["task_id"]):
             body = (frame or {}).get("body") or {}
             if (event := body.get("assistantEvent")) and event.get("name") == "complete":
                 summary = str((event.get("body") or {}).get("summary") or summary)
@@ -341,49 +341,60 @@ async def _watch_local_task(chat_id: str, record: dict, created: dict) -> None:
         if row.get("state") in devbox.TERMINAL_STATES:
             state = row["state"]
         if "executable file not found" not in str(result.get("error", "")) or attempt == 3:
-            await _record_task_completion(chat_id, record, state, result)
+            await _record_task_completion(record, state, result)
+            await _finish_task(record["id"])
             return
         await asyncio.sleep(20)
         created = await devbox.create_task(
-            record["box"]["id"], record["set_id"], record["task_prompt"]
+            workspace["box"]["id"], workspace["set_id"], record["prompt"]
         )
         record["task_id"] = created["task_id"]
         record["session_id"] = created["session_id"]
-        record["task_state"] = created["state"]
-        await events.append(chat_id, "worker", dict(record))
+        record["state"] = created["state"]
+        await tasks.save(record)
 
 
-async def _record_task_completion(chat_id: str, record: dict, state: str, result: dict) -> None:
-    task_id = str(record["task_id"])
-    completion = (
-        f'<coder_completion task_id="{task_id}" state="{state}">\n'
-        f"{json.dumps(result, separators=(',', ':'))}\n"
-        "</coder_completion>"
-    )
-    await events.append(chat_id, "messages", ai.user_message(completion).model_dump(mode="json"))
-    record["task_state"] = state
+async def _record_task_completion(record: dict, state: str, result: dict) -> None:
+    if not record.get("completion_recorded"):
+        completion = (
+            f'<coder_completion task_id="{record["task_id"]}" state="{state}">\n'
+            f"{json.dumps(result, separators=(',', ':'))}\n"
+            "</coder_completion>"
+        )
+        await events.append(
+            record["chat_id"], "messages", ai.user_message(completion).model_dump(mode="json")
+        )
+        record["completion_recorded"] = True
+    record["state"] = state
     record["result"] = result
-    record["completion_recorded"] = True
-    await events.append(chat_id, "worker", dict(record))
-    await _finish_task(chat_id, record, state, result)
+    await tasks.save(record)
 
 
-async def _finish_task(chat_id: str, record: dict, state: str, result: dict) -> None:
-    """Finish a callback after its HTTP response: run and fan out the new turn."""
-    latest = await events.tail(chat_id, "worker") or record
-    if latest.get("completion_delivered"):
+async def _finish_task(launch_id: str) -> None:
+    """Run and deliver one task's completion after its callback response."""
+    record = await tasks.get(launch_id)
+    if record is None or record.get("completion_delivered"):
         return
-    record = latest
+    chat_id = record["chat_id"]
+    state = record["state"]
+    result = record.get("result") or {}
     message = str(record.get("completion_message") or "")
     if not message:
-        message = await _run_dispatcher_turn(chat_id, record)
+        workspace = await events.tail(chat_id, "worker") or {"id": chat_id}
+        message = await _run_dispatcher_turn(chat_id, workspace)
         record["completion_message"] = message
-        await events.append(chat_id, "worker", dict(record))
+        await tasks.save(record)
     artifact = next(
         (str(pr["url"]) for pr in result.get("prs") or [] if isinstance(pr, dict) and pr.get("url")),
         message,
     )
-    await chats.finish(chat_id, "done" if state == "complete" else "failed", artifact)
+    siblings = await tasks.list_for_chat(chat_id)
+    active = any(
+        sibling["id"] != launch_id and sibling.get("state") not in devbox.TERMINAL_STATES
+        for sibling in siblings
+    )
+    if not active:
+        await chats.finish(chat_id, "done" if state == "complete" else "failed", artifact)
     event = channels.event(channels.protocol.MESSAGE_COMPLETED, message=message)
     failures = []
     for binding in await chats.bindings(chat_id):
@@ -400,7 +411,7 @@ async def _finish_task(chat_id: str, record: dict, state: str, result: dict) -> 
         record["delivery_errors"] = failures
     else:
         record.pop("delivery_errors", None)
-    await events.append(chat_id, "worker", dict(record))
+    await tasks.save(record)
 
 
 async def _run_dispatcher_turn(chat_id: str, record: dict) -> str:

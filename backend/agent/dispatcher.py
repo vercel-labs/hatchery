@@ -13,7 +13,7 @@ import typing
 import ai
 
 from agent import devbox
-from store import events
+from store import events, tasks, workspaces
 
 SYSTEM = """\
 You are fabricator's dispatcher. You coordinate coding work; you never write
@@ -36,13 +36,12 @@ def agent_for(
 ) -> ai.Agent:
     """Build the dispatcher agent bound to one chat's worker state.
 
-    `chat` is the tail of the chat's (chat_id, "worker") stream; the tool
-    writes the box / set / session ids on it and snapshots after each change,
-    so the tty proxy and later turns find them across restarts.
+    `chat` is the tail of the chat's (chat_id, "worker") stream. It owns the
+    shared box and taskset; each launch stores its own task and PTY session.
     """
 
     @ai.tool
-    async def launch_coder(task: str) -> ai.StreamingStatusTool[str]:
+    async def launch_coder(task: str) -> ai.StreamingStatusTool[typing.Any]:
         """Hand a coding task to this chat's devbox.
 
         The task should be self-contained: what to build or do, and what
@@ -50,31 +49,33 @@ def agent_for(
         completion arrives in a later turn.
         """
         if not chat.get("set_id") or not chat.get("box"):
-            if not chat.get("set_id"):
-                chat["set_id"] = await devbox.create_taskset(f"fab {chat['id']}")
-            if not chat.get("box"):
-                yield "creating devbox (cold boot, about a minute)…"
-                chat["box"] = await devbox.create_box(f"fab-{chat['id']}")
-            await events.append(chat["id"], "worker", dict(chat))
+            async with workspaces.provision(chat["id"]):
+                current = await events.tail(chat["id"], "worker") or chat
+                chat.update(current)
+                if not chat.get("set_id"):
+                    chat["set_id"] = await devbox.create_taskset(f"fab {chat['id']}")
+                if not chat.get("box"):
+                    yield "creating devbox (cold boot, about a minute)…"
+                    chat["box"] = await devbox.create_box(f"fab-{chat['id']}")
+                await events.append(chat["id"], "worker", dict(chat))
 
         yield "dispatching task…"
-        webhook_secret = secrets.token_urlsafe(32)
-        chat.pop("task_id", None)
-        chat.pop("session_id", None)
-        chat["task_prompt"] = task
-        chat["webhook_secret"] = webhook_secret
-        chat["webhook_seq"] = 0
-        chat["completion_delivered"] = False
-        await events.append(chat["id"], "worker", dict(chat))
+        launch = await tasks.create(chat["id"], task, secrets.token_urlsafe(32))
         created = await devbox.create_task(
-            chat["box"]["id"], chat["set_id"], task, webhook_secret, chat["id"]
+            chat["box"]["id"],
+            chat["set_id"],
+            task,
+            launch["webhook_secret"],
+            launch["id"],
         )
-        chat["task_id"] = created["task_id"]
-        chat["session_id"] = created["session_id"]
-        await events.append(chat["id"], "worker", dict(chat))
+        launch = await tasks.finish_create(launch["id"], created)
         if on_task_created is not None:
-            on_task_created(dict(chat), created)
+            on_task_created(dict(launch), created)
 
-        yield f"task accepted [{created['state']}]; work is still running"
+        yield {
+            "launch_id": launch["id"],
+            "task_id": created["task_id"],
+            "state": created["state"],
+        }
 
     return ai.Agent(tools=[launch_coder])

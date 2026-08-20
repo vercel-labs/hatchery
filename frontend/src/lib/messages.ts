@@ -6,7 +6,9 @@ import type { UIMessage } from "ai";
 export type FabricatorTools = {
   launch_coder: {
     input: { task?: string };
-    output: unknown;
+    output:
+      | { launch_id: string; task_id: string; state: string }
+      | string;
   };
 };
 

@@ -5,7 +5,7 @@ import httpx
 import ai
 import channels
 from app import server
-from store import chats, events
+from store import chats, events, tasks
 
 
 def client() -> httpx.AsyncClient:
@@ -103,17 +103,9 @@ async def test_devbox_completion_is_persisted_and_delivered_once(monkeypatch):
     try:
         space = await server.spaces.default()
         chat, _ = await chats.claim("fake:thread", "fake", space.id, "task", {"thread": "1"})
-        await events.append(
-            chat.id,
-            "worker",
-            {
-                "id": chat.id,
-                "task_id": "task_1",
-                "webhook_secret": "secret",
-                "webhook_seq": 0,
-                "completion_delivered": False,
-            },
-        )
+        launch = await tasks.create(chat.id, "fix it", "secret")
+        launch["task_id"] = "task_1"
+        await tasks.save(launch)
         body = {
             "kind": "taskStateChange",
             "taskStateChange": {
@@ -128,10 +120,10 @@ async def test_devbox_completion_is_persisted_and_delivered_once(monkeypatch):
         }
         async with client() as c:
             first = await c.post(
-                f"/channels/v1/devbox?chat_id={chat.id}&secret=secret", json=body
+                "/channels/v1/devbox", params={"launch_id": launch["id"], "secret": "secret"}, json=body
             )
             duplicate = await c.post(
-                f"/channels/v1/devbox?chat_id={chat.id}&secret=secret", json=body
+                "/channels/v1/devbox", params={"launch_id": launch["id"], "secret": "secret"}, json=body
             )
         await pending[0]
         pending[1].close()
@@ -142,7 +134,8 @@ async def test_devbox_completion_is_persisted_and_delivered_once(monkeypatch):
         assert delivered.type == channels.protocol.MESSAGE_COMPLETED
         assert delivered.data["message"] == "The coder fixed it."
         assert state == {"thread": "1"}
-        record = await events.tail(chat.id, "worker")
+        record = await tasks.get(launch["id"])
+        assert record is not None
         assert record["completion_delivered"] is True
         transcript = await events.read(chat.id, "messages")
         completion = ai.messages.Message.model_validate(transcript[-2][1])
@@ -193,11 +186,9 @@ async def test_devbox_completion_schedules_retry_without_duplicate_transcript(mo
     try:
         space = await server.spaces.default()
         chat, _ = await chats.claim("flaky:thread", "flaky", space.id, "task", {})
-        await events.append(
-            chat.id,
-            "worker",
-            {"id": chat.id, "task_id": "task_1", "webhook_secret": "secret"},
-        )
+        launch = await tasks.create(chat.id, "do it", "secret")
+        launch["task_id"] = "task_1"
+        await tasks.save(launch)
         body = {
             "kind": "taskStateChange",
             "taskStateChange": {
@@ -209,10 +200,10 @@ async def test_devbox_completion_schedules_retry_without_duplicate_transcript(mo
         }
         async with client() as c:
             failed = await c.post(
-                f"/channels/v1/devbox?chat_id={chat.id}&secret=secret", json=body
+                "/channels/v1/devbox", params={"launch_id": launch["id"], "secret": "secret"}, json=body
             )
             retried = await c.post(
-                f"/channels/v1/devbox?chat_id={chat.id}&secret=secret", json=body
+                "/channels/v1/devbox", params={"launch_id": launch["id"], "secret": "secret"}, json=body
             )
         assert failed.status_code == 200
         assert retried.status_code == 200
@@ -238,6 +229,29 @@ async def test_spawn_keeps_background_task_alive():
     await asyncio.wait_for(ran.wait(), 1)
 
 
+async def test_chat_tasks_lists_launches_without_secrets():
+    space = await server.spaces.default()
+    chat = await chats.create(space.id, "task")
+    launch = await tasks.create(chat.id, "inspect the bug", "secret")
+    launch["task_id"] = "task_1"
+    launch["session_id"] = "session_1"
+    await tasks.save(launch)
+
+    async with client() as c:
+        response = await c.get(f"/api/chats/{chat.id}/tasks")
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "id": launch["id"],
+            "title": "inspect the bug",
+            "task_id": "task_1",
+            "session_id": "session_1",
+            "state": "creating",
+            "created_at": launch["created_at"],
+        }
+    ]
+
+
 async def test_tty_accepts_before_reporting_session_not_ready():
     class FakeWebSocket:
         def __init__(self):
@@ -259,39 +273,61 @@ async def test_tty_accepts_before_reporting_session_not_ready():
 async def test_devbox_completion_claims_task_id_from_early_callback():
     space = await server.spaces.default()
     chat = await chats.create(space.id, "task")
-    await events.append(
-        chat.id,
-        "worker",
-        {"id": chat.id, "webhook_secret": "secret", "webhook_seq": 0},
-    )
+    launch = await tasks.create(chat.id, "do it", "secret")
     body = {
         "kind": "taskStateChange",
         "taskStateChange": {"taskId": "task_early", "state": "running", "seq": 1},
     }
     async with client() as c:
         response = await c.post(
-            f"/channels/v1/devbox?chat_id={chat.id}&secret=secret", json=body
+            "/channels/v1/devbox", params={"launch_id": launch["id"], "secret": "secret"}, json=body
         )
     assert response.status_code == 200
-    record = await events.tail(chat.id, "worker")
+    record = await tasks.get(launch["id"])
+    assert record is not None
     assert record["task_id"] == "task_early"
-    assert record["task_state"] == "running"
+    assert record["state"] == "running"
+
+
+async def test_concurrent_task_callbacks_keep_separate_state(monkeypatch):
+    monkeypatch.setattr(server.vercel.functions, "wait_until", lambda coro: coro.close())
+    space = await server.spaces.default()
+    chat = await chats.create(space.id, "task")
+    first = await tasks.create(chat.id, "first", "one")
+    first["task_id"] = "task_1"
+    await tasks.save(first)
+    second = await tasks.create(chat.id, "second", "two")
+    second["task_id"] = "task_2"
+    await tasks.save(second)
+
+    async with client() as c:
+        response = await c.post(
+            "/channels/v1/devbox",
+            params={"launch_id": first["id"], "secret": "one"},
+            json={
+                "kind": "taskStateChange",
+                "taskStateChange": {"taskId": "task_1", "state": "complete", "seq": 2},
+            },
+        )
+    assert response.status_code == 200
+    saved_first = await tasks.get(first["id"])
+    saved_second = await tasks.get(second["id"])
+    assert saved_first is not None and saved_first["state"] == "complete"
+    assert saved_second is not None and saved_second["state"] == "creating"
 
 
 async def test_devbox_completion_rejects_wrong_secret():
     space = await server.spaces.default()
     chat = await chats.create(space.id, "task")
-    await events.append(
-        chat.id,
-        "worker",
-        {"id": chat.id, "task_id": "task_1", "webhook_secret": "right"},
-    )
+    launch = await tasks.create(chat.id, "do it", "right")
+    launch["task_id"] = "task_1"
+    await tasks.save(launch)
     body = {
         "kind": "taskStateChange",
         "taskStateChange": {"taskId": "task_1", "state": "complete", "seq": 1},
     }
     async with client() as c:
         response = await c.post(
-            f"/channels/v1/devbox?chat_id={chat.id}&secret=wrong", json=body
+            "/channels/v1/devbox", params={"launch_id": launch["id"], "secret": "wrong"}, json=body
         )
     assert response.status_code == 401
