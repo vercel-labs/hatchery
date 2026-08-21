@@ -32,7 +32,7 @@ import store
 import vercel.functions
 from agent import devbox, dispatcher
 from channels import github, slack
-from store import activity, chats, events, spaces, tasks
+from store import activity, chats, events, spaces, tasks, turns
 
 log = logging.getLogger("app")
 _background: set[asyncio.Task] = set()
@@ -51,9 +51,11 @@ def _spawn(coro) -> None:
 
 
 class _StoreHub:
-    """Lands inbound messages in their chat: claim the binding, append the
-    message. Dedupe is durable, so webhook replays drop across instances.
-    No turn runs on inbound yet — the message waits in the chat for the UI."""
+    """Land inbound messages in a chat and run one dispatcher turn.
+
+    The channel endpoint already defers dispatch until after its fast ack, so
+    this coroutine can own the full turn and its reply delivery.
+    """
 
     async def dispatch(self, channel: str, inbound: channels.Inbound) -> None:
         space = None
@@ -68,6 +70,7 @@ class _StoreHub:
             chat.id, "messages", ai.user_message(inbound.text).model_dump(mode="json")
         )
         log.info("inbound %s -> %s chat %s", channel, "new" if created else "existing", chat.id)
+        await _run_inbound_turn(chat.id)
 
     async def dedupe(self, key: str) -> bool:
         return await chats.dedupe(key)
@@ -474,9 +477,8 @@ async def supervise_task(launch_id: str, reason: str) -> bool:
         raise
 
 
-async def _deliver(chat_id: str, message: str) -> list[str]:
+async def _emit(chat_id: str, event: channels.Event) -> list[str]:
     failures = []
-    event = channels.event(channels.protocol.MESSAGE_COMPLETED, message=message)
     for binding in await chats.bindings(chat_id):
         channel = bot.channels.get(binding.channel)
         if channel is None:
@@ -484,9 +486,30 @@ async def _deliver(chat_id: str, message: str) -> list[str]:
         try:
             await channel.on_event(event, binding.state)
         except Exception as error:
-            log.exception("coder update delivery failed: %s -> %s", chat_id, binding.channel)
+            log.exception("channel delivery failed: %s -> %s", chat_id, binding.channel)
             failures.append(f"{binding.channel}: {error}")
     return failures
+
+
+async def _deliver(chat_id: str, message: str) -> list[str]:
+    return await _emit(
+        chat_id, channels.event(channels.protocol.MESSAGE_COMPLETED, message=message)
+    )
+
+
+async def _run_inbound_turn(chat_id: str) -> None:
+    async with turns.run(chat_id):
+        await _emit(chat_id, channels.event(channels.protocol.TURN_STARTED))
+        try:
+            record = await events.tail(chat_id, "worker") or {"id": chat_id}
+            message = await _run_dispatcher_turn(chat_id, record)
+            await _deliver(chat_id, message)
+        except Exception as error:
+            log.exception("inbound dispatcher turn failed: %s", chat_id)
+            await _emit(
+                chat_id,
+                channels.event(channels.protocol.TURN_FAILED, error=str(error)),
+            )
 
 
 async def _run_supervision_turn(

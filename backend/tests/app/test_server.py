@@ -58,7 +58,24 @@ def test_dedupe_tool_history_repairs_old_ui_duplicates():
     assert repaired[1].tool_results[0].tool_call_id == "call_1"
 
 
-async def test_hub_lands_inbound_in_one_chat():
+async def test_hub_lands_inbound_in_one_chat(monkeypatch):
+    async def turn(chat_id, record):
+        return "reply"
+
+    delivered = []
+
+    async def deliver(chat_id, message):
+        delivered.append((chat_id, message))
+        return []
+
+    async def emit(chat_id, event):
+        delivered.append((chat_id, event.type))
+        return []
+
+    monkeypatch.setattr(server, "_run_dispatcher_turn", turn)
+    monkeypatch.setattr(server, "_deliver", deliver)
+    monkeypatch.setattr(server, "_emit", emit)
+
     hub = server.bot.hub
     await hub.dispatch(
         "slack",
@@ -70,12 +87,89 @@ async def test_hub_lands_inbound_in_one_chat():
     assert chat.title == "a thread"
     stored = await events.read(chat.id, "messages")
     assert len(stored) == 2
+    assert delivered == [
+        (chat.id, channels.protocol.TURN_STARTED),
+        (chat.id, "reply"),
+        (chat.id, channels.protocol.TURN_STARTED),
+        (chat.id, "reply"),
+    ]
+
+
+async def test_inbound_turn_delivers_failure(monkeypatch):
+    delivered = []
+
+    async def turn(chat_id, record):
+        raise RuntimeError("gateway unavailable")
+
+    async def emit(chat_id, event):
+        delivered.append(event)
+        return []
+
+    monkeypatch.setattr(server, "_run_dispatcher_turn", turn)
+    monkeypatch.setattr(server, "_emit", emit)
+    await server._run_inbound_turn("chat_x")
+
+    assert [event.type for event in delivered] == [
+        channels.protocol.TURN_STARTED,
+        channels.protocol.TURN_FAILED,
+    ]
+    assert delivered[-1].data == {"error": "gateway unavailable"}
 
 
 async def test_hub_dedupe_is_durable():
     hub = server.bot.hub
     assert await hub.dedupe("slack:ev1") is True
     assert await hub.dedupe("slack:ev1") is False
+
+
+async def test_slack_webhook_runs_dispatcher_and_replies_in_thread(monkeypatch):
+    slack_channel = server.bot.channels["slack"]
+    delivered = []
+    seen = {}
+
+    async def verify(headers):
+        return None
+
+    async def turn(chat_id, record):
+        seen["chat_id"] = chat_id
+        seen["record"] = record
+        return "I can help with that."
+
+    async def on_event(event, state):
+        delivered.append((event, state))
+
+    monkeypatch.setattr(server.slack.connect, "verify_connect_webhook", verify)
+    monkeypatch.setattr(server, "_run_dispatcher_turn", turn)
+    monkeypatch.setattr(slack_channel, "on_event", on_event)
+
+    payload = {
+        "type": "event_callback",
+        "team_id": "T1",
+        "event_id": "Ev1",
+        "authorizations": [{"user_id": "UBOT"}],
+        "event": {
+            "type": "app_mention",
+            "channel": "C1",
+            "ts": "100.1",
+            "user": "U1",
+            "text": "<@UBOT> inspect this",
+        },
+    }
+    async with client() as c:
+        response = await c.post(
+            "/channels/v1/slack", headers={"authorization": "Bearer good"}, json=payload
+        )
+
+    assert response.status_code == 200
+    [chat] = await chats.list_all()
+    assert seen == {"chat_id": chat.id, "record": {"id": chat.id}}
+    assert [event.type for event, _ in delivered] == [
+        channels.protocol.TURN_STARTED,
+        channels.protocol.MESSAGE_COMPLETED,
+    ]
+    assert delivered[-1][0].data == {"message": "I can help with that."}
+    assert delivered[-1][1]["channel_id"] == "C1"
+    assert delivered[-1][1]["thread_ts"] == "100.1"
 
 
 async def test_devbox_completion_is_persisted_and_delivered_once(monkeypatch):
