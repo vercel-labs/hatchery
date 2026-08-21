@@ -22,8 +22,10 @@ Behavior ported from eve's slack channel defaults, trimmed:
   partial
 """
 
+import html
 import json
 import os
+import re
 
 import httpx
 from vercel import connect
@@ -102,7 +104,9 @@ class SlackChannel:
             "team_id": payload.get("team_id", ""),
             "user_id": event.get("user", ""),
         }
-        title = " ".join(str(event.get("text", "")).split())[:60] or "slack thread"
+        title_text = re.sub(rf"<@{re.escape(bot_user_id)}>", "", str(event.get("text", "")))
+        title_text = html.unescape(" ".join(title_text.split())).strip()
+        title = f"slack: {title_text[:53]}" if title_text else "slack: thread"
         return channels.Inbound(token=f"{channel_id}:{thread_ts}", text=text, state=state, title=title)
 
     async def on_event(self, event: channels.Event, state: dict) -> None:

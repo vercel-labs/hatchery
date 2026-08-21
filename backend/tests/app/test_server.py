@@ -28,6 +28,23 @@ async def test_chat_create_and_list():
     assert [x["id"] for x in listed] == [created["id"]]
 
 
+async def test_chat_list_cleans_legacy_slack_title():
+    space = await server.spaces.default()
+    chat, _ = await chats.claim(
+        "slack:C1:1.0",
+        "slack",
+        space.id,
+        "<@UBOT> old &lt;-&gt; title",
+        {},
+    )
+
+    async with client() as c:
+        [listed] = (await c.get("/api/chats")).json()
+
+    assert listed["id"] == chat.id
+    assert listed["title"] == "slack: old <-> title"
+
+
 async def test_chat_messages_from_store():
     for message in (ai.user_message("hi"), ai.assistant_message("hello")):
         await events.append("chat_x", "messages", message.model_dump(mode="json"))
@@ -37,6 +54,22 @@ async def test_chat_messages_from_store():
     assert [m["role"] for m in ui] == ["user", "assistant"]
     assert ui[0]["parts"][0]["text"] == "hi"
     assert empty == []
+
+
+async def test_chat_messages_hide_slack_envelope_and_mark_origin():
+    text = (
+        '<slack_message channel="C1" thread_ts="1.0" ts="1.1" sender="U1" team="T1">\n'
+        "hello &lt;-&gt; slack\n</slack_message>"
+    )
+    await events.append("chat_x", "messages", ai.user_message(text).model_dump(mode="json"))
+
+    async with client() as c:
+        [message] = (await c.get("/api/chats/chat_x/messages")).json()
+
+    assert message["parts"][0]["text"] == "hello <-> slack"
+    assert message["metadata"]["origin"] == "slack"
+    stored = await events.read("chat_x", "messages")
+    assert ai.messages.Message.model_validate(stored[0][1]).text == text
 
 
 def test_dedupe_tool_history_repairs_old_ui_duplicates():

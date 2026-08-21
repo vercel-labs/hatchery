@@ -98,6 +98,7 @@ async def test_app_mention_dispatches_with_thread_token_and_attribution():
     assert "<@UBOT> hello" in inbound.text
     assert '<slack_message channel="C1"' in inbound.text
     assert 'sender="U1"' in inbound.text
+    assert inbound.title == "slack: hello"
     assert inbound.state == {"channel_id": "C1", "thread_ts": "100.1", "team_id": "T1", "user_id": "U1"}
 
 
