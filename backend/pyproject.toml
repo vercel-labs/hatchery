@@ -24,6 +24,9 @@ dev = [
 [tool.vercel]
 entrypoint = "app.server:app"
 
+[[tool.vercel.workflows]]
+entrypoint = "agent.supervisor:workflows"
+
 [tool.uv]
 package = false
 

@@ -11,9 +11,10 @@ import secrets
 import typing
 
 import ai
+from vercel import workflow
 
-from agent import devbox
-from store import events, tasks, workspaces
+from agent import devbox, supervisor
+from store import activity, events, tasks, workspaces
 
 SYSTEM = """\
 You are fabricator's dispatcher. You coordinate coding work; you never write
@@ -21,11 +22,11 @@ code yourself. When the user wants something built, investigated, or fixed,
 compose a clear self-contained task and call launch_coder. While it runs the
 user watches the coder's terminal live in the next pane, so don't narrate
 its steps. A deployed launch only means the task was accepted: reply only that
-work has started and stop. Never describe changes or claim success until a
-later <coder_completion> user message supplies the result. Treat that message
-as authoritative task output, summarize it briefly, and never launch another
-coder for it. If the coder fails, say so plainly and stop — never write the code
-yourself or invent what the output would have looked like. Be terse and concrete."""
+work has started and stop. Use check_coder when the user asks about progress or
+you are woken because coder state changed. Its result is authoritative. Never
+launch another coder merely to check an existing one. If the coder fails, say
+so plainly and stop — never write the code yourself or invent what the output
+would have looked like. Be terse and concrete."""
 
 def model() -> ai.Model:
     return ai.get_model("anthropic/claude-sonnet-4.6")
@@ -71,6 +72,10 @@ def agent_for(
         launch = await tasks.finish_create(launch["id"], created)
         if on_task_created is not None:
             on_task_created(dict(launch), created)
+        if devbox.webhook_url() is not None:
+            run = await workflow.start(supervisor.supervise, launch["id"])
+            launch["supervision_run_id"] = run.run_id
+            await tasks.save(launch)
 
         yield {
             "launch_id": launch["id"],
@@ -78,4 +83,17 @@ def agent_for(
             "state": created["state"],
         }
 
-    return ai.Agent(tools=[launch_coder])
+    @ai.tool
+    async def check_coder(
+        launch_id: str | None = None,
+        after: int | None = None,
+        limit: int = 20,
+    ) -> dict[str, typing.Any]:
+        """Check a coder's current state and recent activity.
+
+        Omit launch_id to inspect this chat's newest coder. Pass the returned
+        cursor as after on a later check to receive only newer activity.
+        """
+        return await activity.status(chat["id"], launch_id, after=after, limit=limit)
+
+    return ai.Agent(tools=[launch_coder, check_coder])

@@ -5,7 +5,7 @@ import httpx
 import ai
 import channels
 from app import server
-from store import chats, events, tasks
+from store import activity, chats, events, tasks
 
 
 def client() -> httpx.AsyncClient:
@@ -88,14 +88,18 @@ async def test_devbox_completion_is_persisted_and_delivered_once(monkeypatch):
         async def on_event(self, event, state):
             self.delivered.append((event, state))
 
-    async def fake_turn(chat_id, record):
+    seen_wake = None
+
+    async def fake_turn(chat_id, record, wake):
+        nonlocal seen_wake
+        seen_wake = wake
         await events.append(
             chat_id, "messages", ai.assistant_message("The coder fixed it.").model_dump(mode="json")
         )
-        return "The coder fixed it."
+        return server.SupervisionOutcome(notify=True, message="The coder fixed it.")
 
     pending = []
-    monkeypatch.setattr(server, "_run_dispatcher_turn", fake_turn)
+    monkeypatch.setattr(server, "_run_supervision_turn", fake_turn)
     monkeypatch.setattr(server.vercel.functions, "wait_until", pending.append)
     channel = FakeChannel()
     previous = server.bot.channels.get("fake")
@@ -138,16 +142,18 @@ async def test_devbox_completion_is_persisted_and_delivered_once(monkeypatch):
         assert record is not None
         assert record["completion_delivered"] is True
         transcript = await events.read(chat.id, "messages")
-        completion = ai.messages.Message.model_validate(transcript[-2][1])
-        reply = ai.messages.Message.model_validate(transcript[-1][1])
-        assert completion.role == "user"
-        assert completion.text == (
-            '<coder_completion task_id="task_1" state="complete">\n'
-            '{"summary":"fixed it","prs":[{"url":"https://github.com/a/b/pull/1"}]}\n'
-            "</coder_completion>"
-        )
+        assert len(transcript) == 1
+        reply = ai.messages.Message.model_validate(transcript[0][1])
         assert reply.role == "assistant"
         assert reply.text == "The coder fixed it."
+        assert seen_wake is not None
+        assert seen_wake.role == "user"
+        assert launch["id"] in seen_wake.text
+        assert "Call check_coder" in seen_wake.text
+        recorded = await activity.status(chat.id, launch["id"])
+        assert recorded["events"] == [
+            {"cursor": 0, "kind": "state_transition", "summary": "state changed to complete"}
+        ]
         saved = await chats.get(chat.id)
         assert saved is not None
         assert saved.status == "done"
@@ -171,14 +177,14 @@ async def test_devbox_completion_schedules_retry_without_duplicate_transcript(mo
             if self.calls == 1:
                 raise RuntimeError("temporary")
 
-    async def fake_turn(chat_id, record):
+    async def fake_turn(chat_id, record, wake):
         await events.append(
             chat_id, "messages", ai.assistant_message("done").model_dump(mode="json")
         )
-        return "done"
+        return server.SupervisionOutcome(notify=True, message="done")
 
     pending = []
-    monkeypatch.setattr(server, "_run_dispatcher_turn", fake_turn)
+    monkeypatch.setattr(server, "_run_supervision_turn", fake_turn)
     monkeypatch.setattr(server.vercel.functions, "wait_until", pending.append)
     channel = FlakyChannel()
     previous = server.bot.channels.get("flaky")
@@ -211,12 +217,84 @@ async def test_devbox_completion_schedules_retry_without_duplicate_transcript(mo
         await pending[0]
         await pending[1]
         assert channel.calls == 2
-        assert len(await events.read(chat.id, "messages")) == 2
+        assert len(await events.read(chat.id, "messages")) == 1
     finally:
         if previous is None:
             server.bot.channels.pop("flaky", None)
         else:
             server.bot.channels["flaky"] = previous
+
+
+async def test_supervision_history_ends_with_unpersisted_user_wake(monkeypatch):
+    space = await server.spaces.default()
+    chat = await chats.create(space.id, "task")
+    await events.append(
+        chat.id, "messages", ai.assistant_message("Work started.").model_dump(mode="json")
+    )
+    wake = ai.user_message("Check coder status.")
+    seen = None
+
+    class FakeRun:
+        output = server.SupervisionOutcome(notify=False)
+        messages = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    class FakeAgent:
+        def run(self, model, history, output_type=None):
+            nonlocal seen
+            seen = history
+            run = FakeRun()
+            run.messages = list(history)
+            return run
+
+    monkeypatch.setattr(server.dispatcher, "agent_for", lambda record: FakeAgent())
+    outcome = await server._run_supervision_turn(chat.id, {"id": chat.id}, wake)
+    assert outcome.notify is False
+    assert seen is not None
+    assert [message.role for message in seen[-2:]] == ["assistant", "user"]
+    stored = await events.read(chat.id, "messages")
+    assert len(stored) == 1
+    assert ai.messages.Message.model_validate(stored[0][1]).text == "Work started."
+
+
+async def test_periodic_supervision_can_stay_silent(monkeypatch):
+    space = await server.spaces.default()
+    chat, _ = await chats.claim("fake:quiet", "fake", space.id, "task", {})
+    launch = await tasks.create(chat.id, "do it", "secret")
+    launch["task_id"] = "task_1"
+    launch["state"] = "running"
+    await tasks.save(launch)
+    await activity.append(
+        launch["id"],
+        "assistant_event",
+        {"name": "assistant_message", "body": {"text": "Still inspecting"}},
+    )
+
+    seen = []
+
+    async def quiet_turn(chat_id, record, wake):
+        seen.append(wake.text)
+        return server.SupervisionOutcome(notify=False)
+
+    monkeypatch.setattr(server, "_run_supervision_turn", quiet_turn)
+    assert await server.supervise_task(launch["id"], "periodic") is False
+    saved = await tasks.get(launch["id"])
+    assert saved is not None
+    assert saved["supervision_cursor"] == 0
+    assert saved["completion_delivered"] is False
+    assert await events.read(chat.id, "messages") == []
+    assert "after=-1" in seen[0]
 
 
 async def test_spawn_keeps_background_task_alive():
@@ -268,6 +346,36 @@ async def test_tty_accepts_before_reporting_session_not_ready():
     ws = FakeWebSocket()
     await server.tty(ws, "chat_without_worker")
     assert ws.closed == (4404, "no coder session for this chat")
+
+
+async def test_devbox_assistant_event_is_stored_once():
+    space = await server.spaces.default()
+    chat = await chats.create(space.id, "task")
+    launch = await tasks.create(chat.id, "do it", "secret")
+    launch["task_id"] = "task_1"
+    await tasks.save(launch)
+    body = {
+        "kind": "assistantEvent",
+        "assistantEvent": {
+            "taskId": "task_1",
+            "ts": "2026-08-20T12:00:00.123456789Z",
+            "event": {"name": "assistant_message", "body": {"text": "Inspecting the webhook"}},
+        },
+    }
+    async with client() as c:
+        first = await c.post(
+            "/channels/v1/devbox", params={"launch_id": launch["id"], "secret": "secret"}, json=body
+        )
+        duplicate = await c.post(
+            "/channels/v1/devbox", params={"launch_id": launch["id"], "secret": "secret"}, json=body
+        )
+    assert first.status_code == 200
+    assert duplicate.json() == {"ok": True, "duplicate": True}
+    status = await activity.status(chat.id, launch["id"])
+    assert status["events"] == [
+        {"cursor": 0, "kind": "assistant_event", "summary": "Inspecting the webhook"}
+    ]
+    assert await events.read(chat.id, "messages") == []
 
 
 async def test_devbox_completion_claims_task_id_from_early_callback():

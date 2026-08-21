@@ -44,6 +44,8 @@ async def create(chat_id: str, prompt: str, webhook_secret: str) -> dict:
         "webhook_secret": webhook_secret,
         "webhook_seq": 0,
         "completion_delivered": False,
+        "supervision_generation": 0,
+        "supervision_cursor": -1,
         "created_at": datetime.datetime.now(datetime.UTC).isoformat(),
     }
     await save(record)
@@ -115,6 +117,92 @@ async def get(task_id: str) -> dict | None:
     path = _path(task_id)
     with _lock:
         return json.loads(path.read_text()) if path.exists() else None
+
+
+async def claim_supervision(task_id: str, terminal: bool) -> dict | None:
+    """Atomically claim one dispatcher check, with an expiring crash-safe lease."""
+    if store.use_postgres():
+        from store import db
+
+        pool = await db.pool()
+        async with pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT data FROM fab_tasks WHERE id = $1 FOR UPDATE", task_id
+            )
+            if row is None:
+                return None
+            record = _data(row["data"])
+            lease = record.get("supervision_lease_until")
+            running = bool(lease and lease > datetime.datetime.now(datetime.UTC).isoformat())
+            if running or (terminal and record.get("completion_delivered")):
+                return None
+            if not terminal and record.get("state") in ("complete", "errored"):
+                return None
+            record["supervision_lease_until"] = (
+                datetime.datetime.now(datetime.UTC) + datetime.timedelta(minutes=5)
+            ).isoformat()
+            record["supervision_reason"] = "terminal" if terminal else "periodic"
+            record["supervision_generation"] = int(record.get("supervision_generation") or 0) + 1
+            await conn.execute(
+                "UPDATE fab_tasks SET data = $2::jsonb WHERE id = $1",
+                task_id,
+                json.dumps(record, separators=(",", ":")),
+            )
+            return record
+    path = _path(task_id)
+    with _lock:
+        if not path.exists():
+            return None
+        record = json.loads(path.read_text())
+        lease = record.get("supervision_lease_until")
+        running = bool(lease and lease > datetime.datetime.now(datetime.UTC).isoformat())
+        if running or (terminal and record.get("completion_delivered")):
+            return None
+        if not terminal and record.get("state") in ("complete", "errored"):
+            return None
+        record["supervision_lease_until"] = (
+            datetime.datetime.now(datetime.UTC) + datetime.timedelta(minutes=5)
+        ).isoformat()
+        record["supervision_reason"] = "terminal" if terminal else "periodic"
+        record["supervision_generation"] = int(record.get("supervision_generation") or 0) + 1
+        path.write_text(json.dumps(record, separators=(",", ":")))
+        return record
+
+
+async def finish_supervision(task_id: str, generation: int, **updates) -> dict | None:
+    """Release a claimed check without overwriting a newer generation."""
+    if store.use_postgres():
+        from store import db
+
+        pool = await db.pool()
+        async with pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT data FROM fab_tasks WHERE id = $1 FOR UPDATE", task_id
+            )
+            if row is None:
+                return None
+            record = _data(row["data"])
+            if int(record.get("supervision_generation") or 0) != generation:
+                return record
+            record.update(updates)
+            record.pop("supervision_lease_until", None)
+            await conn.execute(
+                "UPDATE fab_tasks SET data = $2::jsonb WHERE id = $1",
+                task_id,
+                json.dumps(record, separators=(",", ":")),
+            )
+            return record
+    path = _path(task_id)
+    with _lock:
+        if not path.exists():
+            return None
+        record = json.loads(path.read_text())
+        if int(record.get("supervision_generation") or 0) != generation:
+            return record
+        record.update(updates)
+        record.pop("supervision_lease_until", None)
+        path.write_text(json.dumps(record, separators=(",", ":")))
+        return record
 
 
 async def list_for_chat(chat_id: str) -> list[dict]:

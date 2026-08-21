@@ -17,7 +17,6 @@ _StoreHub (dedupe, claim binding, append); no turn runs on inbound yet.
 import asyncio
 import contextlib
 import hmac
-import json
 import logging
 
 import fastapi
@@ -33,7 +32,7 @@ import store
 import vercel.functions
 from agent import devbox, dispatcher
 from channels import github, slack
-from store import chats, events, spaces, tasks
+from store import activity, chats, events, spaces, tasks
 
 log = logging.getLogger("app")
 _background: set[asyncio.Task] = set()
@@ -42,7 +41,13 @@ _background: set[asyncio.Task] = set()
 def _spawn(coro) -> None:
     task = asyncio.create_task(coro)
     _background.add(task)
-    task.add_done_callback(_background.discard)
+
+    def done(completed: asyncio.Task) -> None:
+        _background.discard(completed)
+        if not completed.cancelled() and (error := completed.exception()) is not None:
+            log.error("background task failed", exc_info=error)
+
+    task.add_done_callback(done)
 
 
 class _StoreHub:
@@ -130,6 +135,11 @@ class ChatRequest(pydantic.BaseModel):
     messages: list[ai.ui.ai_sdk.UIMessage]
 
 
+class SupervisionOutcome(pydantic.BaseModel):
+    notify: bool
+    message: str | None = None
+
+
 @app.post("/api/chat")
 async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
     """One dispatcher turn, streamed as an AI SDK UI message stream.
@@ -155,6 +165,7 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
     def observe_task(launch: dict, created: dict) -> None:
         if devbox.webhook_url() is None:
             _spawn(_watch_local_task(request.chat_id, launch, created))
+            _spawn(_supervise_local(launch["id"]))
 
     agent = dispatcher.agent_for(record, observe_task)
 
@@ -278,11 +289,12 @@ async def tty(ws: fastapi.WebSocket, chat_id: str) -> None:
 
 @app.post("/channels/v1/devbox")
 async def devbox_webhook(body: dict, launch_id: str = "", secret: str = "") -> dict:
-    """Persist one task's transition without disturbing sibling tasks."""
-    if body.get("kind") != "taskStateChange" or not isinstance(body.get("taskStateChange"), dict):
+    """Persist one task event without disturbing sibling tasks."""
+    kind = str(body.get("kind", ""))
+    payload = body.get(kind)
+    if kind not in ("taskStateChange", "assistantEvent") or not isinstance(payload, dict):
         raise fastapi.HTTPException(400, "unsupported devbox event")
-    change = body["taskStateChange"]
-    task_id = str(change.get("taskId", ""))
+    task_id = str(payload.get("taskId", ""))
     if not task_id:
         raise fastapi.HTTPException(400, "missing task id")
 
@@ -296,28 +308,54 @@ async def devbox_webhook(body: dict, launch_id: str = "", secret: str = "") -> d
         raise fastapi.HTTPException(404, "unknown task")
     record["task_id"] = task_id
 
-    seq = int(change.get("seq") or 0)
-    state = str(change.get("state", ""))
+    if kind == "assistantEvent":
+        cursor = str(payload.get("ts", ""))
+        event = payload.get("event")
+        if not cursor or not isinstance(event, dict):
+            raise fastapi.HTTPException(400, "invalid assistant event")
+        if not await chats.dedupe(f"devbox:{launch_id}:activity:{cursor}"):
+            return {"ok": True, "duplicate": True}
+        await activity.append(record["id"], "assistant_event", event, source_cursor=cursor)
+        return {"ok": True}
+
+    seq = int(payload.get("seq") or 0)
+    state = str(payload.get("state", ""))
     current_seq = int(record.get("webhook_seq") or 0)
     if seq < current_seq or (
         seq == current_seq
         and (state not in devbox.TERMINAL_STATES or record.get("completion_delivered"))
     ):
         return {"ok": True, "duplicate": True}
+    if seq == current_seq:
+        vercel.functions.wait_until(supervise_task(record["id"], "terminal"))
+        return {"ok": True}
 
-    result = change.get("result") if isinstance(change.get("result"), dict) else {}
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
     record["webhook_seq"] = seq
     record["state"] = state
     if result:
         record["result"] = result
+    await activity.append(
+        record["id"], "state_transition", {"state": state, "result": result, "seq": seq}
+    )
     await tasks.save(record)
     if state not in devbox.TERMINAL_STATES:
         return {"ok": True}
 
-    await _record_task_completion(record, state, result)
     if not record.get("completion_delivered"):
-        vercel.functions.wait_until(_finish_task(record["id"]))
+        vercel.functions.wait_until(supervise_task(record["id"], "terminal"))
     return {"ok": True}
+
+
+async def _supervise_local(launch_id: str) -> None:
+    for delay in (60, 120):
+        await asyncio.sleep(delay)
+        if await supervise_task(launch_id, "periodic"):
+            return
+    while True:
+        await asyncio.sleep(300)
+        if await supervise_task(launch_id, "periodic"):
+            return
 
 
 async def _watch_local_task(chat_id: str, record: dict, created: dict) -> None:
@@ -328,10 +366,15 @@ async def _watch_local_task(chat_id: str, record: dict, created: dict) -> None:
         summary = ""
         async for frame in devbox.watch(workspace["box"]["url"], created["task_id"]):
             body = (frame or {}).get("body") or {}
-            if (event := body.get("assistantEvent")) and event.get("name") == "complete":
-                summary = str((event.get("body") or {}).get("summary") or summary)
+            if event := body.get("assistantEvent"):
+                cursor = str((frame or {}).get("ts", ""))
+                if not cursor or await chats.dedupe(f"devbox:{record['id']}:activity:{cursor}"):
+                    await activity.append(record["id"], "assistant_event", event, source_cursor=cursor or None)
+                if event.get("name") == "complete":
+                    summary = str((event.get("body") or {}).get("summary") or summary)
             if transition := body.get("stateTransition"):
                 state = str(transition["to"])
+                await activity.append(record["id"], "state_transition", dict(transition))
                 if state in devbox.TERMINAL_STATES:
                     break
         row = await devbox.get_task(created["task_id"])
@@ -341,62 +384,99 @@ async def _watch_local_task(chat_id: str, record: dict, created: dict) -> None:
         if row.get("state") in devbox.TERMINAL_STATES:
             state = row["state"]
         if "executable file not found" not in str(result.get("error", "")) or attempt == 3:
-            await _record_task_completion(record, state, result)
-            await _finish_task(record["id"])
+            record["state"] = state
+            record["result"] = result
+            await tasks.save(record)
+            await supervise_task(record["id"], "terminal")
             return
         await asyncio.sleep(20)
-        created = await devbox.create_task(
-            workspace["box"]["id"], workspace["set_id"], record["prompt"]
-        )
+        try:
+            created = await devbox.create_task(
+                workspace["box"]["id"], workspace["set_id"], record["prompt"]
+            )
+        except Exception as error:
+            record["state"] = "errored"
+            record["result"] = {"error": f"coder retry failed: {error}"}
+            await activity.append(
+                record["id"],
+                "state_transition",
+                {"from": state, "to": "errored", "error": str(error)},
+            )
+            await tasks.save(record)
+            await supervise_task(record["id"], "terminal")
+            return
         record["task_id"] = created["task_id"]
         record["session_id"] = created["session_id"]
         record["state"] = created["state"]
         await tasks.save(record)
 
 
-async def _record_task_completion(record: dict, state: str, result: dict) -> None:
-    if not record.get("completion_recorded"):
-        completion = (
-            f'<coder_completion task_id="{record["task_id"]}" state="{state}">\n'
-            f"{json.dumps(result, separators=(',', ':'))}\n"
-            "</coder_completion>"
-        )
-        await events.append(
-            record["chat_id"], "messages", ai.user_message(completion).model_dump(mode="json")
-        )
-        record["completion_recorded"] = True
-    record["state"] = state
-    record["result"] = result
-    await tasks.save(record)
+async def supervise_task(launch_id: str, reason: str) -> bool:
+    """Run one serialized status check. Return true when the task is terminal."""
+    current = await tasks.get(launch_id)
+    if current is None:
+        return True
+    terminal = current.get("state") in devbox.TERMINAL_STATES
+    record = await tasks.claim_supervision(launch_id, terminal or reason == "terminal")
+    if record is None:
+        latest = await tasks.get(launch_id)
+        return latest is None or latest.get("state") in devbox.TERMINAL_STATES
 
-
-async def _finish_task(launch_id: str) -> None:
-    """Run and deliver one task's completion after its callback response."""
-    record = await tasks.get(launch_id)
-    if record is None or record.get("completion_delivered"):
-        return
+    generation = int(record["supervision_generation"])
     chat_id = record["chat_id"]
-    state = record["state"]
-    result = record.get("result") or {}
-    message = str(record.get("completion_message") or "")
-    if not message:
-        workspace = await events.tail(chat_id, "worker") or {"id": chat_id}
-        message = await _run_dispatcher_turn(chat_id, workspace)
-        record["completion_message"] = message
-        await tasks.save(record)
-    artifact = next(
-        (str(pr["url"]) for pr in result.get("prs") or [] if isinstance(pr, dict) and pr.get("url")),
-        message,
-    )
-    siblings = await tasks.list_for_chat(chat_id)
-    active = any(
-        sibling["id"] != launch_id and sibling.get("state") not in devbox.TERMINAL_STATES
-        for sibling in siblings
-    )
-    if not active:
-        await chats.finish(chat_id, "done" if state == "complete" else "failed", artifact)
-    event = channels.event(channels.protocol.MESSAGE_COMPLETED, message=message)
+    cursor = int(record.get("supervision_cursor", -1))
+    try:
+        cached = str(record.get("completion_message") or "") if terminal else ""
+        if cached:
+            outcome = SupervisionOutcome(notify=True, message=cached)
+        else:
+            workspace = await events.tail(chat_id, "worker") or {"id": chat_id}
+            wake = ai.user_message(
+                f"Supervise coder {launch_id}. Call check_coder with launch_id={launch_id!r} "
+                f"and after={cursor}. This is a {reason} check. Do not launch another coder. "
+                "Return JSON with notify and message. For periodic checks, notify only for a meaningful "
+                "milestone, attention request, failure, or completion. Terminal checks must notify."
+            )
+            outcome = await _run_supervision_turn(chat_id, workspace, wake)
+            if terminal and outcome.message:
+                record["completion_message"] = outcome.message
+                await tasks.save(record)
+        latest = await tasks.get(launch_id) or record
+        if int(latest.get("supervision_generation") or 0) != generation:
+            return latest.get("state") in devbox.TERMINAL_STATES
+        terminal = latest.get("state") in devbox.TERMINAL_STATES
+        updates: dict = {"supervision_cursor": await activity.cursor(launch_id)}
+        if outcome.notify and outcome.message:
+            failures = await _deliver(chat_id, outcome.message)
+            updates["delivery_errors"] = failures
+            if not failures and terminal:
+                updates["completion_delivered"] = True
+                updates["completion_message"] = outcome.message
+        if terminal:
+            result = latest.get("result") or {}
+            artifact = next(
+                (str(pr["url"]) for pr in result.get("prs") or [] if isinstance(pr, dict) and pr.get("url")),
+                outcome.message or "coder completed",
+            )
+            siblings = await tasks.list_for_chat(chat_id)
+            active = any(
+                sibling["id"] != launch_id and sibling.get("state") not in devbox.TERMINAL_STATES
+                for sibling in siblings
+            )
+            if not active:
+                await chats.finish(
+                    chat_id, "done" if latest.get("state") == "complete" else "failed", artifact
+                )
+        await tasks.finish_supervision(launch_id, generation, **updates)
+        return terminal
+    except Exception:
+        await tasks.finish_supervision(launch_id, generation)
+        raise
+
+
+async def _deliver(chat_id: str, message: str) -> list[str]:
     failures = []
+    event = channels.event(channels.protocol.MESSAGE_COMPLETED, message=message)
     for binding in await chats.bindings(chat_id):
         channel = bot.channels.get(binding.channel)
         if channel is None:
@@ -404,20 +484,41 @@ async def _finish_task(launch_id: str) -> None:
         try:
             await channel.on_event(event, binding.state)
         except Exception as error:
-            log.exception("devbox completion delivery failed: %s -> %s", record["task_id"], binding.channel)
+            log.exception("coder update delivery failed: %s -> %s", chat_id, binding.channel)
             failures.append(f"{binding.channel}: {error}")
-    record["completion_delivered"] = not failures
-    if failures:
-        record["delivery_errors"] = failures
-    else:
-        record.pop("delivery_errors", None)
-    await tasks.save(record)
+    return failures
 
 
-async def _run_dispatcher_turn(chat_id: str, record: dict) -> str:
-    """Run the completion message as a new dispatcher turn and persist it."""
+async def _run_supervision_turn(
+    chat_id: str, record: dict, wake: ai.messages.Message
+) -> SupervisionOutcome:
+    stored = await _transcript(chat_id)
+    history = [ai.system_message(dispatcher.SYSTEM), *stored, wake]
+    agent = dispatcher.agent_for(record)
+    async with agent.run(dispatcher.model(), history, output_type=SupervisionOutcome) as result:
+        async for _ in result:
+            pass
+        outcome = result.output
+        added = result.messages[len(history) :]
+        for message in added[:-1]:
+            await events.append(chat_id, "messages", message.model_dump(mode="json"))
+        if outcome.notify and outcome.message:
+            await events.append(
+                chat_id,
+                "messages",
+                ai.assistant_message(outcome.message).model_dump(mode="json"),
+            )
+        return outcome
+
+
+async def _run_dispatcher_turn(
+    chat_id: str, record: dict, wake: ai.messages.Message | None = None
+) -> str:
+    """Run a dispatcher turn; wake context is model-only, never persisted."""
     stored = await _transcript(chat_id)
     history = [ai.system_message(dispatcher.SYSTEM), *stored]
+    if wake is not None:
+        history.append(wake)
     agent = dispatcher.agent_for(record)
     async with agent.run(dispatcher.model(), history) as result:
         async for _ in result:
@@ -429,12 +530,6 @@ async def _run_dispatcher_turn(chat_id: str, record: dict) -> str:
         (message.text for message in reversed(added) if message.role == "assistant" and message.text),
         "coder completion recorded",
     )
-
-
-def _task_completion(state: str, result: dict) -> str:
-    parts = [str(result.get("summary") or result.get("error") or f"coder {state}")]
-    parts += [str(pr["url"]) for pr in result.get("prs") or [] if isinstance(pr, dict) and pr.get("url")]
-    return " ".join(parts)
 
 
 # Keep the generic channel route after the concrete devbox callback. Starlette
