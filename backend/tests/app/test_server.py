@@ -172,6 +172,72 @@ async def test_slack_webhook_runs_dispatcher_and_replies_in_thread(monkeypatch):
     assert delivered[-1][1]["thread_ts"] == "100.1"
 
 
+async def test_ui_turn_is_mirrored_to_bound_channel(monkeypatch):
+    class FakeChannel:
+        name = "fake"
+
+        def __init__(self):
+            self.delivered = []
+
+        async def on_event(self, event, state):
+            self.delivered.append((event, state))
+
+    class FakeRun:
+        def __init__(self, history):
+            self.messages = [*history, ai.assistant_message("answer from AI")]
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+    class FakeAgent:
+        def run(self, model, history):
+            return FakeRun(history)
+
+    async def fake_sse(result):
+        yield 'data: {"type":"finish"}\n\n'
+
+    channel = FakeChannel()
+    previous = server.bot.channels.get("fake")
+    server.bot.channels["fake"] = channel
+    monkeypatch.setattr(server.dispatcher, "agent_for", lambda record, observe: FakeAgent())
+    monkeypatch.setattr(server.ai.ui.ai_sdk, "to_sse", fake_sse)
+    try:
+        space = await server.spaces.default()
+        chat, _ = await chats.claim("fake:thread", "fake", space.id, "thread", {"thread": "1"})
+        ui = ai.ui.ai_sdk.to_ui_messages([ai.user_message("continue in UI")])
+        async with client() as c:
+            response = await c.post(
+                "/api/chat",
+                json={
+                    "chat_id": chat.id,
+                    "messages": [message.model_dump(mode="json") for message in ui],
+                },
+            )
+
+        assert response.status_code == 200
+        assert [event.type for event, _ in channel.delivered] == [
+            channels.protocol.MESSAGE_RECEIVED,
+            channels.protocol.TURN_STARTED,
+            channels.protocol.MESSAGE_COMPLETED,
+        ]
+        assert channel.delivered[0][0].data == {"message": "continue in UI", "origin": "ui"}
+        assert channel.delivered[-1][0].data == {"message": "answer from AI"}
+        assert all(state == {"thread": "1"} for _, state in channel.delivered)
+        stored = [ai.messages.Message.model_validate(data) for _, data in await events.read(chat.id, "messages")]
+        assert [(message.role, message.text) for message in stored] == [
+            ("user", "continue in UI"),
+            ("assistant", "answer from AI"),
+        ]
+    finally:
+        if previous is None:
+            server.bot.channels.pop("fake", None)
+        else:
+            server.bot.channels["fake"] = previous
+
+
 async def test_devbox_completion_is_persisted_and_delivered_once(monkeypatch):
     class FakeChannel:
         name = "fake"
