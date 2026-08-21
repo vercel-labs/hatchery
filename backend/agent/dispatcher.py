@@ -7,115 +7,93 @@ UI renders live — with the real claude code TUI attached in the terminal
 pane next to it.
 """
 
-import asyncio
-import time
+import secrets
+import typing
 
 import ai
+from vercel import workflow
 
-from agent import devbox
-from store import events
+from agent import devbox, supervisor
+from store import activity, events, tasks, workspaces
 
 SYSTEM = """\
 You are fabricator's dispatcher. You coordinate coding work; you never write
 code yourself. When the user wants something built, investigated, or fixed,
 compose a clear self-contained task and call launch_coder. While it runs the
 user watches the coder's terminal live in the next pane, so don't narrate
-its steps. When it finishes, relay the result briefly: what was made, where
-it is, anything that needs the user's attention. If the coder fails, say so
-plainly and stop — never write the code yourself or invent what the output
+its steps. A deployed launch only means the task was accepted: reply only that
+work has started and stop. Use check_coder when the user asks about progress or
+you are woken because coder state changed. Its result is authoritative. Never
+launch another coder merely to check an existing one. If the coder fails, say
+so plainly and stop — never write the code yourself or invent what the output
 would have looked like. Be terse and concrete."""
-
-WATCH_TIMEOUT = 20 * 60
-
 
 def model() -> ai.Model:
     return ai.get_model("anthropic/claude-sonnet-4.6")
 
 
-def agent_for(chat: dict) -> ai.Agent:
+def agent_for(
+    chat: dict, on_task_created: typing.Callable[[dict, dict], None] | None = None
+) -> ai.Agent:
     """Build the dispatcher agent bound to one chat's worker state.
 
-    `chat` is the tail of the chat's (chat_id, "worker") stream; the tool
-    writes the box / set / session ids on it and snapshots after each change,
-    so the tty proxy and later turns find them across restarts.
+    `chat` is the tail of the chat's (chat_id, "worker") stream. It owns the
+    shared box and taskset; each launch stores its own task and PTY session.
     """
 
     @ai.tool
-    async def launch_coder(task: str) -> ai.StreamingStatusTool[str]:
-        """Hand a coding task to this chat's devbox and wait for the result.
+    async def launch_coder(task: str) -> ai.StreamingStatusTool[typing.Any]:
+        """Hand a coding task to this chat's devbox.
 
         The task should be self-contained: what to build or do, and what
-        "done" looks like. The coder is a real claude code session; the user
-        observes it live and can type into its terminal while it runs.
+        "done" looks like. It returns as soon as the task is accepted;
+        completion arrives in a later turn.
         """
         if not chat.get("set_id") or not chat.get("box"):
-            if not chat.get("set_id"):
-                chat["set_id"] = await devbox.create_taskset(f"fab {chat['id']}")
-            if not chat.get("box"):
-                yield "creating devbox (cold boot, about a minute)…"
-                chat["box"] = await devbox.create_box(f"fab-{chat['id']}")
-            await events.append(chat["id"], "worker", dict(chat))
+            async with workspaces.provision(chat["id"]):
+                current = await events.tail(chat["id"], "worker") or chat
+                chat.update(current)
+                if not chat.get("set_id"):
+                    chat["set_id"] = await devbox.create_taskset(f"fab {chat['id']}")
+                if not chat.get("box"):
+                    yield "creating devbox (cold boot, about a minute)…"
+                    chat["box"] = await devbox.create_box(f"fab-{chat['id']}")
+                await events.append(chat["id"], "worker", dict(chat))
 
-        # a fresh box reports READY before devboxd finishes installing the
-        # assistants, so the first task can race the claude install and error
-        # with "executable file not found". that settles in ~half a minute:
-        # retry the task on the same box a few times before giving up.
-        for attempt in (1, 2, 3):
-            yield "dispatching task…"
-            created = await devbox.create_task(chat["box"]["id"], chat["set_id"], task)
-            chat["task_id"] = created["task_id"]
-            chat["session_id"] = created["session_id"]
-            await events.append(chat["id"], "worker", dict(chat))
+        yield "dispatching task…"
+        launch = await tasks.create(chat["id"], task, secrets.token_urlsafe(32))
+        created = await devbox.create_task(
+            chat["box"]["id"],
+            chat["set_id"],
+            task,
+            launch["webhook_secret"],
+            launch["id"],
+        )
+        launch = await tasks.finish_create(launch["id"], created)
+        if on_task_created is not None:
+            on_task_created(dict(launch), created)
+        if devbox.webhook_url() is not None:
+            run = await workflow.start(supervisor.supervise, launch["id"])
+            launch["supervision_run_id"] = run.run_id
+            await tasks.save(launch)
 
-            state = created["state"]
-            summary = ""  # the coder's own completion summary, pushed on the stream
-            yield f"coder started — terminal attached [{state}]"
-            last_yield = time.monotonic()
-            try:
-                async with asyncio.timeout(WATCH_TIMEOUT):
-                    async for frame in devbox.watch(chat["box"]["url"], created["task_id"]):
-                        body = (frame or {}).get("body") or {}
-                        if (event := body.get("assistantEvent")) and event.get("name") == "complete":
-                            summary = (event.get("body") or {}).get("summary") or summary
-                        transition = body.get("stateTransition")
-                        if not transition:
-                            # assistant events (or watch quiet) — the sse goes
-                            # silent for minutes while the coder works, and
-                            # idle-timeout proxies sever it. keep it warm.
-                            if time.monotonic() - last_yield > 45:
-                                yield f"[{state}] coder is working…"
-                                last_yield = time.monotonic()
-                            continue
-                        state = transition["to"]
-                        if state in devbox.TERMINAL_STATES:
-                            break
-                        yield f"[{state}]" + (
-                            " — coder needs input, check the terminal"
-                            if state == "attention-required"
-                            else ""
-                        )
-                        last_yield = time.monotonic()
-            except TimeoutError:
-                pass
+        yield {
+            "launch_id": launch["id"],
+            "task_id": created["task_id"],
+            "state": created["state"],
+        }
 
-            # the durable row syncs behind the box (its state PATCH can land
-            # seconds after the watch's terminal frame), so the pushed state
-            # and summary above are the truth; the row only enriches — error
-            # reason, pr urls — and never regresses a terminal state we saw.
-            row = await devbox.get_task(created["task_id"])
-            result = row.get("result") or {}
-            if row.get("state") in devbox.TERMINAL_STATES:
-                state = row["state"]
-            if "executable file not found" in (result.get("error") or "") and attempt < 3:
-                yield "devbox is still installing its tools — retrying in a moment…"
-                await asyncio.sleep(20)
-                continue
-            parts = [f"[{state}]"]
-            summary = summary or result.get("summary") or result.get("error")
-            if summary:
-                parts.append(summary)
-            parts += [pr["url"] for pr in result.get("prs") or [] if pr.get("url")]
-            yield " ".join(parts)
-            return
+    @ai.tool
+    async def check_coder(
+        launch_id: str | None = None,
+        after: int | None = None,
+        limit: int = 20,
+    ) -> dict[str, typing.Any]:
+        """Check a coder's current state and recent activity.
 
-    return ai.Agent(tools=[launch_coder])
+        Omit launch_id to inspect this chat's newest coder. Pass the returned
+        cursor as after on a later check to receive only newer activity.
+        """
+        return await activity.status(chat["id"], launch_id, after=after, limit=limit)
+
+    return ai.Agent(tools=[launch_coder, check_coder])

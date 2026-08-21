@@ -46,6 +46,17 @@ async def test_create_get_list():
     assert await chats.get("chat_missing") is None
 
 
+async def test_finish_updates_status_and_artifact():
+    space = await spaces.default()
+    chat = await chats.create(space.id, "work")
+    finished = await chats.finish(chat.id, "done", "https://example.com/pr/1")
+    assert finished is not None
+    assert finished.status == "done"
+    assert finished.artifact == "https://example.com/pr/1"
+    loaded = await chats.get(chat.id)
+    assert loaded is not None and loaded.status == "done"
+
+
 async def test_dedupe():
     assert await chats.dedupe("slack:ev1") is True
     assert await chats.dedupe("slack:ev1") is False

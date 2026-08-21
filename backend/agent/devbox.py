@@ -13,6 +13,7 @@ import asyncio
 import json
 import os
 import pathlib
+import urllib.parse
 
 import httpx
 import websockets
@@ -21,6 +22,29 @@ API = os.environ.get("DEVBOX_API_URL", "https://api.vercel.com")
 _CLI = pathlib.Path.home() / "Library/Application Support/com.vercel.cli"
 
 TERMINAL_STATES = ("complete", "errored")
+
+
+def webhook_url() -> str | None:
+    if configured := os.environ.get("DEVBOX_WEBHOOK_URL"):
+        return configured
+    if os.environ.get("VERCEL_ENV") in ("preview", "production") and (
+        host := os.environ.get("VERCEL_URL")
+    ):
+        return f"https://{host}/channels/v1/devbox"
+    return None
+
+
+def tty_url(box_url: str, session_id: str, offset: str, cols: str, rows: str) -> str:
+    query = urllib.parse.urlencode(
+        {
+            "token": token(),
+            "sessionId": session_id,
+            "offset": offset,
+            "cols": cols,
+            "rows": rows,
+        }
+    )
+    return box_url.replace("https://", "wss://") + f"/__tty?{query}"
 
 
 def _checked(r: httpx.Response) -> httpx.Response:
@@ -76,16 +100,30 @@ async def create_taskset(title: str) -> str:
         return _checked(r).json()["set_id"]
 
 
-async def create_task(box_id: str, set_id: str, prompt: str) -> dict:
+async def create_task(
+    box_id: str,
+    set_id: str,
+    prompt: str,
+    webhook_secret: str | None = None,
+    webhook_task_id: str | None = None,
+) -> dict:
     """Start a claude-code task on the box: {task_id, session_id, state}.
 
     session_id names the box pty session the agent runs in. A fresh box can
     409 for a moment right after create (registration settles just behind
-    the blocking create call), so retry briefly.
+    the blocking create call), so retry briefly. In deployed mode the callback
+    secret rides in the URL because devbox task webhooks do not support custom
+    headers or signatures.
     """
     body = {"devbox_id": box_id, "set_id": set_id, "assistant": "claude-code", "prompt": prompt}
-    if url := os.environ.get("DEVBOX_WEBHOOK_URL"):  # deployed mode; useless on localhost
-        body["webhooks"] = [{"url": url}]
+    if url := webhook_url():
+        if not webhook_secret:
+            raise RuntimeError("deployed task webhooks require a per-task secret")
+        if not webhook_task_id:
+            raise RuntimeError("DEVBOX_WEBHOOK_URL requires the owning launch id")
+        query = urllib.parse.urlencode({"launch_id": webhook_task_id, "secret": webhook_secret})
+        separator = "&" if urllib.parse.urlsplit(url).query else "?"
+        body["webhooks"] = [{"url": f"{url}{separator}{query}"}]
     async with httpx.AsyncClient(timeout=60) as http:
         for attempt in range(4):
             r = await http.post(
