@@ -51,6 +51,11 @@ export function ChatMessage({ message }: { message: ChatUIMessage }) {
         <MessageContent>
           {text.trim() && (
             <Bubble align="end" variant="muted" data-message-role="user">
+              {message.metadata?.origin === "slack" && (
+                <span className="self-end px-1 text-xs text-muted-foreground">
+                  via slack
+                </span>
+              )}
               <BubbleContent>{text}</BubbleContent>
             </Bubble>
           )}

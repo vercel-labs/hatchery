@@ -17,7 +17,9 @@ _StoreHub (dedupe, claim binding, append); no turn runs on inbound yet.
 import asyncio
 import contextlib
 import hmac
+import html
 import logging
+import re
 
 import fastapi
 import fastapi.middleware.cors
@@ -113,7 +115,14 @@ async def list_spaces() -> list[models.Space]:
 
 @app.get("/api/chats")
 async def list_chats() -> list[models.Chat]:
-    return await chats.list_all()
+    found = await chats.list_all()
+    for chat in found:
+        if not chat.trigger.startswith("slack:") or chat.title.startswith("slack:"):
+            continue
+        title = re.sub(r"^<@[^>]+>\s*", "", chat.title)
+        title = html.unescape(" ".join(title.split())).strip()
+        chat.title = f"slack: {title[:53]}" if title else "slack: thread"
+    return found
 
 
 class CreateChatRequest(pydantic.BaseModel):
@@ -129,8 +138,20 @@ async def create_chat(request: CreateChatRequest) -> models.Chat:
 
 @app.get("/api/chats/{chat_id}/messages")
 async def chat_messages(chat_id: str) -> list[ai.ui.ai_sdk.UIMessage]:
-    """The stored transcript as UI messages, for the chat view to resume from."""
-    return ai.ui.ai_sdk.to_ui_messages(await _transcript(chat_id))
+    """The stored transcript as UI messages, with channel envelopes hidden."""
+    messages = ai.ui.ai_sdk.to_ui_messages(await _transcript(chat_id))
+    for message in messages:
+        if message.role != "user":
+            continue
+        for part in message.parts:
+            if getattr(part, "type", None) != "text":
+                continue
+            match = re.fullmatch(r'<slack_message\b[^>]*>\s*(.*?)\s*</slack_message>', part.text, re.DOTALL)
+            if match is None:
+                continue
+            part.text = html.unescape(match.group(1))
+            message.metadata = {**(message.metadata or {}), "origin": "slack"}
+    return messages
 
 
 class ChatRequest(pydantic.BaseModel):
@@ -152,34 +173,61 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
     appended before the run, the run's new messages after it.
     """
     incoming, _ = ai.ui.ai_sdk.to_messages(request.messages)
-    stored = await _transcript(request.chat_id)
-    known = {message.id for message in stored}
-    for message in incoming:
-        # The browser sends its whole UI transcript. Assistant/tool messages are
-        # server-owned and their IDs may change in the UI round-trip, so accepting
-        # them here duplicates tool results and corrupts the next model history.
-        if message.role == "user" and message.id not in known:
-            await events.append(request.chat_id, "messages", message.model_dump(mode="json"))
-            stored.append(message)
-
-    history = [ai.system_message(dispatcher.SYSTEM), *stored]
-    record = await events.tail(request.chat_id, "worker") or {"id": request.chat_id}
-
-    def observe_task(launch: dict, created: dict) -> None:
-        if devbox.webhook_url() is None:
-            _spawn(_watch_local_task(request.chat_id, launch, created))
-            _spawn(_supervise_local(launch["id"]))
-
-    agent = dispatcher.agent_for(record, observe_task)
 
     async def stream():
-        async with agent.run(dispatcher.model(), history) as result:
-            async for chunk in ai.ui.ai_sdk.to_sse(result):
-                yield chunk
-            for message in result.messages[len(history) :]:
-                await events.append(
-                    request.chat_id, "messages", message.model_dump(mode="json")
+        async with turns.run(request.chat_id):
+            stored = await _transcript(request.chat_id)
+            known = {message.id for message in stored}
+            received = []
+            for message in incoming:
+                # The browser sends its whole UI transcript. Assistant/tool messages are
+                # server-owned and their IDs may change in the UI round-trip, so accepting
+                # them here duplicates tool results and corrupts the next model history.
+                if message.role == "user" and message.id not in known:
+                    await events.append(request.chat_id, "messages", message.model_dump(mode="json"))
+                    stored.append(message)
+                    received.append(message)
+            for message in received:
+                await _emit(
+                    request.chat_id,
+                    channels.event(
+                        channels.protocol.MESSAGE_RECEIVED,
+                        message=message.text,
+                        origin="ui",
+                    ),
                 )
+
+            history = [ai.system_message(dispatcher.SYSTEM), *stored]
+            record = await events.tail(request.chat_id, "worker") or {"id": request.chat_id}
+
+            def observe_task(launch: dict, created: dict) -> None:
+                if devbox.webhook_url() is None:
+                    _spawn(_watch_local_task(request.chat_id, launch, created))
+                    _spawn(_supervise_local(launch["id"]))
+
+            agent = dispatcher.agent_for(record, observe_task)
+            await _emit(request.chat_id, channels.event(channels.protocol.TURN_STARTED))
+            try:
+                async with agent.run(dispatcher.model(), history) as result:
+                    async for chunk in ai.ui.ai_sdk.to_sse(result):
+                        yield chunk
+                    added = result.messages[len(history) :]
+                    for message in added:
+                        await events.append(
+                            request.chat_id, "messages", message.model_dump(mode="json")
+                        )
+                reply = next(
+                    (message.text for message in reversed(added) if message.role == "assistant" and message.text),
+                    "",
+                )
+                if reply:
+                    await _deliver(request.chat_id, reply)
+            except Exception as error:
+                await _emit(
+                    request.chat_id,
+                    channels.event(channels.protocol.TURN_FAILED, error=str(error)),
+                )
+                raise
 
     return fastapi.responses.StreamingResponse(
         stream(), headers=ai.ui.ai_sdk.UI_MESSAGE_STREAM_HEADERS

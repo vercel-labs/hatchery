@@ -13,7 +13,7 @@ export type FabricatorTools = {
 };
 
 export type ChatUIMessage = UIMessage<
-  unknown,
+  { origin?: "slack" },
   { reload: unknown },
   FabricatorTools
 >;

@@ -98,6 +98,7 @@ async def test_app_mention_dispatches_with_thread_token_and_attribution():
     assert "<@UBOT> hello" in inbound.text
     assert '<slack_message channel="C1"' in inbound.text
     assert 'sender="U1"' in inbound.text
+    assert inbound.title == "slack: hello"
     assert inbound.state == {"channel_id": "C1", "thread_ts": "100.1", "team_id": "T1", "user_id": "U1"}
 
 
@@ -160,6 +161,42 @@ async def test_reply_posts_into_thread():
     assert request.url.path == "/api/chat.postMessage"
     params = dict(urllib.parse.parse_qsl(request.read().decode()))
     assert params == {"channel": "C1", "thread_ts": "100.1", "text": "done!"}
+
+
+async def test_ui_message_uses_slack_user_profile_with_ui_attribution():
+    calls: list[httpx.Request] = []
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if request.url.path == "/api/users.info":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "user": {"profile": {"display_name": "Andrey", "image_72": "https://img/andrey.png"}},
+                },
+            )
+        return httpx.Response(200, json={"ok": True})
+
+    channel = slack.channel(connector="slack/e2e-bot", transport=httpx.MockTransport(responder))
+    slack_state = {**state(), "team_id": "T1", "user_id": "U1"}
+    event = channels.event(channels.protocol.MESSAGE_RECEIVED, message="continue here", origin="ui")
+    await channel.on_event(event, slack_state)
+    await channel.on_event(event, slack_state)
+
+    assert [request.url.path for request in calls] == [
+        "/api/users.info",
+        "/api/chat.postMessage",
+        "/api/chat.postMessage",
+    ]
+    params = dict(urllib.parse.parse_qsl(calls[1].read().decode()))
+    assert params == {
+        "channel": "C1",
+        "thread_ts": "100.1",
+        "text": "continue here",
+        "username": "Andrey · via Fabricator UI",
+        "icon_url": "https://img/andrey.png",
+    }
 
 
 async def test_status_is_truncated():

@@ -22,8 +22,10 @@ Behavior ported from eve's slack channel defaults, trimmed:
   partial
 """
 
+import html
 import json
 import os
+import re
 
 import httpx
 from vercel import connect
@@ -48,6 +50,7 @@ class SlackChannel:
         self.name = name
         self._connector = connector or os.environ.get("SLACK_CONNECTOR", "")
         self._client = httpx.AsyncClient(base_url="https://slack.com/api", transport=transport)
+        self._profiles: dict[tuple[str, str], tuple[str, str]] = {}
 
     async def handle(self, webhook: channels.Webhook, bus: channels.Bus) -> channels.Ack:
         try:
@@ -101,7 +104,9 @@ class SlackChannel:
             "team_id": payload.get("team_id", ""),
             "user_id": event.get("user", ""),
         }
-        title = " ".join(str(event.get("text", "")).split())[:60] or "slack thread"
+        title_text = re.sub(rf"<@{re.escape(bot_user_id)}>", "", str(event.get("text", "")))
+        title_text = html.unescape(" ".join(title_text.split())).strip()
+        title = f"slack: {title_text[:53]}" if title_text else "slack: thread"
         return channels.Inbound(token=f"{channel_id}:{thread_ts}", text=text, state=state, title=title)
 
     async def on_event(self, event: channels.Event, state: dict) -> None:
@@ -109,10 +114,35 @@ class SlackChannel:
             await self._set_status(state, "is thinking...")
         elif event.type == channels.protocol.STATUS_UPDATED:
             await self._set_status(state, str(event.data.get("status", ""))[:STATUS_LIMIT])
+        elif event.type == channels.protocol.MESSAGE_RECEIVED and event.data.get("origin") == "ui":
+            await self._post_ui_message(state, str(event.data.get("message", ""))[:TEXT_LIMIT])
         elif event.type == channels.protocol.MESSAGE_COMPLETED:
             await self._post(state, str(event.data.get("message", ""))[:TEXT_LIMIT])
         elif event.type == channels.protocol.TURN_FAILED:
             await self._post(state, f"something went wrong: {event.data.get('error', 'unknown error')}")
+
+    async def _post_ui_message(self, state: dict, text: str) -> None:
+        if not text:
+            return
+        key = (str(state.get("team_id", "")), str(state.get("user_id", "")))
+        profile = self._profiles.get(key)
+        if profile is None:
+            body = await self._api("users.info", user=key[1])
+            user = body.get("user") or {}
+            details = user.get("profile") or {}
+            name = details.get("display_name") or details.get("real_name") or user.get("real_name") or user.get("name") or "User"
+            profile = (str(name), str(details.get("image_72") or details.get("image_48") or ""))
+            self._profiles[key] = profile
+        name, icon_url = profile
+        params = {
+            "channel": state["channel_id"],
+            "thread_ts": state["thread_ts"],
+            "text": text,
+            "username": f"{name} · via Fabricator UI",
+        }
+        if icon_url:
+            params["icon_url"] = icon_url
+        await self._api("chat.postMessage", **params)
 
     async def _set_status(self, state: dict, status: str) -> None:
         await self._api(
