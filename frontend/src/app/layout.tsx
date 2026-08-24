@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "fabricator",
+  title: "hatchery",
   description: "a software factory",
 };
 

@@ -9,7 +9,7 @@ import { getFreshParts } from "@/lib/messages";
 import type { ChatMessagePart, ChatUIMessage } from "@/lib/messages";
 
 // Trimmed port of seal's chat-message: text + tool parts only (no files,
-// approvals, or subagent recursion — fabricator's worker renders in the
+// approvals, or subagent recursion — hatchery's worker renders in the
 // terminal pane instead).
 function renderParts(
   parts: ChatMessagePart[],

@@ -1,7 +1,7 @@
 """Vercel entrypoint (see [tool.vercel] in pyproject.toml).
 
 Health check, channel webhooks, and the dispatcher chat:
-- /channels/v1/slack   needs SLACK_CONNECTOR (connect uid, e.g. "slack/fabricator")
+- /channels/v1/slack   needs SLACK_CONNECTOR (connect uid, e.g. "slack/hatchery")
 - /channels/v1/github  needs GITHUB_CONNECTOR + GITHUB_APP_SLUG
 - /channels/v1/devbox  authenticated task-state webhooks from devboxd
 - /api/chat            dispatcher agent turn, AI SDK UI message stream (SSE)
@@ -90,7 +90,7 @@ async def lifespan(_: fastapi.FastAPI):
     yield
 
 
-app = fastapi.FastAPI(title="fabricator", lifespan=lifespan)
+app = fastapi.FastAPI(title="hatchery", lifespan=lifespan)
 
 # local dev: the ui talks to :8000 directly for streams — next's dev proxy
 # severs quiet/long sse responses (and can't proxy websockets at all).

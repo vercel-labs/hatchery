@@ -9,7 +9,7 @@ webhooks durable replay protection.
 
 Chat rows are the models.Chat json verbatim, plus a space_id column for
 filtering. Postgres when DATABASE_URL is set, otherwise json files under
-FAB_DATA_DIR. Locking mirrors store.events.
+HATCHERY_DATA_DIR. Locking mirrors store.events.
 """
 
 import datetime
@@ -24,14 +24,14 @@ import models
 import store
 
 _SCHEMA = """\
-CREATE TABLE IF NOT EXISTS fab_chats (
+CREATE TABLE IF NOT EXISTS hatchery_chats (
     id         TEXT PRIMARY KEY,
     space_id   TEXT NOT NULL,
     data       JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS fab_bindings (
+CREATE TABLE IF NOT EXISTS hatchery_bindings (
     token      TEXT PRIMARY KEY,
     chat_id    TEXT NOT NULL,
     channel    TEXT NOT NULL,
@@ -39,9 +39,9 @@ CREATE TABLE IF NOT EXISTS fab_bindings (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS fab_bindings_chat ON fab_bindings (chat_id);
+CREATE INDEX IF NOT EXISTS hatchery_bindings_chat ON hatchery_bindings (chat_id);
 
-CREATE TABLE IF NOT EXISTS fab_dedupe (
+CREATE TABLE IF NOT EXISTS hatchery_dedupe (
     key        TEXT PRIMARY KEY,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -82,7 +82,7 @@ async def create(space_id: str, title: str, trigger: str = "ui") -> models.Chat:
         from store import db
 
         await (await db.pool()).execute(
-            "INSERT INTO fab_chats (id, space_id, data) VALUES ($1, $2, $3::jsonb)",
+            "INSERT INTO hatchery_chats (id, space_id, data) VALUES ($1, $2, $3::jsonb)",
             chat.id,
             chat.space_id,
             chat.model_dump_json(),
@@ -97,7 +97,7 @@ async def get(chat_id: str) -> models.Chat | None:
     if store.use_postgres():
         from store import db
 
-        row = await (await db.pool()).fetchrow("SELECT data FROM fab_chats WHERE id = $1", chat_id)
+        row = await (await db.pool()).fetchrow("SELECT data FROM hatchery_chats WHERE id = $1", chat_id)
         return _chat(row["data"]) if row is not None else None
     with _lock:
         return _read_chat(chat_id)
@@ -108,7 +108,7 @@ async def list_all() -> list[models.Chat]:
     if store.use_postgres():
         from store import db
 
-        rows = await (await db.pool()).fetch("SELECT data FROM fab_chats ORDER BY created_at DESC")
+        rows = await (await db.pool()).fetch("SELECT data FROM hatchery_chats ORDER BY created_at DESC")
         return [_chat(row["data"]) for row in rows]
     with _lock:
         chats = [_read_chat(urllib.parse.unquote(p.stem)) for p in (store.data_dir() / "chats").glob("*.json")]
@@ -128,7 +128,7 @@ async def finish(chat_id: str, status: str, artifact: str | None = None) -> mode
         from store import db
 
         await (await db.pool()).execute(
-            "UPDATE fab_chats SET data = $2::jsonb WHERE id = $1", chat_id, chat.model_dump_json()
+            "UPDATE hatchery_chats SET data = $2::jsonb WHERE id = $1", chat_id, chat.model_dump_json()
         )
         return chat
     with _lock:
@@ -159,7 +159,7 @@ async def claim(
         pool = await db.pool()
         async with pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
-                "INSERT INTO fab_bindings (token, chat_id, channel, state) "
+                "INSERT INTO hatchery_bindings (token, chat_id, channel, state) "
                 "VALUES ($1, $2, $3, $4::jsonb) ON CONFLICT (token) DO NOTHING RETURNING chat_id",
                 token,
                 candidate.id,
@@ -168,20 +168,20 @@ async def claim(
             )
             if row is not None:
                 await conn.execute(
-                    "INSERT INTO fab_chats (id, space_id, data) VALUES ($1, $2, $3::jsonb)",
+                    "INSERT INTO hatchery_chats (id, space_id, data) VALUES ($1, $2, $3::jsonb)",
                     candidate.id,
                     candidate.space_id,
                     candidate.model_dump_json(),
                 )
                 return candidate, True
             await conn.execute(
-                "UPDATE fab_bindings SET state = state || $2::jsonb WHERE token = $1",
+                "UPDATE hatchery_bindings SET state = state || $2::jsonb WHERE token = $1",
                 token,
                 json.dumps(state),
             )
             owner = await conn.fetchrow(
-                "SELECT c.data FROM fab_chats c "
-                "JOIN fab_bindings b ON b.chat_id = c.id WHERE b.token = $1",
+                "SELECT c.data FROM hatchery_chats c "
+                "JOIN hatchery_bindings b ON b.chat_id = c.id WHERE b.token = $1",
                 token,
             )
             return _chat(owner["data"]), False
@@ -205,7 +205,7 @@ async def bindings(chat_id: str) -> list[Binding]:
     if store.use_postgres():
         from store import db
 
-        rows = await (await db.pool()).fetch("SELECT * FROM fab_bindings WHERE chat_id = $1", chat_id)
+        rows = await (await db.pool()).fetch("SELECT * FROM hatchery_bindings WHERE chat_id = $1", chat_id)
         return [
             Binding(
                 token=row["token"],
@@ -229,7 +229,7 @@ async def dedupe(key: str) -> bool:
         from store import db
 
         row = await (await db.pool()).fetchrow(
-            "INSERT INTO fab_dedupe (key) VALUES ($1) ON CONFLICT DO NOTHING RETURNING key", key
+            "INSERT INTO hatchery_dedupe (key) VALUES ($1) ON CONFLICT DO NOTHING RETURNING key", key
         )
         return row is not None
     with _lock:

@@ -2,7 +2,7 @@
 
 Each module is one entity with one postgres and one local-files backend,
 selected by DATABASE_URL (seal's pattern). Local files live under
-FAB_DATA_DIR (default backend/.data) so tests and dev need no database.
+HATCHERY_DATA_DIR (default backend/.data) so tests and dev need no database.
 """
 
 import os
@@ -10,7 +10,7 @@ import pathlib
 
 
 def data_dir() -> pathlib.Path:
-    configured = os.environ.get("FAB_DATA_DIR")
+    configured = os.environ.get("HATCHERY_DATA_DIR")
     if configured:
         return pathlib.Path(configured)
     return pathlib.Path(__file__).resolve().parents[1] / ".data"

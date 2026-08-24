@@ -10,7 +10,7 @@ streams whose tail wins. One stream per chat per concern:
   taskset ids). Individual launches and PTY sessions live in store.tasks.
 
 Postgres when DATABASE_URL is set, otherwise one jsonl file per stream under
-FAB_DATA_DIR. The jsonl locks are threading.Locks on purpose: a workflow
+HATCHERY_DATA_DIR. The jsonl locks are threading.Locks on purpose: a workflow
 worker runs each queue message on a fresh event loop (often another thread),
 so an asyncio.Lock would bind to the first loop and raise on the next. They
 are only ever held across synchronous file I/O — never across an await.
@@ -24,7 +24,7 @@ import urllib.parse
 import store
 
 _SCHEMA = """\
-CREATE TABLE IF NOT EXISTS fab_streams (
+CREATE TABLE IF NOT EXISTS hatchery_streams (
     stream_id  TEXT NOT NULL,
     ns         TEXT NOT NULL,
     tail_index INTEGER NOT NULL DEFAULT 0,
@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS fab_streams (
     PRIMARY KEY (stream_id, ns)
 );
 
-CREATE TABLE IF NOT EXISTS fab_events (
+CREATE TABLE IF NOT EXISTS hatchery_events (
     stream_id  TEXT NOT NULL,
     ns         TEXT NOT NULL,
     idx        INTEGER NOT NULL,
@@ -67,19 +67,19 @@ async def append(stream_id: str, ns: str, data: dict[str, typing.Any]) -> int:
         pool = await db.pool()
         async with pool.acquire() as conn, conn.transaction():
             await conn.execute(
-                "INSERT INTO fab_streams (stream_id, ns) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                "INSERT INTO hatchery_streams (stream_id, ns) VALUES ($1, $2) ON CONFLICT DO NOTHING",
                 stream_id,
                 ns,
             )
             row = await conn.fetchrow(
-                "UPDATE fab_streams SET tail_index = tail_index + 1, updated_at = now() "
+                "UPDATE hatchery_streams SET tail_index = tail_index + 1, updated_at = now() "
                 "WHERE stream_id = $1 AND ns = $2 RETURNING tail_index - 1 AS idx",
                 stream_id,
                 ns,
             )
             index = int(row["idx"])
             await conn.execute(
-                "INSERT INTO fab_events (stream_id, ns, idx, data) VALUES ($1, $2, $3, $4::jsonb)",
+                "INSERT INTO hatchery_events (stream_id, ns, idx, data) VALUES ($1, $2, $3, $4::jsonb)",
                 stream_id,
                 ns,
                 index,
@@ -104,7 +104,7 @@ async def read(
         from store import db
 
         rows = await (await db.pool()).fetch(
-            "SELECT idx, data FROM fab_events "
+            "SELECT idx, data FROM hatchery_events "
             "WHERE stream_id = $1 AND ns = $2 AND idx >= $3 ORDER BY idx",
             stream_id,
             ns,
@@ -129,7 +129,7 @@ async def tail(stream_id: str, ns: str) -> dict[str, typing.Any] | None:
         from store import db
 
         row = await (await db.pool()).fetchrow(
-            "SELECT data FROM fab_events WHERE stream_id = $1 AND ns = $2 "
+            "SELECT data FROM hatchery_events WHERE stream_id = $1 AND ns = $2 "
             "ORDER BY idx DESC LIMIT 1",
             stream_id,
             ns,

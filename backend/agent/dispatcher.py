@@ -17,7 +17,7 @@ from agent import devbox, supervisor
 from store import activity, events, tasks, workspaces
 
 SYSTEM = """\
-You are fabricator's dispatcher. You coordinate coding work; you never write
+You are hatchery's dispatcher. You coordinate coding work; you never write
 code yourself. When the user wants something built, investigated, or fixed,
 compose a clear self-contained task and call launch_coder. While it runs the
 user watches the coder's terminal live in the next pane, so don't narrate
@@ -54,10 +54,10 @@ def agent_for(
                 current = await events.tail(chat["id"], "worker") or chat
                 chat.update(current)
                 if not chat.get("set_id"):
-                    chat["set_id"] = await devbox.create_taskset(f"fab {chat['id']}")
+                    chat["set_id"] = await devbox.create_taskset(f"hatchery {chat['id']}")
                 if not chat.get("box"):
                     yield "creating devbox (cold boot, about a minute)…"
-                    chat["box"] = await devbox.create_box(f"fab-{chat['id']}")
+                    chat["box"] = await devbox.create_box(f"hatchery-{chat['id']}")
                 await events.append(chat["id"], "worker", dict(chat))
 
         yield "dispatching task…"

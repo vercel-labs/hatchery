@@ -35,7 +35,7 @@ function status(part: ChatToolPart): { icon: ReactNode; label: string } {
 }
 
 // Generic tool renderer (seal's fallback ToolPart, approvals stripped —
-// fabricator has no gated tools yet): status row, input, streamed output.
+// hatchery has no gated tools yet): status row, input, streamed output.
 export function ToolPart({ part }: { part: ChatToolPart }) {
   const name = getToolName(part);
   const { icon, label } = status(part);

@@ -138,7 +138,7 @@ class SlackChannel:
             "channel": state["channel_id"],
             "thread_ts": state["thread_ts"],
             "text": text,
-            "username": f"{name} · via Fabricator UI",
+            "username": f"{name} · via Hatchery UI",
         }
         if icon_url:
             params["icon_url"] = icon_url

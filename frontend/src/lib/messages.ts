@@ -3,7 +3,7 @@ import type { UIMessage } from "ai";
 // Tools live in the Python backend, so the map is written by hand
 // (InferUITools needs TypeScript tool definitions). Unknown tools still
 // render through the generic ToolPart fallback.
-export type FabricatorTools = {
+export type HatcheryTools = {
   launch_coder: {
     input: { task?: string };
     output:
@@ -15,7 +15,7 @@ export type FabricatorTools = {
 export type ChatUIMessage = UIMessage<
   { origin?: "slack" },
   { reload: unknown },
-  FabricatorTools
+  HatcheryTools
 >;
 
 export type ChatMessagePart = ChatUIMessage["parts"][number];

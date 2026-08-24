@@ -13,8 +13,8 @@ def test_vercel_dev_does_not_register_public_webhook(monkeypatch):
 def test_deployment_uses_vercel_webhook(monkeypatch):
     monkeypatch.delenv("DEVBOX_WEBHOOK_URL", raising=False)
     monkeypatch.setenv("VERCEL_ENV", "preview")
-    monkeypatch.setenv("VERCEL_URL", "fabricator-preview.vercel.app")
-    assert devbox.webhook_url() == "https://fabricator-preview.vercel.app/channels/v1/devbox"
+    monkeypatch.setenv("VERCEL_URL", "hatchery-preview.vercel.app")
+    assert devbox.webhook_url() == "https://hatchery-preview.vercel.app/channels/v1/devbox"
 
 
 def test_tty_url_targets_real_devbox_session(monkeypatch):

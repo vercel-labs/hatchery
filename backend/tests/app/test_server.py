@@ -16,13 +16,13 @@ def client() -> httpx.AsyncClient:
 async def test_spaces_seed_default():
     async with client() as c:
         listed = (await c.get("/api/spaces")).json()
-    assert [s["id"] for s in listed] == ["spc_fabricator"]
+    assert [s["id"] for s in listed] == ["spc_hatchery"]
 
 
 async def test_chat_create_and_list():
     async with client() as c:
         created = (await c.post("/api/chats", json={})).json()
-        assert created["space_id"] == "spc_fabricator"
+        assert created["space_id"] == "spc_hatchery"
         assert created["title"] == "new chat"
         listed = (await c.get("/api/chats")).json()
     assert [x["id"] for x in listed] == [created["id"]]

@@ -303,7 +303,7 @@ wheels = [
 ]
 
 [[package]]
-name = "fabricator"
+name = "hatchery"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

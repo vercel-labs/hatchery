@@ -1,9 +1,9 @@
-# fabricator
+# hatchery
 
 agent deployed to cloud, running mostly unattended. reachable from slack,
 github, and its own ui.
 
-fabricator monitors repos, can respond to issues, pings on slack, or cron
+hatchery monitors repos, can respond to issues, pings on slack, or cron
 schedule. the output artifacts include reports, notifications, issues, and prs.
 
 1. deployed to vercel as two services (frontend + backend, see vercel.json)

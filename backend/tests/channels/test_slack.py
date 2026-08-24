@@ -194,7 +194,7 @@ async def test_ui_message_uses_slack_user_profile_with_ui_attribution():
         "channel": "C1",
         "thread_ts": "100.1",
         "text": "continue here",
-        "username": "Andrey · via Fabricator UI",
+        "username": "Andrey · via Hatchery UI",
         "icon_url": "https://img/andrey.png",
     }
 

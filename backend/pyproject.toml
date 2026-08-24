@@ -1,5 +1,5 @@
 [project]
-name = "fabricator"
+name = "hatchery"
 version = "0.1.0"
 description = "a software factory: an agent reachable from slack, github, and its own ui."
 requires-python = ">=3.12"

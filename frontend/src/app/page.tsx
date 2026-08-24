@@ -115,7 +115,7 @@ export default function Home() {
     <SidebarProvider className="h-svh overflow-hidden">
       <Sidebar>
         <SidebarHeader className="px-4 py-3">
-          <span className="text-sm font-semibold">fabricator</span>
+          <span className="text-sm font-semibold">hatchery</span>
           <span className="text-xs text-muted-foreground">
             a software factory
           </span>
@@ -198,7 +198,7 @@ export default function Home() {
             />
           )}
           <span className="text-sm font-medium">
-            {selectedSpace?.name ?? selectedChat?.title ?? "fabricator"}
+            {selectedSpace?.name ?? selectedChat?.title ?? "hatchery"}
           </span>
         </header>
         {selectedChat && !failed ? (
