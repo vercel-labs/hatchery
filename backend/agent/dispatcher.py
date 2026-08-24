@@ -7,6 +7,7 @@ UI renders live — with the real claude code TUI attached in the terminal
 pane next to it.
 """
 
+import logging
 import secrets
 import typing
 
@@ -15,6 +16,8 @@ from vercel import workflow
 
 from agent import devbox, supervisor
 from store import activity, events, tasks, workspaces
+
+log = logging.getLogger("app.dispatcher")
 
 SYSTEM = """\
 You are hatchery's dispatcher. You coordinate coding work; you never write
@@ -49,6 +52,13 @@ def agent_for(
         "done" looks like. It returns as soon as the task is accepted;
         completion arrives in a later turn.
         """
+        log.info(
+            "coder launch starting chat_id=%s has_taskset=%s has_box=%s prompt_chars=%d",
+            chat["id"],
+            bool(chat.get("set_id")),
+            bool(chat.get("box")),
+            len(task),
+        )
         if not chat.get("set_id") or not chat.get("box"):
             async with workspaces.provision(chat["id"]):
                 current = await events.tail(chat["id"], "worker") or chat
@@ -59,9 +69,16 @@ def agent_for(
                     yield "creating devbox (cold boot, about a minute)…"
                     chat["box"] = await devbox.create_box(f"hatchery-{chat['id']}")
                 await events.append(chat["id"], "worker", dict(chat))
+                log.info(
+                    "coder workspace ready chat_id=%s box_id=%s set_id=%s",
+                    chat["id"],
+                    chat["box"]["id"],
+                    chat["set_id"],
+                )
 
         yield "dispatching task…"
         launch = await tasks.create(chat["id"], task, secrets.token_urlsafe(32))
+        log.info("coder launch record created chat_id=%s launch_id=%s", chat["id"], launch["id"])
         created = await devbox.create_task(
             chat["box"]["id"],
             chat["set_id"],
@@ -70,6 +87,14 @@ def agent_for(
             launch["id"],
         )
         launch = await tasks.finish_create(launch["id"], created)
+        log.info(
+            "coder launch accepted chat_id=%s launch_id=%s task_id=%s session_id=%s state=%s",
+            chat["id"],
+            launch["id"],
+            created.get("task_id"),
+            created.get("session_id"),
+            created.get("state"),
+        )
         if on_task_created is not None:
             on_task_created(dict(launch), created)
         if devbox.webhook_url() is not None:

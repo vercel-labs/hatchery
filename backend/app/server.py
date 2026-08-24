@@ -223,6 +223,7 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                 if reply:
                     await _deliver(request.chat_id, reply)
             except Exception as error:
+                log.exception("chat turn failed chat_id=%s", request.chat_id)
                 await _emit(
                     request.chat_id,
                     channels.event(channels.protocol.TURN_FAILED, error=str(error)),

@@ -3,6 +3,13 @@ import urllib.parse
 from agent import devbox
 
 
+def test_cloud_error_logging_redacts_credentials():
+    error = "callback=https://app.test/hook?launch_id=1&secret=hunter2 token=also-secret"
+    assert devbox._redact(error) == (
+        "callback=https://app.test/hook?launch_id=1&secret=[redacted] token=[redacted]"
+    )
+
+
 def test_vercel_dev_does_not_register_public_webhook(monkeypatch):
     monkeypatch.delenv("DEVBOX_WEBHOOK_URL", raising=False)
     monkeypatch.delenv("VERCEL_ENV", raising=False)
