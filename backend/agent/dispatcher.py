@@ -32,6 +32,7 @@ would have looked like. Be terse and concrete."""
 
 def system_prompt(space: models.Space) -> str:
     description = space.about.strip() or "No description provided."
+    repositories = "\n".join(f"- {repo}" for repo in space.repos) or "- None"
     resources = "\n".join(
         f"- {resource.title} ({resource.kind}): {resource.url}"
         for resource in space.resources
@@ -45,6 +46,9 @@ You are working in this space:
 Space description:
 {description}
 
+Available repositories:
+{repositories}
+
 Attached resources:
 {resources}"""
 
@@ -54,25 +58,26 @@ def model() -> ai.Model:
 
 def agent_for(
     chat: dict,
-    repos: list[str] | None = None,
     on_task_created: typing.Callable[[dict, dict], None] | None = None,
 ) -> ai.Agent:
     """Build the dispatcher agent bound to one chat's worker state.
 
     `chat` is the tail of the chat's (chat_id, "worker") stream. It owns the
     shared box and taskset; each launch stores its own task and PTY session.
-    `repos` is frozen from the chat's space for this dispatcher turn.
     """
-    desired_repos = list(repos or [])
 
     @ai.tool
-    async def launch_coder(task: str) -> ai.StreamingStatusTool[typing.Any]:
+    async def launch_coder(
+        task: str, repos: list[str] | None = None
+    ) -> ai.StreamingStatusTool[typing.Any]:
         """Hand a coding task to this chat's devbox.
 
         The task should be self-contained: what to build or do, and what
-        "done" looks like. It returns as soon as the task is accepted;
-        completion arrives in a later turn.
+        "done" looks like. Select only the owner/repo repositories the coder
+        needs. Omit repos for an empty sandbox. It returns as soon as the task
+        is accepted; completion arrives in a later turn.
         """
+        desired_repos = list(repos or [])
         async with workspaces.provision(chat["id"]):
             current = await events.tail(chat["id"], "worker") or chat
             chat.update(current)
@@ -85,7 +90,7 @@ def agent_for(
                     chat["set_id"] = await devbox.create_taskset(f"hatchery {chat['id']}")
                     await events.append(chat["id"], "worker", dict(chat))
                 if not chat.get("box") or chat.get("repos") != desired_repos:
-                    yield "creating devbox and cloning repos (cold boot, about a minute)…"
+                    yield "creating devbox (cold boot, about a minute)…"
                     chat["box"] = await devbox.create_box(
                         f"hatchery-{chat['id']}", desired_repos
                     )
