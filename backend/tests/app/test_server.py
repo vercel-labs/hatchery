@@ -17,6 +17,104 @@ async def test_spaces_seed_default():
     async with client() as c:
         listed = (await c.get("/api/spaces")).json()
     assert [s["id"] for s in listed] == ["spc_hatchery"]
+    assert "goal" not in listed[0]
+    assert not listed[0]["about"].startswith("# hatchery")
+
+
+async def test_space_create_and_delete():
+    async with client() as c:
+        created = await c.post("/api/spaces", json={"name": "  docs  "})
+        listed = (await c.get("/api/spaces")).json()
+        deleted = await c.delete(f"/api/spaces/{created.json()['id']}")
+
+    assert created.status_code == 200
+    assert created.json()["name"] == "docs"
+    assert created.json()["about"] == ""
+    assert [space["id"] for space in listed] == [created.json()["id"]]
+    assert deleted.status_code == 204
+
+
+async def test_space_delete_rejects_unknown_space_and_space_with_chats():
+    space = await server.spaces.create("busy")
+    await chats.create(space.id, "chat")
+
+    async with client() as c:
+        busy = await c.delete(f"/api/spaces/{space.id}")
+        missing = await c.delete("/api/spaces/spc_missing")
+
+    assert busy.status_code == 409
+    assert busy.json() == {"detail": "space still has chats"}
+    assert missing.status_code == 404
+
+
+async def test_space_update():
+    original = await server.spaces.default()
+    async with client() as c:
+        response = await c.patch(
+            "/api/spaces/spc_hatchery",
+            json={"name": "  Hatchery docs  ", "about": "# Overview\n\nEdited directly."},
+        )
+        listed = (await c.get("/api/spaces")).json()
+
+    assert response.status_code == 200
+    assert response.json()["name"] == "Hatchery docs"
+    assert response.json()["about"] == "# Overview\n\nEdited directly."
+    assert response.json()["repos"] == original.repos
+    assert response.json()["resources"] == [resource.model_dump() for resource in original.resources]
+    assert response.json()["color"] == original.color
+    assert response.json()["created_at"] == original.created_at
+    assert listed[0] == response.json()
+
+
+async def test_space_update_rejects_unknown_space_and_empty_name():
+    await server.spaces.default()
+    async with client() as c:
+        missing = await c.patch(
+            "/api/spaces/spc_missing", json={"name": "missing", "about": ""}
+        )
+        invalid = await c.patch(
+            "/api/spaces/spc_hatchery", json={"name": "   ", "about": "body"}
+        )
+
+    assert missing.status_code == 404
+    assert invalid.status_code == 422
+
+
+async def test_space_resources_update():
+    await server.spaces.default()
+    async with client() as c:
+        response = await c.patch(
+            "/api/spaces/spc_hatchery/resources",
+            json={
+                "repos": ["anbuzin/hatchery"],
+                "resources": [
+                    {"title": "docs", "url": "https://example.com/docs", "kind": "link"}
+                ],
+            },
+        )
+        listed = (await c.get("/api/spaces")).json()
+
+    assert response.status_code == 200
+    assert response.json()["repos"] == ["anbuzin/hatchery"]
+    assert response.json()["resources"] == [
+        {"title": "docs", "url": "https://example.com/docs", "kind": "link"}
+    ]
+    assert listed[0]["resources"] == response.json()["resources"]
+
+
+async def test_space_resources_update_rejects_unknown_space_and_invalid_repo():
+    await server.spaces.default()
+    async with client() as c:
+        missing = await c.patch(
+            "/api/spaces/spc_missing/resources", json={"repos": [], "resources": []}
+        )
+        invalid = await c.patch(
+            "/api/spaces/spc_hatchery/resources",
+            json={"repos": ["https://github.com/anbuzin/hatchery"], "resources": []},
+        )
+
+    assert missing.status_code == 404
+    assert invalid.status_code == 422
 
 
 async def test_chat_create_and_list():
@@ -26,6 +124,13 @@ async def test_chat_create_and_list():
         assert created["title"] == "new chat"
         listed = (await c.get("/api/chats")).json()
     assert [x["id"] for x in listed] == [created["id"]]
+
+
+async def test_chat_create_rejects_unknown_space():
+    async with client() as c:
+        response = await c.post("/api/chats", json={"space_id": "spc_missing"})
+    assert response.status_code == 404
+    assert response.json() == {"detail": "unknown space"}
 
 
 async def test_chat_list_cleans_legacy_slack_title():
@@ -235,7 +340,9 @@ async def test_ui_turn_is_mirrored_to_bound_channel(monkeypatch):
     channel = FakeChannel()
     previous = server.bot.channels.get("fake")
     server.bot.channels["fake"] = channel
-    monkeypatch.setattr(server.dispatcher, "agent_for", lambda record, observe: FakeAgent())
+    monkeypatch.setattr(
+        server.dispatcher, "agent_for", lambda record, repos, observe: FakeAgent()
+    )
     monkeypatch.setattr(server.ai.ui.ai_sdk, "to_sse", fake_sse)
     try:
         space = await server.spaces.default()
@@ -451,7 +558,7 @@ async def test_supervision_history_ends_with_unpersisted_user_wake(monkeypatch):
             run.messages = list(history)
             return run
 
-    monkeypatch.setattr(server.dispatcher, "agent_for", lambda record: FakeAgent())
+    monkeypatch.setattr(server.dispatcher, "agent_for", lambda record, repos: FakeAgent())
     outcome = await server._run_supervision_turn(chat.id, {"id": chat.id}, wake)
     assert outcome.notify is False
     assert seen is not None

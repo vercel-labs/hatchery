@@ -65,8 +65,8 @@ def _team() -> str:
     return json.loads((_CLI / "config.json").read_text())["currentTeam"]
 
 
-async def create_box(name: str) -> dict:
-    """Boot a repo-less devbox, install devboxd, block until READY.
+async def create_box(name: str, repos: list[str]) -> dict:
+    """Boot a devbox, clone its repos, install devboxd, and block until READY.
 
     One call (`setup: true` + a sandbox spec opts into the server-side flow).
     Cold boot is ~1 minute. Returns {"id", "url"} — url is the box's devboxd
@@ -82,7 +82,12 @@ async def create_box(name: str) -> dict:
                 f"{API}/v2/devbox/create",
                 params={"teamId": _team()},
                 headers={"Authorization": f"Bearer {token()}"},
-                json={"name": name, "setup": True, "sandbox": {}},
+                json={
+                    "name": name,
+                    "setup": True,
+                    "sandbox": {},
+                    "cloneRepos": repos,
+                },
             )
             if r.status_code < 500 or attempt == 2:
                 box = _checked(r).json()
@@ -107,7 +112,7 @@ async def create_task(
     webhook_secret: str | None = None,
     webhook_task_id: str | None = None,
 ) -> dict:
-    """Start a claude-code task on the box: {task_id, session_id, state}.
+    """Start an fx task on the box: {task_id, session_id, state}.
 
     session_id names the box pty session the agent runs in. A fresh box can
     409 for a moment right after create (registration settles just behind
@@ -115,7 +120,7 @@ async def create_task(
     secret rides in the URL because devbox task webhooks do not support custom
     headers or signatures.
     """
-    body = {"devbox_id": box_id, "set_id": set_id, "assistant": "claude-code", "prompt": prompt}
+    body = {"devbox_id": box_id, "set_id": set_id, "assistant": "fx", "prompt": prompt}
     if url := webhook_url():
         if not webhook_secret:
             raise RuntimeError("deployed task webhooks require a per-task secret")

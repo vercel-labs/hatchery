@@ -113,6 +113,86 @@ async def list_spaces() -> list[models.Space]:
     return found or [await spaces.default()]
 
 
+class CreateSpaceRequest(pydantic.BaseModel):
+    name: str
+
+    @pydantic.field_validator("name")
+    @classmethod
+    def valid_name(cls, name: str) -> str:
+        name = name.strip()
+        if not name:
+            raise ValueError("name must not be empty")
+        return name
+
+
+@app.post("/api/spaces")
+async def create_space(request: CreateSpaceRequest) -> models.Space:
+    return await spaces.create(request.name)
+
+
+@app.delete("/api/spaces/{space_id}", status_code=204)
+async def delete_space(space_id: str) -> None:
+    if any(chat.space_id == space_id for chat in await chats.list_all()):
+        raise fastapi.HTTPException(409, "space still has chats")
+    if not await spaces.delete(space_id):
+        raise fastapi.HTTPException(404, "unknown space")
+
+
+class UpdateSpaceRequest(pydantic.BaseModel):
+    name: str
+    about: str
+
+    @pydantic.field_validator("name")
+    @classmethod
+    def valid_name(cls, name: str) -> str:
+        name = name.strip()
+        if not name:
+            raise ValueError("name must not be empty")
+        return name
+
+
+@app.patch("/api/spaces/{space_id}")
+async def update_space(space_id: str, request: UpdateSpaceRequest) -> models.Space:
+    space = await spaces.get(space_id)
+    if space is None:
+        raise fastapi.HTTPException(404, "unknown space")
+    updated = models.Space.model_validate(
+        {**space.model_dump(), "name": request.name, "about": request.about}
+    )
+    return await spaces.save(updated)
+
+
+class UpdateSpaceResourcesRequest(pydantic.BaseModel):
+    repos: list[str]
+    resources: list[models.Resource]
+
+    @pydantic.field_validator("repos")
+    @classmethod
+    def valid_repos(cls, repos: list[str]) -> list[str]:
+        for repo in repos:
+            parts = repo.split("/")
+            if len(parts) != 2 or not all(parts) or any(part.strip() != part for part in parts):
+                raise ValueError("repos must use owner/repo form")
+        return repos
+
+
+@app.patch("/api/spaces/{space_id}/resources")
+async def update_space_resources(
+    space_id: str, request: UpdateSpaceResourcesRequest
+) -> models.Space:
+    space = await spaces.get(space_id)
+    if space is None:
+        raise fastapi.HTTPException(404, "unknown space")
+    updated = models.Space.model_validate(
+        {
+            **space.model_dump(),
+            "repos": request.repos,
+            "resources": request.resources,
+        }
+    )
+    return await spaces.save(updated)
+
+
 @app.get("/api/chats")
 async def list_chats() -> list[models.Chat]:
     found = await chats.list_all()
@@ -133,6 +213,8 @@ class CreateChatRequest(pydantic.BaseModel):
 @app.post("/api/chats")
 async def create_chat(request: CreateChatRequest) -> models.Chat:
     space_id = request.space_id or (await spaces.default()).id
+    if await spaces.get(space_id) is None:
+        raise fastapi.HTTPException(404, "unknown space")
     return await chats.create(space_id, request.title)
 
 
@@ -197,15 +279,10 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                     ),
                 )
 
-            history = [ai.system_message(dispatcher.SYSTEM), *stored]
+            space = await _space_for_chat(request.chat_id)
+            history = [ai.system_message(dispatcher.system_prompt(space)), *stored]
             record = await events.tail(request.chat_id, "worker") or {"id": request.chat_id}
-
-            def observe_task(launch: dict, created: dict) -> None:
-                if devbox.webhook_url() is None:
-                    _spawn(_watch_local_task(request.chat_id, launch, created))
-                    _spawn(_supervise_local(launch["id"]))
-
-            agent = dispatcher.agent_for(record, observe_task)
+            agent = dispatcher.agent_for(record, space.repos, _task_observer(request.chat_id))
             await _emit(request.chat_id, channels.event(channels.protocol.TURN_STARTED))
             try:
                 async with agent.run(dispatcher.model(), history) as result:
@@ -232,6 +309,25 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
     return fastapi.responses.StreamingResponse(
         stream(), headers=ai.ui.ai_sdk.UI_MESSAGE_STREAM_HEADERS
     )
+
+
+async def _space_for_chat(chat_id: str) -> models.Space:
+    chat = await chats.get(chat_id)
+    if chat is None:
+        raise fastapi.HTTPException(404, "unknown chat")
+    space = await spaces.get(chat.space_id)
+    if space is None:
+        raise RuntimeError(f"chat {chat_id} belongs to unknown space {chat.space_id}")
+    return space
+
+
+def _task_observer(chat_id: str):
+    def observe(launch: dict, created: dict) -> None:
+        if devbox.webhook_url() is None:
+            _spawn(_watch_local_task(chat_id, launch, created))
+            _spawn(_supervise_local(launch["id"]))
+
+    return observe
 
 
 async def _transcript(chat_id: str) -> list[ai.messages.Message]:
@@ -564,8 +660,9 @@ async def _run_supervision_turn(
     chat_id: str, record: dict, wake: ai.messages.Message
 ) -> SupervisionOutcome:
     stored = await _transcript(chat_id)
-    history = [ai.system_message(dispatcher.SYSTEM), *stored, wake]
-    agent = dispatcher.agent_for(record)
+    space = await _space_for_chat(chat_id)
+    history = [ai.system_message(dispatcher.system_prompt(space)), *stored, wake]
+    agent = dispatcher.agent_for(record, space.repos)
     async with agent.run(dispatcher.model(), history, output_type=SupervisionOutcome) as result:
         async for _ in result:
             pass
@@ -587,10 +684,11 @@ async def _run_dispatcher_turn(
 ) -> str:
     """Run a dispatcher turn; wake context is model-only, never persisted."""
     stored = await _transcript(chat_id)
-    history = [ai.system_message(dispatcher.SYSTEM), *stored]
+    space = await _space_for_chat(chat_id)
+    history = [ai.system_message(dispatcher.system_prompt(space)), *stored]
     if wake is not None:
         history.append(wake)
-    agent = dispatcher.agent_for(record)
+    agent = dispatcher.agent_for(record, space.repos, _task_observer(chat_id))
     async with agent.run(dispatcher.model(), history) as result:
         async for _ in result:
             pass

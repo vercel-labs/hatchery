@@ -3,10 +3,14 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   BookMarkedIcon,
+  CheckIcon,
   FolderGitIcon,
   LinkIcon,
+  PencilIcon,
   PlusIcon,
   TerminalIcon,
+  Trash2Icon,
+  XIcon,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -23,7 +27,16 @@ import {
   EmptyHeader,
   EmptyTitle,
 } from "@/components/ui/empty";
+import {
+  Field,
+  FieldDescription,
+  FieldError,
+  FieldGroup,
+  FieldLabel,
+} from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Sidebar,
   SidebarContent,
@@ -34,6 +47,7 @@ import {
   SidebarHeader,
   SidebarInset,
   SidebarMenu,
+  SidebarMenuAction,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarMenuSkeleton,
@@ -61,6 +75,8 @@ export default function Home() {
   const [chats, setChats] = useState<Chat[] | null>(null);
   const [failed, setFailed] = useState(false);
   const [selection, setSelection] = useState<Selection>(null);
+  const [addingSpace, setAddingSpace] = useState(false);
+  const [spaceName, setSpaceName] = useState("");
   // set by space clicks only; chat clicks leave the order alone
   const [sortSpaceId, setSortSpaceId] = useState<string | null>(null);
 
@@ -98,6 +114,36 @@ export default function Home() {
         )
       : chats;
 
+  const createSpace = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!spaceName.trim()) return;
+    const res = await fetch("/api/spaces", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: spaceName }),
+    });
+    if (!res.ok) return;
+    const space: Space = await res.json();
+    setSpaces((current) => [...(current ?? []), space]);
+    setSelection({ kind: "space", id: space.id });
+    setSortSpaceId(space.id);
+    setSpaceName("");
+    setAddingSpace(false);
+  };
+
+  const deleteSpace = async (space: Space) => {
+    if (!window.confirm(`Remove ${space.name}?`)) return;
+    const res = await fetch(`/api/spaces/${space.id}`, { method: "DELETE" });
+    if (res.status === 409) {
+      window.alert("Remove this space's chats first.");
+      return;
+    }
+    if (!res.ok) return;
+    setSpaces((current) => current?.filter((item) => item.id !== space.id) ?? null);
+    if (selection?.kind === "space" && selection.id === space.id) setSelection(null);
+    if (sortSpaceId === space.id) setSortSpaceId(null);
+  };
+
   const createChat = async () => {
     const spaceId = selectedSpace?.id ?? sortSpaceId ?? spaces?.[0]?.id ?? null;
     const res = await fetch("/api/chats", {
@@ -125,7 +171,42 @@ export default function Home() {
         <SidebarContent>
           <SidebarGroup>
             <SidebarGroupLabel>Spaces</SidebarGroupLabel>
+            <SidebarGroupAction
+              title="New space"
+              aria-label="New space"
+              onClick={() => setAddingSpace(true)}
+            >
+              <PlusIcon />
+            </SidebarGroupAction>
             <SidebarGroupContent>
+              {addingSpace && (
+                <form className="flex gap-1 px-2 pb-1" onSubmit={createSpace}>
+                  <Input
+                    autoFocus
+                    value={spaceName}
+                    onChange={(event) => setSpaceName(event.target.value)}
+                    placeholder="Space name"
+                    aria-label="Space name"
+                    className="h-7"
+                  />
+                  <Button type="submit" size="icon-xs" disabled={!spaceName.trim()}>
+                    <CheckIcon />
+                    <span className="sr-only">Add space</span>
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-xs"
+                    onClick={() => {
+                      setAddingSpace(false);
+                      setSpaceName("");
+                    }}
+                  >
+                    <XIcon />
+                    <span className="sr-only">Cancel</span>
+                  </Button>
+                </form>
+              )}
               <SidebarMenu>
                 {spaces === null
                   ? Array.from({ length: failed ? 0 : 2 }).map((_, i) => (
@@ -146,6 +227,14 @@ export default function Home() {
                           <Dot color={space.color} />
                           <span className="truncate">{space.name}</span>
                         </SidebarMenuButton>
+                        <SidebarMenuAction
+                          showOnHover
+                          aria-label={`Remove ${space.name}`}
+                          title={`Remove ${space.name}`}
+                          onClick={() => deleteSpace(space)}
+                        >
+                          <Trash2Icon />
+                        </SidebarMenuAction>
                       </SidebarMenuItem>
                     ))}
               </SidebarMenu>
@@ -216,7 +305,16 @@ export default function Home() {
                 </EmptyHeader>
               </Empty>
             ) : selectedSpace ? (
-              <SpacePane space={selectedSpace} />
+              <SpacePane
+                space={selectedSpace}
+                onChange={(updated) =>
+                  setSpaces((current) =>
+                    current?.map((space) =>
+                      space.id === updated.id ? updated : space,
+                    ) ?? null,
+                  )
+                }
+              />
             ) : (
               <Empty>
                 <EmptyHeader>
@@ -260,7 +358,27 @@ function ResourceCard({ resource }: { resource: Resource }) {
   );
 }
 
-function SpacePane({ space }: { space: Space }) {
+function SpacePane({
+  space,
+  onChange,
+}: {
+  space: Space;
+  onChange: (space: Space) => void;
+}) {
+  const [editingDocument, setEditingDocument] = useState(false);
+  const [documentName, setDocumentName] = useState(space.name);
+  const [documentAbout, setDocumentAbout] = useState(space.about);
+  const [savingDocument, setSavingDocument] = useState(false);
+  const [documentError, setDocumentError] = useState("");
+  const [editingResources, setEditingResources] = useState(false);
+  const [repos, setRepos] = useState(space.repos);
+  const [links, setLinks] = useState(space.resources);
+  const [kind, setKind] = useState<"repo" | "link">("repo");
+  const [resourceTitle, setResourceTitle] = useState("");
+  const [url, setUrl] = useState("");
+  const [savingResources, setSavingResources] = useState(false);
+  const [resourceError, setResourceError] = useState("");
+
   const resources = [
     ...space.repos.map((repo) => ({
       title: repo,
@@ -269,20 +387,293 @@ function SpacePane({ space }: { space: Space }) {
     })),
     ...space.resources,
   ];
+
+  const startEditingDocument = () => {
+    setDocumentName(space.name);
+    setDocumentAbout(space.about);
+    setDocumentError("");
+    setEditingDocument(true);
+  };
+
+  const saveDocument = async () => {
+    if (!documentName.trim()) {
+      setDocumentError("Title is required.");
+      return;
+    }
+    setSavingDocument(true);
+    setDocumentError("");
+    try {
+      const response = await fetch(`/api/spaces/${space.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: documentName, about: documentAbout }),
+      });
+      if (!response.ok) throw new Error();
+      onChange(await response.json());
+      setEditingDocument(false);
+    } catch {
+      setDocumentError("Could not save space.");
+    } finally {
+      setSavingDocument(false);
+    }
+  };
+
+  const startEditingResources = () => {
+    setRepos(space.repos);
+    setLinks(space.resources);
+    setResourceError("");
+    setEditingResources(true);
+  };
+
+  const addResource = (event: React.FormEvent) => {
+    event.preventDefault();
+    setResourceError("");
+    if (kind === "repo") {
+      const repo = url.trim();
+      if (!/^[^/\s]+\/[^/\s]+$/.test(repo)) {
+        setResourceError("Use owner/repo form.");
+        return;
+      }
+      if (!repos.includes(repo)) setRepos([...repos, repo]);
+    } else {
+      const nextTitle = resourceTitle.trim();
+      const nextUrl = url.trim();
+      try {
+        const parsed = new URL(nextUrl);
+        if (!nextTitle || !["http:", "https:"].includes(parsed.protocol)) {
+          throw new Error();
+        }
+      } catch {
+        setResourceError("Add a title and a valid http(s) URL.");
+        return;
+      }
+      if (!links.some((resource) => resource.url === nextUrl)) {
+        setLinks([...links, { title: nextTitle, url: nextUrl, kind: "link" }]);
+      }
+    }
+    setResourceTitle("");
+    setUrl("");
+  };
+
+  const saveResources = async () => {
+    setSavingResources(true);
+    setResourceError("");
+    try {
+      const response = await fetch(`/api/spaces/${space.id}/resources`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ repos, resources: links }),
+      });
+      if (!response.ok) throw new Error();
+      onChange(await response.json());
+      setEditingResources(false);
+    } catch {
+      setResourceError("Could not save resources.");
+    } finally {
+      setSavingResources(false);
+    }
+  };
+
   return (
     <div className="mx-auto grid w-full max-w-6xl gap-10 lg:grid-cols-[minmax(0,1fr)_18rem]">
-      <article className="typeset typeset-docs mx-auto w-full max-w-2xl min-w-0">
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{space.about}</ReactMarkdown>
-      </article>
+      <section className="mx-auto flex w-full max-w-2xl min-w-0 flex-col gap-6">
+        {editingDocument ? (
+          <FieldGroup>
+            <Field data-invalid={Boolean(documentError)}>
+              <FieldLabel htmlFor={`space-name-${space.id}`}>Title</FieldLabel>
+              <Input
+                id={`space-name-${space.id}`}
+                value={documentName}
+                onChange={(event) => setDocumentName(event.target.value)}
+                aria-invalid={Boolean(documentError)}
+              />
+            </Field>
+            <Field data-invalid={Boolean(documentError)}>
+              <FieldLabel htmlFor={`space-about-${space.id}`}>Markdown</FieldLabel>
+              <Textarea
+                id={`space-about-${space.id}`}
+                value={documentAbout}
+                onChange={(event) => setDocumentAbout(event.target.value)}
+                className="min-h-96 resize-y font-mono"
+                aria-invalid={Boolean(documentError)}
+              />
+              <FieldError>{documentError}</FieldError>
+            </Field>
+            <div className="flex justify-end gap-2">
+              <Button
+                variant="ghost"
+                disabled={savingDocument}
+                onClick={() => setEditingDocument(false)}
+              >
+                <XIcon />
+                Cancel
+              </Button>
+              <Button disabled={savingDocument} onClick={saveDocument}>
+                <CheckIcon />
+                {savingDocument ? "Saving" : "Save"}
+              </Button>
+            </div>
+          </FieldGroup>
+        ) : (
+          <>
+            <div className="flex items-center justify-between gap-4">
+              <h1 className="text-3xl font-semibold tracking-tight">{space.name}</h1>
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                aria-label="Edit space"
+                onClick={startEditingDocument}
+              >
+                <PencilIcon />
+              </Button>
+            </div>
+            <article className="typeset typeset-docs min-w-0">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{space.about}</ReactMarkdown>
+            </article>
+          </>
+        )}
+      </section>
       <aside className="mx-auto flex w-full max-w-2xl flex-col gap-2 lg:mx-0 lg:max-w-none">
-        <span className="px-1 text-xs font-medium text-muted-foreground">
-          Resources
-        </span>
-        {resources.map((resource) => (
-          <ResourceCard key={resource.url} resource={resource} />
-        ))}
+        <div className="flex h-7 items-center justify-between px-1">
+          <span className="text-xs font-medium text-muted-foreground">
+            Resources
+          </span>
+          {!editingResources && (
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              aria-label="Edit resources"
+              onClick={startEditingResources}
+            >
+              <PencilIcon />
+            </Button>
+          )}
+        </div>
+        {editingResources ? (
+          <div className="flex flex-col gap-4">
+            <div className="flex flex-col gap-2">
+              {repos.map((repo) => (
+                <EditableResource
+                  key={`repo:${repo}`}
+                  resource={{
+                    title: repo,
+                    url: `https://github.com/${repo}`,
+                    kind: "repo",
+                  }}
+                  onDelete={() => setRepos(repos.filter((item) => item !== repo))}
+                />
+              ))}
+              {links.map((resource, index) => (
+                <EditableResource
+                  key={`${resource.url}:${index}`}
+                  resource={resource}
+                  onDelete={() => setLinks(links.filter((_, item) => item !== index))}
+                />
+              ))}
+            </div>
+            <form onSubmit={addResource}>
+              <FieldGroup>
+                <Field>
+                  <FieldLabel htmlFor={`resource-kind-${space.id}`}>Add resource</FieldLabel>
+                  <select
+                    id={`resource-kind-${space.id}`}
+                    value={kind}
+                    onChange={(event) => {
+                      setKind(event.target.value as "repo" | "link");
+                      setResourceTitle("");
+                      setUrl("");
+                      setResourceError("");
+                    }}
+                    className="h-8 rounded-lg border border-input bg-transparent px-2.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+                  >
+                    <option value="repo">GitHub repository</option>
+                    <option value="link">Link</option>
+                  </select>
+                </Field>
+                {kind === "link" && (
+                  <Field>
+                    <FieldLabel htmlFor={`resource-title-${space.id}`}>Title</FieldLabel>
+                    <Input
+                      id={`resource-title-${space.id}`}
+                      value={resourceTitle}
+                      onChange={(event) => setResourceTitle(event.target.value)}
+                      placeholder="Documentation"
+                    />
+                  </Field>
+                )}
+                <Field data-invalid={Boolean(resourceError)}>
+                  <FieldLabel htmlFor={`resource-url-${space.id}`}>
+                    {kind === "repo" ? "Repository" : "URL"}
+                  </FieldLabel>
+                  <Input
+                    id={`resource-url-${space.id}`}
+                    value={url}
+                    onChange={(event) => setUrl(event.target.value)}
+                    placeholder={kind === "repo" ? "owner/repo" : "https://example.com"}
+                    aria-invalid={Boolean(resourceError)}
+                  />
+                  {kind === "repo" && (
+                    <FieldDescription>Enter a GitHub repository as owner/repo.</FieldDescription>
+                  )}
+                  <FieldError>{resourceError}</FieldError>
+                </Field>
+                <Button type="submit" variant="outline">
+                  <PlusIcon />
+                  Add
+                </Button>
+              </FieldGroup>
+            </form>
+            <div className="flex justify-end gap-2">
+              <Button
+                variant="ghost"
+                disabled={savingResources}
+                onClick={() => setEditingResources(false)}
+              >
+                <XIcon />
+                Cancel
+              </Button>
+              <Button disabled={savingResources} onClick={saveResources}>
+                <CheckIcon />
+                {savingResources ? "Saving" : "Save"}
+              </Button>
+            </div>
+          </div>
+        ) : resources.length ? (
+          resources.map((resource, index) => (
+            <ResourceCard key={`${resource.url}:${index}`} resource={resource} />
+          ))
+        ) : (
+          <span className="px-1 text-sm text-muted-foreground">No resources yet.</span>
+        )}
       </aside>
     </div>
+  );
+}
+
+function EditableResource({
+  resource,
+  onDelete,
+}: {
+  resource: Resource;
+  onDelete: () => void;
+}) {
+  const Icon =
+    resourceIcon[resource.kind as keyof typeof resourceIcon] ?? LinkIcon;
+  return (
+    <Card className="flex-row items-center gap-3 p-3">
+      <Icon className="size-4 shrink-0 text-muted-foreground" />
+      <span className="min-w-0 flex-1 truncate text-sm font-medium">
+        {resource.title}
+      </span>
+      <Button
+        variant="ghost"
+        size="icon-xs"
+        aria-label={`Delete ${resource.title}`}
+        onClick={onDelete}
+      >
+        <Trash2Icon />
+      </Button>
+    </Card>
   );
 }
 

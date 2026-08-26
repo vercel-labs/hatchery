@@ -1,4 +1,7 @@
+import json
 import urllib.parse
+
+import httpx
 
 from agent import devbox
 
@@ -15,6 +18,60 @@ def test_deployment_uses_vercel_webhook(monkeypatch):
     monkeypatch.setenv("VERCEL_ENV", "preview")
     monkeypatch.setenv("VERCEL_URL", "hatchery-preview.vercel.app")
     assert devbox.webhook_url() == "https://hatchery-preview.vercel.app/channels/v1/devbox"
+
+
+async def test_create_box_sends_clone_repos(monkeypatch):
+    seen = {}
+
+    async def send(self, request, **kwargs):
+        seen["request"] = request
+        return httpx.Response(
+            200,
+            request=request,
+            json={"id": "box_1", "url": "https://box.example"},
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
+    monkeypatch.setattr(devbox, "token", lambda: "token")
+    monkeypatch.setattr(devbox, "_team", lambda: "team_1")
+
+    box = await devbox.create_box("hatchery-chat", ["anbuzin/hatchery"])
+
+    request = seen["request"]
+    assert box == {"id": "box_1", "url": "https://box.example"}
+    assert request.url.params["teamId"] == "team_1"
+    assert json.loads(request.content) == {
+        "name": "hatchery-chat",
+        "setup": True,
+        "sandbox": {},
+        "cloneRepos": ["anbuzin/hatchery"],
+    }
+
+
+async def test_create_task_uses_fx(monkeypatch):
+    seen = {}
+
+    async def send(self, request, **kwargs):
+        seen["request"] = request
+        return httpx.Response(
+            200,
+            request=request,
+            json={"task_id": "task_1", "session_id": "session_1", "state": "pending"},
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
+    monkeypatch.setattr(devbox, "token", lambda: "token")
+    monkeypatch.setattr(devbox, "webhook_url", lambda: None)
+
+    task = await devbox.create_task("box_1", "set_1", "fix it")
+
+    assert task == {"task_id": "task_1", "session_id": "session_1", "state": "pending"}
+    assert json.loads(seen["request"].content) == {
+        "devbox_id": "box_1",
+        "set_id": "set_1",
+        "assistant": "fx",
+        "prompt": "fix it",
+    }
 
 
 def test_tty_url_targets_real_devbox_session(monkeypatch):

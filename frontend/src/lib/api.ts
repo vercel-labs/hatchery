@@ -29,7 +29,6 @@ export type Resource = {
 export type Space = {
   id: string;
   name: string;
-  goal: string;
   about: string;
   repos: string[];
   resources: Resource[];

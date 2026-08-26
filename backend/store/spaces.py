@@ -1,4 +1,4 @@
-"""Spaces: what hatchery works on (repos, goal, the about canvas).
+"""Spaces: what hatchery works on (repos and the about canvas).
 
 Rows are the models.Space json verbatim — the store adds no schema of its
 own beyond the id. default() seeds hatchery's own space on first use so a
@@ -8,6 +8,7 @@ fresh deployment has somewhere to land chats.
 import datetime
 import json
 import urllib.parse
+import uuid
 
 import pydantic
 
@@ -23,6 +24,17 @@ CREATE TABLE IF NOT EXISTS hatchery_spaces (
 """
 
 DEFAULT_ID = "spc_hatchery"
+_DEFAULT_ABOUT = (
+    "An agent deployed to the cloud, running mostly unattended. Reachable "
+    "from slack, github, and this ui.\n\n"
+    "## Goal\n\n"
+    "Work on itself: respond to issues, ping on slack, and ship prs to its "
+    "own repo.\n\n"
+    "## Conventions\n\n"
+    "Keep changes small and reviewable. Prefer a report over a pr when "
+    "uncertain."
+)
+_LEGACY_DEFAULT_ABOUT = f"# hatchery\n\n{_DEFAULT_ABOUT}"
 
 _schema_ready = False
 
@@ -37,6 +49,18 @@ async def ensure_ready() -> None:
             _schema_ready = True
     else:
         (store.data_dir() / "spaces").mkdir(parents=True, exist_ok=True)
+
+
+async def create(name: str) -> models.Space:
+    """Create an empty space."""
+    return await save(
+        models.Space(
+            id=f"spc_{uuid.uuid4().hex[:12]}",
+            name=name,
+            color="#a78bfa",
+            created_at=datetime.datetime.now(datetime.UTC).isoformat(),
+        )
+    )
 
 
 async def save(space: models.Space) -> models.Space:
@@ -55,6 +79,22 @@ async def save(space: models.Space) -> models.Space:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(space.model_dump_json(), encoding="utf-8")
     return space
+
+
+async def delete(space_id: str) -> bool:
+    """Delete one space, returning whether it existed."""
+    if store.use_postgres():
+        from store import db
+
+        result = await (await db.pool()).execute(
+            "DELETE FROM hatchery_spaces WHERE id = $1", space_id
+        )
+        return result != "DELETE 0"
+    path = _path(space_id)
+    if not path.exists():
+        return False
+    path.unlink()
+    return True
 
 
 async def get(space_id: str) -> models.Space | None:
@@ -92,24 +132,16 @@ async def default() -> models.Space:
     """Hatchery's own space, created on first call."""
     existing = await get(DEFAULT_ID)
     if existing is not None:
+        if existing.about == _LEGACY_DEFAULT_ABOUT:
+            existing.about = _DEFAULT_ABOUT
+            return await save(existing)
         return existing
     return await save(
         models.Space(
             id=DEFAULT_ID,
             name="hatchery",
-            goal="work on itself: respond to issues, ship prs to its own repo",
-            about=(
-                "# hatchery\n\n"
-                "An agent deployed to the cloud, running mostly unattended. Reachable "
-                "from slack, github, and this ui.\n\n"
-                "## Goal\n\n"
-                "Work on itself: respond to issues, ping on slack, and ship prs to its "
-                "own repo.\n\n"
-                "## Conventions\n\n"
-                "Keep changes small and reviewable. Prefer a report over a pr when "
-                "uncertain."
-            ),
-            repos=["anbuzin/hatchery"],
+            about=_DEFAULT_ABOUT,
+            repos=["vercel/vercel-py"],
             resources=[
                 models.Resource(
                     title="ai sdk for python",

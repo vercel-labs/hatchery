@@ -12,12 +12,20 @@ class Resource(pydantic.BaseModel):
 class Space(pydantic.BaseModel):
     id: str  # "spc_<hex>"
     name: str
-    goal: str  # "monitor workflows js, notify python team on change"
     about: str = ""  # markdown, the space's canvas
     repos: list[str] = []  # "owner/repo", autocloned into the sandbox
     resources: list[Resource] = []  # extra links; repos show up alongside these
     color: str  # hex; the ui codes the space and its chats with it
     created_at: str  # utc isoformat, same as Event.meta.at
+
+    @pydantic.field_validator("repos")
+    @classmethod
+    def valid_repos(cls, repos: list[str]) -> list[str]:
+        for repo in repos:
+            parts = repo.split("/")
+            if len(parts) != 2 or not all(parts) or any(part.strip() != part for part in parts):
+                raise ValueError("repos must use owner/repo form")
+        return repos
 
 
 class Chat(pydantic.BaseModel):
