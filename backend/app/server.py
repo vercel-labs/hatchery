@@ -279,10 +279,10 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                     ),
                 )
 
-            history = [ai.system_message(dispatcher.SYSTEM), *stored]
+            space = await _space_for_chat(request.chat_id)
+            history = [ai.system_message(dispatcher.system_prompt(space)), *stored]
             record = await events.tail(request.chat_id, "worker") or {"id": request.chat_id}
-            repos = await _repos_for_chat(request.chat_id)
-            agent = dispatcher.agent_for(record, repos, _task_observer(request.chat_id))
+            agent = dispatcher.agent_for(record, space.repos, _task_observer(request.chat_id))
             await _emit(request.chat_id, channels.event(channels.protocol.TURN_STARTED))
             try:
                 async with agent.run(dispatcher.model(), history) as result:
@@ -311,14 +311,14 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
     )
 
 
-async def _repos_for_chat(chat_id: str) -> list[str]:
+async def _space_for_chat(chat_id: str) -> models.Space:
     chat = await chats.get(chat_id)
     if chat is None:
         raise fastapi.HTTPException(404, "unknown chat")
     space = await spaces.get(chat.space_id)
     if space is None:
         raise RuntimeError(f"chat {chat_id} belongs to unknown space {chat.space_id}")
-    return list(space.repos)
+    return space
 
 
 def _task_observer(chat_id: str):
@@ -660,8 +660,9 @@ async def _run_supervision_turn(
     chat_id: str, record: dict, wake: ai.messages.Message
 ) -> SupervisionOutcome:
     stored = await _transcript(chat_id)
-    history = [ai.system_message(dispatcher.SYSTEM), *stored, wake]
-    agent = dispatcher.agent_for(record, await _repos_for_chat(chat_id))
+    space = await _space_for_chat(chat_id)
+    history = [ai.system_message(dispatcher.system_prompt(space)), *stored, wake]
+    agent = dispatcher.agent_for(record, space.repos)
     async with agent.run(dispatcher.model(), history, output_type=SupervisionOutcome) as result:
         async for _ in result:
             pass
@@ -683,12 +684,11 @@ async def _run_dispatcher_turn(
 ) -> str:
     """Run a dispatcher turn; wake context is model-only, never persisted."""
     stored = await _transcript(chat_id)
-    history = [ai.system_message(dispatcher.SYSTEM), *stored]
+    space = await _space_for_chat(chat_id)
+    history = [ai.system_message(dispatcher.system_prompt(space)), *stored]
     if wake is not None:
         history.append(wake)
-    agent = dispatcher.agent_for(
-        record, await _repos_for_chat(chat_id), _task_observer(chat_id)
-    )
+    agent = dispatcher.agent_for(record, space.repos, _task_observer(chat_id))
     async with agent.run(dispatcher.model(), history) as result:
         async for _ in result:
             pass

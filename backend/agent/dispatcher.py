@@ -13,6 +13,7 @@ import typing
 import ai
 from vercel import workflow
 
+import models
 from agent import devbox, supervisor
 from store import activity, chats, events, tasks, workspaces
 
@@ -27,6 +28,25 @@ you are woken because coder state changed. Its result is authoritative. Never
 launch another coder merely to check an existing one. If the coder fails, say
 so plainly and stop — never write the code yourself or invent what the output
 would have looked like. Be terse and concrete."""
+
+
+def system_prompt(space: models.Space) -> str:
+    description = space.about.strip() or "No description provided."
+    resources = "\n".join(
+        f"- {resource.title} ({resource.kind}): {resource.url}"
+        for resource in space.resources
+    ) or "- None"
+    return f"""{SYSTEM}
+
+You are working in this space:
+- Name: {space.name}
+- ID: {space.id}
+
+Space description:
+{description}
+
+Attached resources:
+{resources}"""
 
 def model() -> ai.Model:
     return ai.get_model("anthropic/claude-sonnet-4.6")

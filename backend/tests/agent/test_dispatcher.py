@@ -1,7 +1,35 @@
 import pytest
 
+import models
 from agent import dispatcher
 from store import activity, chats, events, spaces, tasks
+
+
+def test_system_prompt_describes_space_and_resources():
+    space = models.Space(
+        id="spc_docs",
+        name="docs",
+        about="Keep the SDK documentation accurate.",
+        repos=["vercel/vercel-py"],
+        resources=[
+            models.Resource(
+                title="AI SDK Python",
+                url="https://vercel.com/docs/ai-sdk-python",
+                kind="reference",
+            )
+        ],
+        color="#38bdf8",
+        created_at="2026-08-26T00:00:00+00:00",
+    )
+
+    prompt = dispatcher.system_prompt(space)
+
+    assert "Name: docs" in prompt
+    assert "ID: spc_docs" in prompt
+    assert "Keep the SDK documentation accurate." in prompt
+    assert (
+        "AI SDK Python (reference): https://vercel.com/docs/ai-sdk-python" in prompt
+    )
 
 
 async def test_check_coder_reads_chat_activity():
