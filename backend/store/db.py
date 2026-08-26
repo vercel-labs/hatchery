@@ -40,8 +40,17 @@ async def pool() -> asyncpg.Pool:
 
 
 def _dsn() -> str:
+    return _clean_dsn(os.environ["DATABASE_URL"])
+
+
+def direct_dsn() -> str:
+    """Direct connection for session features such as LISTEN/NOTIFY."""
+    return _clean_dsn(os.environ.get("DATABASE_URL_UNPOOLED", os.environ["DATABASE_URL"]))
+
+
+def _clean_dsn(value: str) -> str:
     # neon connection strings carry channel_binding=require, a libpq parameter
     # asyncpg doesn't know; it would refuse the whole url.
-    parts = urllib.parse.urlsplit(os.environ["DATABASE_URL"])
+    parts = urllib.parse.urlsplit(value)
     query = [(k, v) for k, v in urllib.parse.parse_qsl(parts.query) if k != "channel_binding"]
     return urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode(query)))
