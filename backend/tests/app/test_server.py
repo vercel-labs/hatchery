@@ -455,8 +455,9 @@ async def test_first_ui_prompt_classifies_before_dispatcher(monkeypatch):
         yield 'data: {"type":"finish"}\n\n'
 
     monkeypatch.setattr(server.classifier, "classify", classify)
-    def agent_for(record, repos, observe):
-        seen["repos"] = repos
+
+    def agent_for(record, observe):
+        seen["observe"] = observe
         return FakeAgent()
 
     monkeypatch.setattr(server.dispatcher, "agent_for", agent_for)
@@ -477,7 +478,7 @@ async def test_first_ui_prompt_classifies_before_dispatcher(monkeypatch):
         {"origin": "ui", "author": "current user"},
         [docs.id],
     )
-    assert seen["repos"] == ["vercel/docs"]
+    assert seen["observe"] is not None
     assert (await chats.get(chat.id)).space_id == docs.id
     assert '"state": "assigning"' in response.text
     assert '"state": "assigned"' in response.text
@@ -517,7 +518,7 @@ async def test_ui_turn_is_mirrored_to_bound_channel(monkeypatch):
     previous = server.bot.channels.get("fake")
     server.bot.channels["fake"] = channel
     monkeypatch.setattr(
-        server.dispatcher, "agent_for", lambda record, repos, observe: FakeAgent()
+        server.dispatcher, "agent_for", lambda record, observe: FakeAgent()
     )
     monkeypatch.setattr(server.ai.ui.ai_sdk, "to_sse", fake_sse)
     try:
@@ -745,7 +746,7 @@ async def test_supervision_history_ends_with_unpersisted_user_wake(monkeypatch):
             run.messages = list(history)
             return run
 
-    monkeypatch.setattr(server.dispatcher, "agent_for", lambda record, repos: FakeAgent())
+    monkeypatch.setattr(server.dispatcher, "agent_for", lambda record: FakeAgent())
     outcome = await server._run_supervision_turn(chat.id, {"id": chat.id}, wake)
     assert outcome.notify is False
     assert seen is not None

@@ -22,6 +22,7 @@ API = os.environ.get("DEVBOX_API_URL", "https://api.vercel.com")
 _CLI = pathlib.Path.home() / "Library/Application Support/com.vercel.cli"
 
 TERMINAL_STATES = ("complete", "errored")
+DEFAULT_MODEL = "openai/gpt-5.6-sol"
 
 
 def webhook_url() -> str | None:
@@ -111,6 +112,7 @@ async def create_task(
     prompt: str,
     webhook_secret: str | None = None,
     webhook_task_id: str | None = None,
+    model: str = DEFAULT_MODEL,
 ) -> dict:
     """Start an fx task on the box: {task_id, session_id, state}.
 
@@ -120,7 +122,13 @@ async def create_task(
     secret rides in the URL because devbox task webhooks do not support custom
     headers or signatures.
     """
-    body = {"devbox_id": box_id, "set_id": set_id, "assistant": "fx", "prompt": prompt}
+    body = {
+        "devbox_id": box_id,
+        "set_id": set_id,
+        "assistant": "fx",
+        "model": model,
+        "prompt": prompt,
+    }
     if url := webhook_url():
         if not webhook_secret:
             raise RuntimeError("deployed task webhooks require a per-task secret")

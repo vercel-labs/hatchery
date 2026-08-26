@@ -70,6 +70,7 @@ async def test_create_task_uses_fx(monkeypatch):
         "devbox_id": "box_1",
         "set_id": "set_1",
         "assistant": "fx",
+        "model": "openai/gpt-5.6-sol",
         "prompt": "fix it",
     }
 

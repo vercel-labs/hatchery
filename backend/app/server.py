@@ -420,7 +420,7 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
             space = await _space_for_chat(request.chat_id)
             history = [ai.system_message(dispatcher.system_prompt(space)), *stored]
             record = await events.tail(request.chat_id, "worker") or {"id": request.chat_id}
-            agent = dispatcher.agent_for(record, space.repos, _task_observer(request.chat_id))
+            agent = dispatcher.agent_for(record, _task_observer(request.chat_id))
             await _emit(request.chat_id, channels.event(channels.protocol.TURN_STARTED))
             try:
                 async with agent.run(dispatcher.model(), history) as result:
@@ -679,7 +679,10 @@ async def _watch_local_task(chat_id: str, record: dict, created: dict) -> None:
         await asyncio.sleep(20)
         try:
             created = await devbox.create_task(
-                workspace["box"]["id"], workspace["set_id"], record["prompt"]
+                workspace["box"]["id"],
+                workspace["set_id"],
+                record["prompt"],
+                model=record.get("model", devbox.DEFAULT_MODEL),
             )
         except Exception as error:
             record["state"] = "errored"
@@ -813,7 +816,7 @@ async def _run_supervision_turn(
     stored = await _transcript(chat_id)
     space = await _space_for_chat(chat_id)
     history = [ai.system_message(dispatcher.system_prompt(space)), *stored, wake]
-    agent = dispatcher.agent_for(record, space.repos)
+    agent = dispatcher.agent_for(record)
     async with agent.run(dispatcher.model(), history, output_type=SupervisionOutcome) as result:
         async for _ in result:
             pass
@@ -839,7 +842,7 @@ async def _run_dispatcher_turn(
     history = [ai.system_message(dispatcher.system_prompt(space)), *stored]
     if wake is not None:
         history.append(wake)
-    agent = dispatcher.agent_for(record, space.repos, _task_observer(chat_id))
+    agent = dispatcher.agent_for(record, _task_observer(chat_id))
     async with agent.run(dispatcher.model(), history) as result:
         async for _ in result:
             pass

@@ -27,6 +27,7 @@ def test_system_prompt_describes_space_and_resources():
     assert "Name: docs" in prompt
     assert "ID: spc_docs" in prompt
     assert "Keep the SDK documentation accurate." in prompt
+    assert "Available repositories:\n- vercel/vercel-py" in prompt
     assert (
         "AI SDK Python (reference): https://vercel.com/docs/ai-sdk-python" in prompt
     )
@@ -54,7 +55,7 @@ async def test_check_coder_reads_chat_activity():
     ]
 
 
-async def test_launch_coder_clones_space_repos_and_persists_workspace(monkeypatch):
+async def test_launch_coder_clones_selected_repos_and_persists_workspace(monkeypatch):
     space = await spaces.default()
     chat = await chats.create(space.id, "inspect")
     seen = {}
@@ -66,8 +67,8 @@ async def test_launch_coder_clones_space_repos_and_persists_workspace(monkeypatc
         seen["box"] = (name, repos)
         return {"id": "box_1", "url": "https://box.example"}
 
-    async def create_task(box_id, set_id, prompt, webhook_secret, webhook_task_id):
-        seen["task"] = (box_id, set_id, prompt)
+    async def create_task(box_id, set_id, prompt, webhook_secret, webhook_task_id, model):
+        seen["task"] = (box_id, set_id, prompt, model)
         return {"task_id": "task_1", "session_id": "session_1", "state": "pending"}
 
     monkeypatch.setattr(dispatcher.devbox, "create_taskset", create_taskset)
@@ -75,19 +76,62 @@ async def test_launch_coder_clones_space_repos_and_persists_workspace(monkeypatc
     monkeypatch.setattr(dispatcher.devbox, "create_task", create_task)
     monkeypatch.setattr(dispatcher.devbox, "webhook_url", lambda: None)
 
-    agent = dispatcher.agent_for({"id": chat.id}, space.repos)
+    agent = dispatcher.agent_for({"id": chat.id})
     tool = next(tool for tool in agent.tools if tool.name == "launch_coder")
-    updates = [update async for update in tool.fn("answer questions")]
+    updates = [
+        update
+        async for update in tool.fn(
+            "answer questions",
+            repos=["vercel/vercel-py"],
+            model="anthropic/claude-sonnet-4.6",
+        )
+    ]
 
     assert seen["box"] == (f"hatchery-{chat.id}", ["vercel/vercel-py"])
-    assert seen["task"] == ("box_1", "set_1", "answer questions")
+    assert seen["task"] == (
+        "box_1",
+        "set_1",
+        "answer questions",
+        "anthropic/claude-sonnet-4.6",
+    )
     assert updates[-1]["task_id"] == "task_1"
     workspace = await events.tail(chat.id, "worker")
     assert workspace is not None
     assert workspace["repos"] == ["vercel/vercel-py"]
     assert workspace["workspace_version"] == 1
+    [launch] = await tasks.list_for_chat(chat.id)
+    assert launch["model"] == "anthropic/claude-sonnet-4.6"
     saved_chat = await chats.get(chat.id)
     assert saved_chat is not None and saved_chat.status == "running"
+
+
+async def test_launch_coder_can_create_empty_workspace(monkeypatch):
+    space = await spaces.default()
+    chat = await chats.create(space.id, "inspect")
+    created_boxes = []
+
+    async def create_taskset(title):
+        return "set_1"
+
+    async def create_box(name, repos):
+        created_boxes.append(repos)
+        return {"id": "box_1", "url": "https://box.example"}
+
+    async def create_task(*args):
+        return {"task_id": "task_1", "session_id": "session_1", "state": "pending"}
+
+    monkeypatch.setattr(dispatcher.devbox, "create_taskset", create_taskset)
+    monkeypatch.setattr(dispatcher.devbox, "create_box", create_box)
+    monkeypatch.setattr(dispatcher.devbox, "create_task", create_task)
+    monkeypatch.setattr(dispatcher.devbox, "webhook_url", lambda: None)
+
+    agent = dispatcher.agent_for({"id": chat.id})
+    tool = next(tool for tool in agent.tools if tool.name == "launch_coder")
+    [update async for update in tool.fn("research the issue")]
+
+    assert created_boxes == [[]]
+    workspace = await events.tail(chat.id, "worker")
+    assert workspace is not None and workspace["repos"] == []
 
 
 async def test_launch_coder_replaces_repo_less_workspace(monkeypatch):
@@ -111,9 +155,12 @@ async def test_launch_coder_replaces_repo_less_workspace(monkeypatch):
     monkeypatch.setattr(dispatcher.devbox, "create_task", create_task)
     monkeypatch.setattr(dispatcher.devbox, "webhook_url", lambda: None)
 
-    agent = dispatcher.agent_for({"id": chat.id}, space.repos)
+    agent = dispatcher.agent_for({"id": chat.id})
     tool = next(tool for tool in agent.tools if tool.name == "launch_coder")
-    [update async for update in tool.fn("inspect")]
+    [
+        update
+        async for update in tool.fn("inspect", repos=["vercel/vercel-py"])
+    ]
 
     assert created_boxes == [["vercel/vercel-py"]]
     workspace = await events.tail(chat.id, "worker")
@@ -127,7 +174,7 @@ async def test_launch_coder_rejects_concurrent_task(monkeypatch):
     active["state"] = "running"
     await tasks.save(active)
 
-    agent = dispatcher.agent_for({"id": chat.id}, space.repos)
+    agent = dispatcher.agent_for({"id": chat.id})
     tool = next(tool for tool in agent.tools if tool.name == "launch_coder")
     with pytest.raises(RuntimeError, match="already running"):
         [update async for update in tool.fn("second")]
@@ -146,10 +193,13 @@ async def test_provision_failure_marks_chat_failed_and_keeps_taskset(monkeypatch
     monkeypatch.setattr(dispatcher.devbox, "create_taskset", create_taskset)
     monkeypatch.setattr(dispatcher.devbox, "create_box", create_box)
 
-    agent = dispatcher.agent_for({"id": chat.id}, space.repos)
+    agent = dispatcher.agent_for({"id": chat.id})
     tool = next(tool for tool in agent.tools if tool.name == "launch_coder")
     with pytest.raises(RuntimeError, match="clone failed"):
-        [update async for update in tool.fn("inspect")]
+        [
+            update
+            async for update in tool.fn("inspect", repos=["vercel/vercel-py"])
+        ]
 
     assert await tasks.list_for_chat(chat.id) == []
     workspace = await events.tail(chat.id, "worker")
@@ -177,7 +227,7 @@ async def test_launch_failure_is_recorded(monkeypatch):
     monkeypatch.setattr(dispatcher.devbox, "create_box", create_box)
     monkeypatch.setattr(dispatcher.devbox, "create_task", create_task)
 
-    agent = dispatcher.agent_for({"id": chat.id}, space.repos)
+    agent = dispatcher.agent_for({"id": chat.id})
     tool = next(tool for tool in agent.tools if tool.name == "launch_coder")
     with pytest.raises(RuntimeError, match="task API unavailable"):
         [update async for update in tool.fn("inspect")]
