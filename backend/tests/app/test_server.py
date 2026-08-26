@@ -17,6 +17,41 @@ async def test_spaces_seed_default():
     async with client() as c:
         listed = (await c.get("/api/spaces")).json()
     assert [s["id"] for s in listed] == ["spc_hatchery"]
+    assert "goal" not in listed[0]
+    assert not listed[0]["about"].startswith("# hatchery")
+
+
+async def test_space_update():
+    original = await server.spaces.default()
+    async with client() as c:
+        response = await c.patch(
+            "/api/spaces/spc_hatchery",
+            json={"name": "  Hatchery docs  ", "about": "# Overview\n\nEdited directly."},
+        )
+        listed = (await c.get("/api/spaces")).json()
+
+    assert response.status_code == 200
+    assert response.json()["name"] == "Hatchery docs"
+    assert response.json()["about"] == "# Overview\n\nEdited directly."
+    assert response.json()["repos"] == original.repos
+    assert response.json()["resources"] == [resource.model_dump() for resource in original.resources]
+    assert response.json()["color"] == original.color
+    assert response.json()["created_at"] == original.created_at
+    assert listed[0] == response.json()
+
+
+async def test_space_update_rejects_unknown_space_and_empty_name():
+    await server.spaces.default()
+    async with client() as c:
+        missing = await c.patch(
+            "/api/spaces/spc_missing", json={"name": "missing", "about": ""}
+        )
+        invalid = await c.patch(
+            "/api/spaces/spc_hatchery", json={"name": "   ", "about": "body"}
+        )
+
+    assert missing.status_code == 404
+    assert invalid.status_code == 422
 
 
 async def test_space_resources_update():

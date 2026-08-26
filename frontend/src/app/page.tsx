@@ -36,6 +36,7 @@ import {
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Sidebar,
   SidebarContent,
@@ -288,14 +289,19 @@ function SpacePane({
   space: Space;
   onChange: (space: Space) => void;
 }) {
-  const [editing, setEditing] = useState(false);
+  const [editingDocument, setEditingDocument] = useState(false);
+  const [documentName, setDocumentName] = useState(space.name);
+  const [documentAbout, setDocumentAbout] = useState(space.about);
+  const [savingDocument, setSavingDocument] = useState(false);
+  const [documentError, setDocumentError] = useState("");
+  const [editingResources, setEditingResources] = useState(false);
   const [repos, setRepos] = useState(space.repos);
   const [links, setLinks] = useState(space.resources);
   const [kind, setKind] = useState<"repo" | "link">("repo");
-  const [title, setTitle] = useState("");
+  const [resourceTitle, setResourceTitle] = useState("");
   const [url, setUrl] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
+  const [savingResources, setSavingResources] = useState(false);
+  const [resourceError, setResourceError] = useState("");
 
   const resources = [
     ...space.repos.map((repo) => ({
@@ -306,25 +312,55 @@ function SpacePane({
     ...space.resources,
   ];
 
-  const startEditing = () => {
+  const startEditingDocument = () => {
+    setDocumentName(space.name);
+    setDocumentAbout(space.about);
+    setDocumentError("");
+    setEditingDocument(true);
+  };
+
+  const saveDocument = async () => {
+    if (!documentName.trim()) {
+      setDocumentError("Title is required.");
+      return;
+    }
+    setSavingDocument(true);
+    setDocumentError("");
+    try {
+      const response = await fetch(`/api/spaces/${space.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: documentName, about: documentAbout }),
+      });
+      if (!response.ok) throw new Error();
+      onChange(await response.json());
+      setEditingDocument(false);
+    } catch {
+      setDocumentError("Could not save space.");
+    } finally {
+      setSavingDocument(false);
+    }
+  };
+
+  const startEditingResources = () => {
     setRepos(space.repos);
     setLinks(space.resources);
-    setError("");
-    setEditing(true);
+    setResourceError("");
+    setEditingResources(true);
   };
 
   const addResource = (event: React.FormEvent) => {
     event.preventDefault();
-    setError("");
+    setResourceError("");
     if (kind === "repo") {
       const repo = url.trim();
       if (!/^[^/\s]+\/[^/\s]+$/.test(repo)) {
-        setError("Use owner/repo form.");
+        setResourceError("Use owner/repo form.");
         return;
       }
       if (!repos.includes(repo)) setRepos([...repos, repo]);
     } else {
-      const nextTitle = title.trim();
+      const nextTitle = resourceTitle.trim();
       const nextUrl = url.trim();
       try {
         const parsed = new URL(nextUrl);
@@ -332,20 +368,20 @@ function SpacePane({
           throw new Error();
         }
       } catch {
-        setError("Add a title and a valid http(s) URL.");
+        setResourceError("Add a title and a valid http(s) URL.");
         return;
       }
       if (!links.some((resource) => resource.url === nextUrl)) {
         setLinks([...links, { title: nextTitle, url: nextUrl, kind: "link" }]);
       }
     }
-    setTitle("");
+    setResourceTitle("");
     setUrl("");
   };
 
-  const save = async () => {
-    setSaving(true);
-    setError("");
+  const saveResources = async () => {
+    setSavingResources(true);
+    setResourceError("");
     try {
       const response = await fetch(`/api/spaces/${space.id}/resources`, {
         method: "PATCH",
@@ -354,36 +390,90 @@ function SpacePane({
       });
       if (!response.ok) throw new Error();
       onChange(await response.json());
-      setEditing(false);
+      setEditingResources(false);
     } catch {
-      setError("Could not save resources.");
+      setResourceError("Could not save resources.");
     } finally {
-      setSaving(false);
+      setSavingResources(false);
     }
   };
 
   return (
     <div className="mx-auto grid w-full max-w-6xl gap-10 lg:grid-cols-[minmax(0,1fr)_18rem]">
-      <article className="typeset typeset-docs mx-auto w-full max-w-2xl min-w-0">
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{space.about}</ReactMarkdown>
-      </article>
+      <section className="mx-auto flex w-full max-w-2xl min-w-0 flex-col gap-6">
+        {editingDocument ? (
+          <FieldGroup>
+            <Field data-invalid={Boolean(documentError)}>
+              <FieldLabel htmlFor={`space-name-${space.id}`}>Title</FieldLabel>
+              <Input
+                id={`space-name-${space.id}`}
+                value={documentName}
+                onChange={(event) => setDocumentName(event.target.value)}
+                aria-invalid={Boolean(documentError)}
+              />
+            </Field>
+            <Field data-invalid={Boolean(documentError)}>
+              <FieldLabel htmlFor={`space-about-${space.id}`}>Markdown</FieldLabel>
+              <Textarea
+                id={`space-about-${space.id}`}
+                value={documentAbout}
+                onChange={(event) => setDocumentAbout(event.target.value)}
+                className="min-h-96 resize-y font-mono"
+                aria-invalid={Boolean(documentError)}
+              />
+              <FieldError>{documentError}</FieldError>
+            </Field>
+            <div className="flex justify-end gap-2">
+              <Button
+                variant="ghost"
+                disabled={savingDocument}
+                onClick={() => setEditingDocument(false)}
+              >
+                <XIcon />
+                Cancel
+              </Button>
+              <Button disabled={savingDocument} onClick={saveDocument}>
+                <CheckIcon />
+                {savingDocument ? "Saving" : "Save"}
+              </Button>
+            </div>
+          </FieldGroup>
+        ) : (
+          <>
+            <div className="flex items-center justify-between gap-4">
+              <h1 className="text-3xl font-semibold tracking-tight">{space.name}</h1>
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                aria-label="Edit space"
+                onClick={startEditingDocument}
+              >
+                <PencilIcon />
+              </Button>
+            </div>
+            <article className="typeset typeset-docs min-w-0">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{space.about}</ReactMarkdown>
+            </article>
+          </>
+        )}
+      </section>
       <aside className="mx-auto flex w-full max-w-2xl flex-col gap-2 lg:mx-0 lg:max-w-none">
         <div className="flex h-7 items-center justify-between px-1">
           <span className="text-xs font-medium text-muted-foreground">
             Resources
           </span>
-          {!editing && (
+          {!editingResources && (
             <Button
               variant="ghost"
               size="icon-xs"
               aria-label="Edit resources"
-              onClick={startEditing}
+              onClick={startEditingResources}
             >
               <PencilIcon />
             </Button>
           )}
         </div>
-        {editing ? (
+        {editingResources ? (
           <div className="flex flex-col gap-4">
             <div className="flex flex-col gap-2">
               {repos.map((repo) => (
@@ -414,9 +504,9 @@ function SpacePane({
                     value={kind}
                     onChange={(event) => {
                       setKind(event.target.value as "repo" | "link");
-                      setTitle("");
+                      setResourceTitle("");
                       setUrl("");
-                      setError("");
+                      setResourceError("");
                     }}
                     className="h-8 rounded-lg border border-input bg-transparent px-2.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
                   >
@@ -429,13 +519,13 @@ function SpacePane({
                     <FieldLabel htmlFor={`resource-title-${space.id}`}>Title</FieldLabel>
                     <Input
                       id={`resource-title-${space.id}`}
-                      value={title}
-                      onChange={(event) => setTitle(event.target.value)}
+                      value={resourceTitle}
+                      onChange={(event) => setResourceTitle(event.target.value)}
                       placeholder="Documentation"
                     />
                   </Field>
                 )}
-                <Field data-invalid={Boolean(error)}>
+                <Field data-invalid={Boolean(resourceError)}>
                   <FieldLabel htmlFor={`resource-url-${space.id}`}>
                     {kind === "repo" ? "Repository" : "URL"}
                   </FieldLabel>
@@ -444,12 +534,12 @@ function SpacePane({
                     value={url}
                     onChange={(event) => setUrl(event.target.value)}
                     placeholder={kind === "repo" ? "owner/repo" : "https://example.com"}
-                    aria-invalid={Boolean(error)}
+                    aria-invalid={Boolean(resourceError)}
                   />
                   {kind === "repo" && (
                     <FieldDescription>Enter a GitHub repository as owner/repo.</FieldDescription>
                   )}
-                  <FieldError>{error}</FieldError>
+                  <FieldError>{resourceError}</FieldError>
                 </Field>
                 <Button type="submit" variant="outline">
                   <PlusIcon />
@@ -460,15 +550,15 @@ function SpacePane({
             <div className="flex justify-end gap-2">
               <Button
                 variant="ghost"
-                disabled={saving}
-                onClick={() => setEditing(false)}
+                disabled={savingResources}
+                onClick={() => setEditingResources(false)}
               >
                 <XIcon />
                 Cancel
               </Button>
-              <Button disabled={saving} onClick={save}>
+              <Button disabled={savingResources} onClick={saveResources}>
                 <CheckIcon />
-                {saving ? "Saving" : "Save"}
+                {savingResources ? "Saving" : "Save"}
               </Button>
             </div>
           </div>

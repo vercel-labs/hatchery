@@ -113,6 +113,30 @@ async def list_spaces() -> list[models.Space]:
     return found or [await spaces.default()]
 
 
+class UpdateSpaceRequest(pydantic.BaseModel):
+    name: str
+    about: str
+
+    @pydantic.field_validator("name")
+    @classmethod
+    def valid_name(cls, name: str) -> str:
+        name = name.strip()
+        if not name:
+            raise ValueError("name must not be empty")
+        return name
+
+
+@app.patch("/api/spaces/{space_id}")
+async def update_space(space_id: str, request: UpdateSpaceRequest) -> models.Space:
+    space = await spaces.get(space_id)
+    if space is None:
+        raise fastapi.HTTPException(404, "unknown space")
+    updated = models.Space.model_validate(
+        {**space.model_dump(), "name": request.name, "about": request.about}
+    )
+    return await spaces.save(updated)
+
+
 class UpdateSpaceResourcesRequest(pydantic.BaseModel):
     repos: list[str]
     resources: list[models.Resource]

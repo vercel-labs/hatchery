@@ -1,4 +1,4 @@
-"""Spaces: what hatchery works on (repos, goal, the about canvas).
+"""Spaces: what hatchery works on (repos and the about canvas).
 
 Rows are the models.Space json verbatim — the store adds no schema of its
 own beyond the id. default() seeds hatchery's own space on first use so a
@@ -23,6 +23,17 @@ CREATE TABLE IF NOT EXISTS hatchery_spaces (
 """
 
 DEFAULT_ID = "spc_hatchery"
+_DEFAULT_ABOUT = (
+    "An agent deployed to the cloud, running mostly unattended. Reachable "
+    "from slack, github, and this ui.\n\n"
+    "## Goal\n\n"
+    "Work on itself: respond to issues, ping on slack, and ship prs to its "
+    "own repo.\n\n"
+    "## Conventions\n\n"
+    "Keep changes small and reviewable. Prefer a report over a pr when "
+    "uncertain."
+)
+_LEGACY_DEFAULT_ABOUT = f"# hatchery\n\n{_DEFAULT_ABOUT}"
 
 _schema_ready = False
 
@@ -92,23 +103,15 @@ async def default() -> models.Space:
     """Hatchery's own space, created on first call."""
     existing = await get(DEFAULT_ID)
     if existing is not None:
+        if existing.about == _LEGACY_DEFAULT_ABOUT:
+            existing.about = _DEFAULT_ABOUT
+            return await save(existing)
         return existing
     return await save(
         models.Space(
             id=DEFAULT_ID,
             name="hatchery",
-            goal="work on itself: respond to issues, ship prs to its own repo",
-            about=(
-                "# hatchery\n\n"
-                "An agent deployed to the cloud, running mostly unattended. Reachable "
-                "from slack, github, and this ui.\n\n"
-                "## Goal\n\n"
-                "Work on itself: respond to issues, ping on slack, and ship prs to its "
-                "own repo.\n\n"
-                "## Conventions\n\n"
-                "Keep changes small and reviewable. Prefer a report over a pr when "
-                "uncertain."
-            ),
+            about=_DEFAULT_ABOUT,
             repos=["vercel/vercel-py"],
             resources=[
                 models.Resource(
