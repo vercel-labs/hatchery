@@ -72,10 +72,16 @@ async def ensure_ready() -> None:
         (store.data_dir() / "chats").mkdir(parents=True, exist_ok=True)
 
 
-async def create(space_id: str | None, title: str, trigger: str = "ui") -> models.Chat:
+async def create(
+    space_id: str | None,
+    title: str,
+    trigger: str = "ui",
+    pending_space_ids: list[str] | None = None,
+) -> models.Chat:
     chat = models.Chat(
         id=f"chat_{uuid.uuid4().hex[:12]}",
         space_id=space_id,
+        pending_space_ids=pending_space_ids or [],
         title=title,
         trigger=trigger,
         created_at=_now(),
@@ -124,6 +130,7 @@ async def assign_space(chat_id: str, space_id: str) -> models.Chat | None:
     if chat is None:
         return None
     chat.space_id = space_id
+    chat.pending_space_ids = []
     if store.use_postgres():
         from store import db
 
@@ -159,7 +166,12 @@ async def finish(chat_id: str, status: str, artifact: str | None = None) -> mode
 
 
 async def claim(
-    token: str, channel: str, space_id: str, title: str, state: dict
+    token: str,
+    channel: str,
+    space_id: str | None,
+    title: str,
+    state: dict,
+    pending_space_ids: list[str] | None = None,
 ) -> tuple[models.Chat, bool]:
     """Atomically map a channel token to its owning chat.
 
@@ -171,6 +183,7 @@ async def claim(
     candidate = models.Chat(
         id=f"chat_{uuid.uuid4().hex[:12]}",
         space_id=space_id,
+        pending_space_ids=pending_space_ids or [],
         title=title,
         trigger=token,
         created_at=_now(),

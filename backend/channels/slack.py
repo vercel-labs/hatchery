@@ -26,6 +26,7 @@ import html
 import json
 import os
 import re
+import urllib.parse
 
 import httpx
 from vercel import connect
@@ -58,7 +59,35 @@ class SlackChannel:
         except connect.ConnectWebhookVerificationError:
             return channels.Ack(401, '{"error": "unverified webhook"}')
 
-        payload = json.loads(webhook.body)
+        if webhook.headers.get("content-type", "").startswith("application/x-www-form-urlencoded"):
+            form = urllib.parse.parse_qs(webhook.body.decode())
+            payload = json.loads((form.get("payload") or ["{}"])[0])
+        else:
+            payload = json.loads(webhook.body)
+        if payload.get("type") == "block_actions":
+            action = next(iter(payload.get("actions") or []), {})
+            channel_id = (payload.get("channel") or {}).get("id", "")
+            message = payload.get("message") or {}
+            thread_ts = message.get("thread_ts") or message.get("ts", "")
+            space_id = action.get("value") if action.get("action_id") == "select_space" else None
+            if not channel_id or not thread_ts or not space_id:
+                return channels.Ack(400, '{"error": "invalid space selection"}')
+            inbound = channels.Inbound(
+                token=f"{channel_id}:{thread_ts}",
+                text=str(space_id),
+                state={
+                    "channel_id": channel_id,
+                    "thread_ts": thread_ts,
+                    "team_id": (payload.get("team") or {}).get("id", ""),
+                    "user_id": (payload.get("user") or {}).get("id", ""),
+                },
+                space_answer=str(space_id),
+                selection_only=True,
+            )
+            trigger = str(payload.get("trigger_id", ""))
+            if trigger and not await bus.dedupe(trigger):
+                return channels.Ack()
+            return channels.Ack(work=bus.dispatch(inbound))
         if payload.get("type") == "url_verification":
             return channels.Ack(200, str(payload.get("challenge", "")), "text/plain")
         retries = webhook.headers.get("x-slack-retry-num", "")
@@ -107,11 +136,48 @@ class SlackChannel:
         title_text = re.sub(rf"<@{re.escape(bot_user_id)}>", "", str(event.get("text", "")))
         title_text = html.unescape(" ".join(title_text.split())).strip()
         title = f"slack: {title_text[:53]}" if title_text else "slack: thread"
-        return channels.Inbound(token=f"{channel_id}:{thread_ts}", text=text, state=state, title=title)
+        return channels.Inbound(
+            token=f"{channel_id}:{thread_ts}",
+            text=text,
+            state=state,
+            title=title,
+            space_answer=title_text,
+        )
 
     async def on_event(self, event: channels.Event, state: dict) -> None:
         if event.type == channels.protocol.TURN_STARTED:
             await self._set_status(state, "is thinking...")
+        elif event.type == channels.protocol.SPACE_SELECTION_REQUESTED:
+            spaces = event.data.get("spaces") or []
+            await self._api(
+                "chat.postMessage",
+                channel=state["channel_id"],
+                thread_ts=state["thread_ts"],
+                text="Choose a space to continue.",
+                blocks=json.dumps(
+                    [
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": "*Which space should handle this?*",
+                            },
+                        },
+                        {
+                            "type": "actions",
+                            "elements": [
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": space["name"]},
+                                    "action_id": "select_space",
+                                    "value": space["id"],
+                                }
+                                for space in spaces
+                            ],
+                        },
+                    ]
+                ),
+            )
         elif event.type == channels.protocol.STATUS_UPDATED:
             await self._set_status(state, str(event.data.get("status", ""))[:STATUS_LIMIT])
         elif event.type == channels.protocol.MESSAGE_RECEIVED and event.data.get("origin") == "ui":

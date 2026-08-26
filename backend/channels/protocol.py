@@ -21,6 +21,7 @@ TURN_FAILED = "turn.failed"
 MESSAGE_RECEIVED = "message.received"
 MESSAGE_COMPLETED = "message.completed"
 STATUS_UPDATED = "status.updated"
+SPACE_SELECTION_REQUESTED = "space.selection_requested"
 
 
 class Meta(pydantic.BaseModel):

@@ -264,6 +264,55 @@ async def test_hub_lands_inbound_in_one_chat(monkeypatch):
     ]
 
 
+async def test_ambiguous_repo_asks_then_resumes_original_request(monkeypatch):
+    first = await server.spaces.create("docs")
+    first.repos = ["vercel/repo"]
+    await server.spaces.save(first)
+    second = await server.spaces.create("release")
+    second.repos = ["vercel/repo"]
+    await server.spaces.save(second)
+    emitted = []
+    runs = []
+
+    async def emit(chat_id, event):
+        emitted.append((chat_id, event))
+        return []
+
+    async def run(chat_id):
+        runs.append(chat_id)
+
+    monkeypatch.setattr(server, "_emit", emit)
+    monkeypatch.setattr(server, "_run_inbound_turn", run)
+    hub = server.bot.hub
+    inbound = channels.Inbound(
+        token="repo:42:issue:5",
+        text="fix the docs",
+        state={"kind": "issue"},
+        repo="vercel/repo",
+    )
+    await hub.dispatch("github", inbound)
+
+    [chat] = await chats.list_all()
+    assert chat.space_id is None
+    assert chat.pending_space_ids == [first.id, second.id]
+    assert emitted[-1][1].type == channels.protocol.SPACE_SELECTION_REQUESTED
+    assert [space["name"] for space in emitted[-1][1].data["spaces"]] == ["docs", "release"]
+    assert runs == []
+
+    inbound.space_answer = "2"
+    await hub.dispatch("github", inbound)
+    selected = await chats.get(chat.id)
+    assert selected is not None and selected.space_id == second.id
+    assert selected.pending_space_ids == []
+    assert len(await events.read(chat.id, "messages")) == 1
+    assert runs == [chat.id]
+
+    inbound.selection_only = True
+    await hub.dispatch("github", inbound)
+    assert len(await events.read(chat.id, "messages")) == 1
+    assert runs == [chat.id]
+
+
 async def test_inbound_turn_delivers_failure(monkeypatch):
     delivered = []
 

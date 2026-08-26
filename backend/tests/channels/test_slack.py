@@ -143,6 +143,40 @@ def state() -> dict:
     return {"channel_id": "C1", "thread_ts": "100.1"}
 
 
+async def test_space_questionnaire_posts_buttons():
+    calls: list[httpx.Request] = []
+    event = channels.event(
+        channels.protocol.SPACE_SELECTION_REQUESTED,
+        spaces=[{"id": "spc_docs", "name": "docs"}, {"id": "spc_release", "name": "release"}],
+    )
+    await api_channel(calls).on_event(event, state())
+    params = dict(urllib.parse.parse_qsl(calls[0].read().decode()))
+    blocks = json.loads(params["blocks"])
+    assert [button["value"] for button in blocks[1]["elements"]] == ["spc_docs", "spc_release"]
+    assert all(button["action_id"] == "select_space" for button in blocks[1]["elements"])
+
+
+async def test_block_action_dispatches_selected_space():
+    payload = {
+        "type": "block_actions",
+        "trigger_id": "trigger-1",
+        "team": {"id": "T1"},
+        "user": {"id": "U1"},
+        "channel": {"id": "C1"},
+        "message": {"thread_ts": "100.1", "ts": "100.2"},
+        "actions": [{"action_id": "select_space", "value": "spc_docs"}],
+    }
+    body = urllib.parse.urlencode({"payload": json.dumps(payload)}).encode()
+    webhook = channels.Webhook(
+        body=body,
+        headers={"authorization": "Bearer good", "content-type": "application/x-www-form-urlencoded"},
+    )
+    _, bus = await handled(webhook)
+    [inbound] = bus.dispatched
+    assert inbound.token == "C1:100.1"
+    assert inbound.space_answer == "spc_docs"
+
+
 async def test_turn_started_sets_typing_status_with_connect_token(connect_stub):
     calls: list[httpx.Request] = []
     await api_channel(calls).on_event(channels.event(channels.protocol.TURN_STARTED), state())
