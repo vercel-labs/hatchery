@@ -120,23 +120,15 @@ async def test_space_resources_update_rejects_unknown_space_and_invalid_repo():
 async def test_chat_create_and_list():
     async with client() as c:
         created = (await c.post("/api/chats", json={})).json()
-        assert created["space_id"] == "spc_hatchery"
+        assert created["space_id"] is None
         assert created["title"] == "new chat"
         listed = (await c.get("/api/chats")).json()
     assert [x["id"] for x in listed] == [created["id"]]
 
 
-async def test_chat_create_rejects_unknown_space():
-    async with client() as c:
-        response = await c.post("/api/chats", json={"space_id": "spc_missing"})
-    assert response.status_code == 404
-    assert response.json() == {"detail": "unknown space"}
-
-
 async def test_chat_space_assignment():
-    original = await server.spaces.default()
     destination = await server.spaces.create("docs")
-    chat = await chats.create(original.id, "work")
+    chat = await chats.create(None, "work")
 
     async with client() as c:
         response = await c.patch(
@@ -150,8 +142,9 @@ async def test_chat_space_assignment():
     assert (await server._space_for_chat(chat.id)).id == destination.id
 
 
-async def test_chat_space_assignment_rejects_unknown_chat_and_space():
+async def test_chat_space_assignment_rejects_unknown_chat_space_and_null():
     destination = await server.spaces.create("docs")
+    chat = await chats.create(destination.id, "work")
     async with client() as c:
         missing_chat = await c.patch(
             "/api/chats/chat_missing/space", json={"space_id": destination.id}
@@ -159,11 +152,16 @@ async def test_chat_space_assignment_rejects_unknown_chat_and_space():
         missing_space = await c.patch(
             "/api/chats/chat_missing/space", json={"space_id": "spc_missing"}
         )
+        null_space = await c.patch(
+            f"/api/chats/{chat.id}/space", json={"space_id": None}
+        )
 
     assert missing_chat.status_code == 404
     assert missing_chat.json() == {"detail": "unknown chat"}
     assert missing_space.status_code == 404
     assert missing_space.json() == {"detail": "unknown space"}
+    assert null_space.status_code == 422
+    assert (await chats.get(chat.id)).space_id == destination.id
 
 
 async def test_chat_list_cleans_legacy_slack_title():

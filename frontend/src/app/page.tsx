@@ -101,7 +101,7 @@ export default function Home() {
     load().catch(() => setFailed(true));
   }, []);
 
-  const colorOf = (spaceId: string) =>
+  const colorOf = (spaceId: string | null) =>
     spaces?.find((s) => s.id === spaceId)?.color;
 
   const selectedSpace =
@@ -153,11 +153,10 @@ export default function Home() {
   };
 
   const createChat = async () => {
-    const spaceId = selectedSpace?.id ?? sortSpaceId ?? spaces?.[0]?.id ?? null;
     const res = await fetch("/api/chats", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ space_id: spaceId }),
+      body: JSON.stringify({}),
     });
     if (!res.ok) return;
     const chat: Chat = await res.json();
@@ -318,7 +317,7 @@ export default function Home() {
               }}
             >
               <SelectTrigger size="sm" aria-label="Chat space">
-                <SelectValue />
+                <SelectValue placeholder="Assign space" />
               </SelectTrigger>
               <SelectContent align="end">
                 <SelectGroup>
@@ -333,7 +332,7 @@ export default function Home() {
             </Select>
           )}
         </header>
-        {selectedChat && !failed ? (
+        {selectedChat && selectedChat.space_id && !failed ? (
           <LiveChat key={selectedChat.id} chat={selectedChat} />
         ) : (
           <div className="flex-1 overflow-y-auto p-6 md:p-10">
@@ -344,6 +343,15 @@ export default function Home() {
                   <EmptyDescription>
                     Could not load spaces and chats. Locally: run `uv run
                     dev.py` in backend/ and reload.
+                  </EmptyDescription>
+                </EmptyHeader>
+              </Empty>
+            ) : selectedChat ? (
+              <Empty>
+                <EmptyHeader>
+                  <EmptyTitle>Assign a space</EmptyTitle>
+                  <EmptyDescription>
+                    Choose a space above before starting this chat.
                   </EmptyDescription>
                 </EmptyHeader>
               </Empty>

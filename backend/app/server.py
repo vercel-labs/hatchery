@@ -206,16 +206,12 @@ async def list_chats() -> list[models.Chat]:
 
 
 class CreateChatRequest(pydantic.BaseModel):
-    space_id: str | None = None
     title: str = "new chat"
 
 
 @app.post("/api/chats")
 async def create_chat(request: CreateChatRequest) -> models.Chat:
-    space_id = request.space_id or (await spaces.default()).id
-    if await spaces.get(space_id) is None:
-        raise fastapi.HTTPException(404, "unknown space")
-    return await chats.create(space_id, request.title)
+    return await chats.create(None, request.title)
 
 
 class AssignChatSpaceRequest(pydantic.BaseModel):
@@ -330,6 +326,8 @@ async def _space_for_chat(chat_id: str) -> models.Space:
     chat = await chats.get(chat_id)
     if chat is None:
         raise fastapi.HTTPException(404, "unknown chat")
+    if chat.space_id is None:
+        raise fastapi.HTTPException(409, "chat has no space")
     space = await spaces.get(chat.space_id)
     if space is None:
         raise RuntimeError(f"chat {chat_id} belongs to unknown space {chat.space_id}")

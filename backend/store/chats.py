@@ -7,8 +7,8 @@ UI at once. Single-owner: one chat per token, enforced by an atomic claim
 (postgres: INSERT .. ON CONFLICT DO NOTHING; local: one lock). dedupe gives
 webhooks durable replay protection.
 
-Chat rows are the models.Chat json verbatim, plus a space_id column for
-filtering. Postgres when DATABASE_URL is set, otherwise json files under
+Chat rows are the models.Chat json verbatim, plus a nullable space_id column
+for filtering. Postgres when DATABASE_URL is set, otherwise json files under
 HATCHERY_DATA_DIR. Locking mirrors store.events.
 """
 
@@ -26,10 +26,12 @@ import store
 _SCHEMA = """\
 CREATE TABLE IF NOT EXISTS hatchery_chats (
     id         TEXT PRIMARY KEY,
-    space_id   TEXT NOT NULL,
+    space_id   TEXT,
     data       JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE hatchery_chats ALTER COLUMN space_id DROP NOT NULL;
 
 CREATE TABLE IF NOT EXISTS hatchery_bindings (
     token      TEXT PRIMARY KEY,
@@ -70,7 +72,7 @@ async def ensure_ready() -> None:
         (store.data_dir() / "chats").mkdir(parents=True, exist_ok=True)
 
 
-async def create(space_id: str, title: str, trigger: str = "ui") -> models.Chat:
+async def create(space_id: str | None, title: str, trigger: str = "ui") -> models.Chat:
     chat = models.Chat(
         id=f"chat_{uuid.uuid4().hex[:12]}",
         space_id=space_id,
