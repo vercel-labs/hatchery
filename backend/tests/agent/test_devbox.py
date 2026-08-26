@@ -1,4 +1,7 @@
+import json
 import urllib.parse
+
+import httpx
 
 from agent import devbox
 
@@ -24,9 +27,36 @@ def test_deployment_uses_vercel_webhook(monkeypatch):
     assert devbox.webhook_url() == "https://hatchery-preview.vercel.app/channels/v1/devbox"
 
 
-def test_tty_url_targets_real_devbox_session(monkeypatch):
-    monkeypatch.setattr(devbox, "token", lambda: "token")
-    url = devbox.tty_url("https://box.example", "session_1", "12", "80", "24")
+async def test_create_box_uses_space_authority(monkeypatch):
+    seen = {}
+
+    async def request(http, method, url, operation, **kwargs):
+        seen.update(kwargs)
+        return httpx.Response(
+            200,
+            request=httpx.Request(method, url),
+            content=json.dumps({"id": "box_1", "url": "https://box.example"}).encode(),
+        )
+
+    monkeypatch.setattr(devbox, "_request", request)
+    auth = devbox.Auth("owner-token", "team_1", "project_1", "owner/repo")
+
+    await devbox.create_box(auth, "hatchery-chat_1")
+
+    assert seen["params"] == {"teamId": "team_1"}
+    assert seen["headers"] == {"Authorization": "Bearer owner-token"}
+    assert seen["json"] == {
+        "name": "hatchery-chat_1",
+        "setup": True,
+        "sandbox": {},
+        "projectId": "project_1",
+        "cloneRepos": ["owner/repo"],
+    }
+
+
+def test_tty_url_targets_real_devbox_session():
+    auth = devbox.Auth("token", "team_1", "project_1", "owner/repo")
+    url = devbox.tty_url(auth, "https://box.example", "session_1", "12", "80", "24")
     parsed = urllib.parse.urlsplit(url)
     assert parsed.scheme == "wss"
     assert parsed.path == "/__tty"

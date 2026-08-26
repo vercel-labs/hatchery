@@ -5,18 +5,34 @@ import {
   BookMarkedIcon,
   FolderGitIcon,
   LinkIcon,
+  LogOutIcon,
   PlusIcon,
   TerminalIcon,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import type { Chat, Resource, Space } from "@/lib/api";
+import type {
+  Chat,
+  Resource,
+  Space,
+  User,
+  VercelProject,
+  VercelTeam,
+} from "@/lib/api";
 import type { ChatUIMessage } from "@/lib/messages";
 import { ChatView } from "@/components/chat";
 import { TerminalPane, type CoderTask } from "@/components/terminal-pane";
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field";
 import {
   Empty,
   EmptyDescription,
@@ -24,6 +40,14 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty";
 import { Separator } from "@/components/ui/separator";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   Sidebar,
   SidebarContent,
@@ -57,6 +81,7 @@ function Dot({ color }: { color: string | undefined }) {
 }
 
 export default function Home() {
+  const [user, setUser] = useState<User | null | undefined>(undefined);
   const [spaces, setSpaces] = useState<Space[] | null>(null);
   const [chats, setChats] = useState<Chat[] | null>(null);
   const [failed, setFailed] = useState(false);
@@ -66,6 +91,11 @@ export default function Home() {
 
   useEffect(() => {
     const load = async () => {
+      const me = await fetch("/api/auth/me");
+      if (!me.ok) throw new Error("backend unreachable");
+      const identity = await me.json();
+      setUser(identity.user);
+      if (!identity.user) return;
       const [s, c] = await Promise.all([
         fetch("/api/spaces"),
         fetch("/api/chats"),
@@ -76,6 +106,32 @@ export default function Home() {
     };
     load().catch(() => setFailed(true));
   }, []);
+
+  if (!failed && user === undefined) return <div className="h-svh" />;
+
+  if (!failed && user === null) {
+    return (
+      <main className="flex h-svh items-center justify-center p-6">
+        <Card className="w-full max-w-sm">
+          <CardHeader>
+            <CardTitle>Sign in to hatchery</CardTitle>
+            <CardDescription>
+              Use Vercel to connect spaces and provision their coding devboxes.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button
+              className="w-full"
+              nativeButton={false}
+              render={<a href="/api/auth/login" />}
+            >
+              Sign in with Vercel
+            </Button>
+          </CardContent>
+        </Card>
+      </main>
+    );
+  }
 
   const colorOf = (spaceId: string) =>
     spaces?.find((s) => s.id === spaceId)?.color;
@@ -200,6 +256,18 @@ export default function Home() {
           <span className="text-sm font-medium">
             {selectedSpace?.name ?? selectedChat?.title ?? "hatchery"}
           </span>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="ml-auto"
+            aria-label="Sign out"
+            onClick={async () => {
+              await fetch("/api/auth/logout", { method: "POST" });
+              window.location.reload();
+            }}
+          >
+            <LogOutIcon />
+          </Button>
         </header>
         {selectedChat && !failed ? (
           <LiveChat key={selectedChat.id} chat={selectedChat} />
@@ -216,7 +284,14 @@ export default function Home() {
                 </EmptyHeader>
               </Empty>
             ) : selectedSpace ? (
-              <SpacePane space={selectedSpace} />
+              <SpacePane
+                space={selectedSpace}
+                onConnected={(updated) =>
+                  setSpaces((current) =>
+                    current?.map((item) => (item.id === updated.id ? updated : item)) ?? null,
+                  )
+                }
+              />
             ) : (
               <Empty>
                 <EmptyHeader>
@@ -260,7 +335,13 @@ function ResourceCard({ resource }: { resource: Resource }) {
   );
 }
 
-function SpacePane({ space }: { space: Space }) {
+function SpacePane({
+  space,
+  onConnected,
+}: {
+  space: Space;
+  onConnected: (space: Space) => void;
+}) {
   const resources = [
     ...space.repos.map((repo) => ({
       title: repo,
@@ -275,7 +356,8 @@ function SpacePane({ space }: { space: Space }) {
         <ReactMarkdown remarkPlugins={[remarkGfm]}>{space.about}</ReactMarkdown>
       </article>
       <aside className="mx-auto flex w-full max-w-2xl flex-col gap-2 lg:mx-0 lg:max-w-none">
-        <span className="px-1 text-xs font-medium text-muted-foreground">
+        <VercelConnection space={space} onConnected={onConnected} />
+        <span className="px-1 pt-4 text-xs font-medium text-muted-foreground">
           Resources
         </span>
         {resources.map((resource) => (
@@ -283,6 +365,130 @@ function SpacePane({ space }: { space: Space }) {
         ))}
       </aside>
     </div>
+  );
+}
+
+function VercelConnection({
+  space,
+  onConnected,
+}: {
+  space: Space;
+  onConnected: (space: Space) => void;
+}) {
+  const [teams, setTeams] = useState<VercelTeam[]>([]);
+  const [projects, setProjects] = useState<VercelProject[]>([]);
+  const [teamId, setTeamId] = useState(space.vercel_team_id ?? "");
+  const [projectId, setProjectId] = useState(space.vercel_project_id ?? "");
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/vercel/teams")
+      .then(async (response) => {
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.detail ?? "Could not load Vercel teams.");
+        return body;
+      })
+      .then(setTeams)
+      .catch((reason) => setError(reason instanceof Error ? reason.message : "Could not load Vercel teams."));
+  }, []);
+
+  useEffect(() => {
+    if (!teamId) return;
+    fetch(`/api/vercel/projects?team_id=${encodeURIComponent(teamId)}`)
+      .then(async (response) => {
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.detail ?? "Could not load Vercel projects.");
+        return body;
+      })
+      .then(setProjects)
+      .catch((reason) => setError(reason instanceof Error ? reason.message : "Could not load Vercel projects."));
+  }, [teamId]);
+
+  const expected = space.repos[0];
+  const matching = projects.filter((project) => {
+    const link = project.link;
+    return link && `${link.org}/${link.repo}` === expected;
+  });
+
+  return (
+    <Card size="sm">
+      <CardHeader>
+        <CardTitle>Vercel devbox</CardTitle>
+        <CardDescription>
+          {space.vercel_project_id
+            ? "Connected. Coding tasks use the space owner’s Vercel access."
+            : `Choose the project linked to ${expected ?? "this space’s repository"}.`}
+        </CardDescription>
+        {space.vercel_project_id && <CardAction className="text-xs text-muted-foreground">Connected</CardAction>}
+      </CardHeader>
+      <CardContent>
+        <FieldGroup>
+          <Field>
+            <FieldLabel>Team</FieldLabel>
+            <Select
+              value={teamId}
+              onValueChange={(value) => {
+                setTeamId(value ?? "");
+                setProjectId("");
+                setError("");
+              }}
+            >
+              <SelectTrigger className="w-full">
+                <SelectValue placeholder="Select a team" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  {teams.map((team) => (
+                    <SelectItem key={team.id} value={team.id}>
+                      {team.name}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+          </Field>
+          <Field>
+            <FieldLabel>Project</FieldLabel>
+            <Select value={projectId} onValueChange={(value) => setProjectId(value ?? "")}>
+              <SelectTrigger className="w-full" disabled={!teamId}>
+                <SelectValue placeholder="Select a linked project" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  {matching.map((project) => (
+                    <SelectItem key={project.id} value={project.id}>
+                      {project.name}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+            {teamId && matching.length === 0 && (
+              <FieldDescription>No project in this team is linked to {expected}.</FieldDescription>
+            )}
+          </Field>
+          {error && <FieldDescription className="text-destructive">{error}</FieldDescription>}
+          <Button
+            disabled={!teamId || !projectId || saving}
+            onClick={async () => {
+              setSaving(true);
+              setError("");
+              const response = await fetch(`/api/spaces/${space.id}/vercel`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ team_id: teamId, project_id: projectId }),
+              });
+              if (response.ok) onConnected(await response.json());
+              else setError((await response.json()).detail ?? "Could not connect project.");
+              setSaving(false);
+            }}
+          >
+            {saving ? "Connecting…" : "Connect project"}
+          </Button>
+        </FieldGroup>
+      </CardContent>
+    </Card>
   );
 }
 

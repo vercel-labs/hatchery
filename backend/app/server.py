@@ -19,6 +19,7 @@ import contextlib
 import hmac
 import html
 import logging
+import os
 import re
 
 import fastapi
@@ -28,11 +29,12 @@ import pydantic
 import websockets
 
 import ai
+import auth
 import channels
 import models
 import store
 import vercel.functions
-from agent import devbox, dispatcher
+from agent import access, devbox, dispatcher
 from channels import github, slack
 from store import activity, chats, events, spaces, tasks, turns
 
@@ -92,6 +94,17 @@ async def lifespan(_: fastapi.FastAPI):
 
 app = fastapi.FastAPI(title="hatchery", lifespan=lifespan)
 
+
+@app.middleware("http")
+async def browser_session(request: fastapi.Request, call_next):
+    """Require Hatchery login for browser APIs once OAuth is configured."""
+    path = request.url.path
+    public = path == "/api/health" or path.startswith("/api/auth/") or path.startswith("/channels/")
+    if not public and path.startswith("/api/") and os.environ.get("VERCEL_APP_CLIENT_ID"):
+        await auth.require_user(request)
+    return await call_next(request)
+
+
 # local dev: the ui talks to :8000 directly for streams — next's dev proxy
 # severs quiet/long sse responses (and can't proxy websockets at all).
 app.add_middleware(
@@ -105,6 +118,67 @@ app.add_middleware(
 @app.get("/api/health")
 async def health() -> dict:
     return {"ok": True, "channels": list(bot.channels)}
+
+
+@app.get("/api/auth/login")
+async def auth_login(request: fastapi.Request):
+    return await auth.begin(request)
+
+
+@app.get("/api/auth/callback")
+async def auth_callback(request: fastapi.Request, code: str = "", state: str = ""):
+    if not code or not state:
+        raise fastapi.HTTPException(400, "missing OAuth code or state")
+    return await auth.callback(request, code, state)
+
+
+@app.get("/api/auth/me")
+async def auth_me(request: fastapi.Request) -> dict:
+    user = await auth.current_user(request)
+    return {"user": user}
+
+
+@app.post("/api/auth/logout")
+async def auth_logout(request: fastapi.Request):
+    return await auth.logout(request)
+
+
+@app.get("/api/vercel/teams")
+async def vercel_teams(request: fastapi.Request) -> list[dict]:
+    user = await auth.require_user(request)
+    return await auth.teams(user["id"])
+
+
+@app.get("/api/vercel/projects")
+async def vercel_projects(request: fastapi.Request, team_id: str) -> list[dict]:
+    user = await auth.require_user(request)
+    return await auth.projects(user["id"], team_id)
+
+
+class ConnectSpaceRequest(pydantic.BaseModel):
+    team_id: str
+    project_id: str
+
+
+@app.post("/api/spaces/{space_id}/vercel")
+async def connect_space(
+    space_id: str, body: ConnectSpaceRequest, request: fastapi.Request
+) -> models.Space:
+    user = await auth.require_user(request)
+    space = await spaces.get(space_id)
+    if space is None:
+        raise fastapi.HTTPException(404, "unknown space")
+    found = await auth.projects(user["id"], body.team_id)
+    project = next((item for item in found if item["id"] == body.project_id), None)
+    if project is None:
+        raise fastapi.HTTPException(404, "unknown Vercel project")
+    expected = space.repos[0] if space.repos else None
+    if expected is None or auth.github_repo(project) != expected:
+        raise fastapi.HTTPException(400, f"project must be linked to {expected or 'the space repository'}")
+    space.owner_id = user["id"]
+    space.vercel_team_id = body.team_id
+    space.vercel_project_id = body.project_id
+    return await spaces.save(space)
 
 
 @app.get("/api/spaces")
@@ -131,9 +205,11 @@ class CreateChatRequest(pydantic.BaseModel):
 
 
 @app.post("/api/chats")
-async def create_chat(request: CreateChatRequest) -> models.Chat:
-    space_id = request.space_id or (await spaces.default()).id
-    return await chats.create(space_id, request.title)
+async def create_chat(body: CreateChatRequest) -> models.Chat:
+    space_id = body.space_id or (await spaces.default()).id
+    if await spaces.get(space_id) is None:
+        raise fastapi.HTTPException(404, "unknown space")
+    return await chats.create(space_id, body.title)
 
 
 @app.get("/api/chats/{chat_id}/messages")
@@ -165,18 +241,18 @@ class SupervisionOutcome(pydantic.BaseModel):
 
 
 @app.post("/api/chat")
-async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
+async def chat(body: ChatRequest) -> fastapi.responses.StreamingResponse:
     """One dispatcher turn, streamed as an AI SDK UI message stream.
 
     The store is the history: incoming messages the stream doesn't have yet
     (normally just the new user message — ids survive the UI roundtrip) are
     appended before the run, the run's new messages after it.
     """
-    incoming, _ = ai.ui.ai_sdk.to_messages(request.messages)
+    incoming, _ = ai.ui.ai_sdk.to_messages(body.messages)
 
     async def stream():
-        async with turns.run(request.chat_id):
-            stored = await _transcript(request.chat_id)
+        async with turns.run(body.chat_id):
+            stored = await _transcript(body.chat_id)
             known = {message.id for message in stored}
             received = []
             for message in incoming:
@@ -184,12 +260,12 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                 # server-owned and their IDs may change in the UI round-trip, so accepting
                 # them here duplicates tool results and corrupts the next model history.
                 if message.role == "user" and message.id not in known:
-                    await events.append(request.chat_id, "messages", message.model_dump(mode="json"))
+                    await events.append(body.chat_id, "messages", message.model_dump(mode="json"))
                     stored.append(message)
                     received.append(message)
             for message in received:
                 await _emit(
-                    request.chat_id,
+                    body.chat_id,
                     channels.event(
                         channels.protocol.MESSAGE_RECEIVED,
                         message=message.text,
@@ -198,15 +274,15 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                 )
 
             history = [ai.system_message(dispatcher.SYSTEM), *stored]
-            record = await events.tail(request.chat_id, "worker") or {"id": request.chat_id}
+            record = await events.tail(body.chat_id, "worker") or {"id": body.chat_id}
 
             def observe_task(launch: dict, created: dict) -> None:
                 if devbox.webhook_url() is None:
-                    _spawn(_watch_local_task(request.chat_id, launch, created))
+                    _spawn(_watch_local_task(body.chat_id, launch, created))
                     _spawn(_supervise_local(launch["id"]))
 
             agent = dispatcher.agent_for(record, observe_task)
-            await _emit(request.chat_id, channels.event(channels.protocol.TURN_STARTED))
+            await _emit(body.chat_id, channels.event(channels.protocol.TURN_STARTED))
             try:
                 async with agent.run(dispatcher.model(), history) as result:
                     async for chunk in ai.ui.ai_sdk.to_sse(result):
@@ -214,18 +290,18 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                     added = result.messages[len(history) :]
                     for message in added:
                         await events.append(
-                            request.chat_id, "messages", message.model_dump(mode="json")
+                            body.chat_id, "messages", message.model_dump(mode="json")
                         )
                 reply = next(
                     (message.text for message in reversed(added) if message.role == "assistant" and message.text),
                     "",
                 )
                 if reply:
-                    await _deliver(request.chat_id, reply)
+                    await _deliver(body.chat_id, reply)
             except Exception as error:
-                log.exception("chat turn failed chat_id=%s", request.chat_id)
+                log.exception("chat turn failed chat_id=%s", body.chat_id)
                 await _emit(
-                    request.chat_id,
+                    body.chat_id,
                     channels.event(channels.protocol.TURN_FAILED, error=str(error)),
                 )
                 raise
@@ -280,6 +356,12 @@ async def chat_tasks(chat_id: str) -> list[dict]:
 @app.websocket("/api/chats/{chat_id}/tasks/{launch_id}/tty")
 async def task_tty(ws: fastapi.WebSocket, chat_id: str, launch_id: str) -> None:
     """Bridge the browser to one task's durable devbox PTY session."""
+    if os.environ.get("VERCEL_APP_CLIENT_ID") and not await auth.session_user(
+        ws.cookies.get(auth.COOKIE, "")
+    ):
+        await ws.accept()
+        await ws.close(code=4401, reason="sign in required")
+        return
     workspace = await events.tail(chat_id, "worker") or {}
     launch = await tasks.get(launch_id)
     await ws.accept()
@@ -290,7 +372,13 @@ async def task_tty(ws: fastapi.WebSocket, chat_id: str, launch_id: str) -> None:
         await ws.close(code=4404, reason="coder session not on the box yet")
         return
     q = ws.query_params
+    try:
+        devbox_auth = await access.for_chat(chat_id)
+    except fastapi.HTTPException as error:
+        await ws.close(code=4401, reason=str(error.detail))
+        return
     url = devbox.tty_url(
+        devbox_auth,
         workspace["box"]["url"],
         launch["session_id"],
         q.get("offset", "0"),
@@ -413,10 +501,13 @@ async def _supervise_local(launch_id: str) -> None:
 async def _watch_local_task(chat_id: str, record: dict, created: dict) -> None:
     """Observe local work after the chat response, then use the same finisher."""
     workspace = await events.tail(chat_id, "worker") or {}
+    devbox_auth = await access.for_chat(chat_id)
     for attempt in (1, 2, 3):
         state = str(created.get("state", "pending"))
         summary = ""
-        async for frame in devbox.watch(workspace["box"]["url"], created["task_id"]):
+        async for frame in devbox.watch(
+            devbox_auth, workspace["box"]["url"], created["task_id"]
+        ):
             body = (frame or {}).get("body") or {}
             if event := body.get("assistantEvent"):
                 cursor = str((frame or {}).get("ts", ""))
@@ -429,7 +520,7 @@ async def _watch_local_task(chat_id: str, record: dict, created: dict) -> None:
                 await activity.append(record["id"], "state_transition", dict(transition))
                 if state in devbox.TERMINAL_STATES:
                     break
-        row = await devbox.get_task(created["task_id"])
+        row = await devbox.get_task(devbox_auth, created["task_id"])
         result = row.get("result") or {}
         if summary and not result.get("summary"):
             result["summary"] = summary
@@ -444,7 +535,10 @@ async def _watch_local_task(chat_id: str, record: dict, created: dict) -> None:
         await asyncio.sleep(20)
         try:
             created = await devbox.create_task(
-                workspace["box"]["id"], workspace["set_id"], record["prompt"]
+                devbox_auth,
+                workspace["box"]["id"],
+                workspace["set_id"],
+                record["prompt"],
             )
         except Exception as error:
             record["state"] = "errored"

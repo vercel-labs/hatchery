@@ -14,7 +14,7 @@ import typing
 import ai
 from vercel import workflow
 
-from agent import devbox, supervisor
+from agent import access, devbox, supervisor
 from store import activity, events, tasks, workspaces
 
 log = logging.getLogger("app.dispatcher")
@@ -59,15 +59,18 @@ def agent_for(
             bool(chat.get("box")),
             len(task),
         )
+        auth = await access.for_chat(chat["id"])
         if not chat.get("set_id") or not chat.get("box"):
             async with workspaces.provision(chat["id"]):
                 current = await events.tail(chat["id"], "worker") or chat
                 chat.update(current)
                 if not chat.get("set_id"):
-                    chat["set_id"] = await devbox.create_taskset(f"hatchery {chat['id']}")
+                    chat["set_id"] = await devbox.create_taskset(
+                        auth, f"hatchery {chat['id']}"
+                    )
                 if not chat.get("box"):
                     yield "creating devbox (cold boot, about a minute)…"
-                    chat["box"] = await devbox.create_box(f"hatchery-{chat['id']}")
+                    chat["box"] = await devbox.create_box(auth, f"hatchery-{chat['id']}")
                 await events.append(chat["id"], "worker", dict(chat))
                 log.info(
                     "coder workspace ready chat_id=%s box_id=%s set_id=%s",
@@ -80,6 +83,7 @@ def agent_for(
         launch = await tasks.create(chat["id"], task, secrets.token_urlsafe(32))
         log.info("coder launch record created chat_id=%s launch_id=%s", chat["id"], launch["id"])
         created = await devbox.create_task(
+            auth,
             chat["box"]["id"],
             chat["set_id"],
             task,

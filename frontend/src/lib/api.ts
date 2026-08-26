@@ -33,8 +33,27 @@ export type Space = {
   about: string;
   repos: string[];
   resources: Resource[];
+  owner_id: string | null;
+  vercel_team_id: string | null;
+  vercel_project_id: string | null;
   color: string;
   created_at: string;
+};
+
+export type User = {
+  id: string;
+  email: string | null;
+  name: string | null;
+  username: string | null;
+  picture: string | null;
+};
+
+export type VercelTeam = { id: string; name: string; slug: string | null };
+
+export type VercelProject = {
+  id: string;
+  name: string;
+  link: { type?: string; org?: string; repo?: string } | null;
 };
 
 export type Chat = {

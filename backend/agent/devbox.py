@@ -5,15 +5,15 @@ task. Everything inbound to us is push: task events arrive over the box's
 watch websocket (local dev), or per-task webhooks (deployed). The pty is
 attachable over the box's /__tty websocket — that's the UI's terminal pane.
 
-Auth is a Vercel user bearer. Locally we fall back to the vercel CLI's
-auth.json so `vc login` is all the setup there is.
+Every call receives the space owner's Vercel bearer and selected team/project
+explicitly. Deployment credentials never authorize a user's box or repository.
 """
 
 import asyncio
+import dataclasses
 import json
 import logging
 import os
-import pathlib
 import re
 import time
 import urllib.parse
@@ -22,10 +22,17 @@ import httpx
 import websockets
 
 API = os.environ.get("DEVBOX_API_URL", "https://api.vercel.com")
-_CLI = pathlib.Path.home() / "Library/Application Support/com.vercel.cli"
 
 TERMINAL_STATES = ("complete", "errored")
 log = logging.getLogger("app.devbox")
+
+
+@dataclasses.dataclass(frozen=True)
+class Auth:
+    token: str
+    team_id: str
+    project_id: str
+    repo: str
 
 
 def _redact(text: str) -> str:
@@ -84,10 +91,12 @@ def webhook_url() -> str | None:
     return None
 
 
-def tty_url(box_url: str, session_id: str, offset: str, cols: str, rows: str) -> str:
+def tty_url(
+    auth: Auth, box_url: str, session_id: str, offset: str, cols: str, rows: str
+) -> str:
     query = urllib.parse.urlencode(
         {
-            "token": token(),
+            "token": auth.token,
             "sessionId": session_id,
             "offset": offset,
             "cols": cols,
@@ -104,35 +113,7 @@ def _checked(r: httpx.Response) -> httpx.Response:
     return r
 
 
-def token() -> str:
-    if t := os.environ.get("VERCEL_TOKEN"):
-        log.debug("devbox auth source=environment")
-        return t
-    path = _CLI / "auth.json"
-    log.debug("devbox auth source=cli path=%s", path)
-    try:
-        return json.loads(path.read_text())["token"]
-    except Exception:
-        log.exception("devbox auth unavailable source=cli path=%s", path)
-        raise
-
-
-def _team() -> str:
-    if t := os.environ.get("VERCEL_TEAM_ID"):
-        log.debug("devbox team source=environment team_id=%s", t)
-        return t
-    path = _CLI / "config.json"
-    log.debug("devbox team source=cli path=%s", path)
-    try:
-        team = json.loads(path.read_text())["currentTeam"]
-    except Exception:
-        log.exception("devbox team unavailable source=cli path=%s", path)
-        raise
-    log.debug("devbox team resolved source=cli team_id=%s", team)
-    return team
-
-
-async def create_box(name: str) -> dict:
+async def create_box(auth: Auth, name: str) -> dict:
     """Boot a repo-less devbox, install devboxd, block until READY.
 
     One call (`setup: true` + a sandbox spec opts into the server-side flow).
@@ -143,8 +124,7 @@ async def create_box(name: str) -> dict:
     sandbox can't read its CA bundle); a failed create just leaves an ERROR
     row behind (names aren't unique), so retry with a new sandbox.
     """
-    team = _team()
-    log.info("devbox create starting name=%s team_id=%s api=%s", name, team, API)
+    log.info("devbox create starting name=%s team_id=%s api=%s", name, auth.team_id, API)
     async with httpx.AsyncClient(timeout=600) as http:
         for attempt in range(3):
             r = await _request(
@@ -152,9 +132,15 @@ async def create_box(name: str) -> dict:
                 "POST",
                 f"{API}/v2/devbox/create",
                 "create_box",
-                params={"teamId": team},
-                headers={"Authorization": f"Bearer {token()}"},
-                json={"name": name, "setup": True, "sandbox": {}},
+                params={"teamId": auth.team_id},
+                headers={"Authorization": f"Bearer {auth.token}"},
+                json={
+                    "name": name,
+                    "setup": True,
+                    "sandbox": {},
+                    "projectId": auth.project_id,
+                    "cloneRepos": [auth.repo],
+                },
             )
             if r.status_code < 500 or attempt == 2:
                 box = _checked(r).json()
@@ -166,7 +152,7 @@ async def create_box(name: str) -> dict:
             await asyncio.sleep(2)
 
 
-async def create_taskset(title: str) -> str:
+async def create_taskset(auth: Auth, title: str) -> str:
     log.info("devbox taskset create starting title=%s", title)
     async with httpx.AsyncClient(timeout=30) as http:
         r = await _request(
@@ -174,7 +160,8 @@ async def create_taskset(title: str) -> str:
             "POST",
             f"{API}/v1/tasksets",
             "create_taskset",
-            headers={"Authorization": f"Bearer {token()}"},
+            params={"teamId": auth.team_id},
+            headers={"Authorization": f"Bearer {auth.token}"},
             json={"title": title},
         )
         set_id = _checked(r).json()["set_id"]
@@ -183,6 +170,7 @@ async def create_taskset(title: str) -> str:
 
 
 async def create_task(
+    auth: Auth,
     box_id: str,
     set_id: str,
     prompt: str,
@@ -222,7 +210,8 @@ async def create_task(
                 "POST",
                 f"{API}/v1/tasks",
                 "create_task",
-                headers={"Authorization": f"Bearer {token()}"},
+                params={"teamId": auth.team_id},
+                headers={"Authorization": f"Bearer {auth.token}"},
                 json=body,
             )
             if r.status_code != 409 or attempt == 3:
@@ -246,7 +235,7 @@ async def create_task(
             await asyncio.sleep(3)
 
 
-async def get_task(task_id: str) -> dict:
+async def get_task(auth: Auth, task_id: str) -> dict:
     """The durable task row (state + result), box-independent.
 
     Synced asynchronously from the box: right after a state change the row can
@@ -259,14 +248,15 @@ async def get_task(task_id: str) -> dict:
             "GET",
             f"{API}/v1/tasks/{task_id}",
             "get_task",
-            headers={"Authorization": f"Bearer {token()}"},
+            params={"teamId": auth.team_id},
+            headers={"Authorization": f"Bearer {auth.token}"},
         )
         row = _checked(r).json()
         log.info("devbox task fetched task_id=%s state=%s", task_id, row.get("state"))
         return row
 
 
-async def watch(box_url: str, task_id: str, quiet_after: float = 45):
+async def watch(auth: Auth, box_url: str, task_id: str, quiet_after: float = 45):
     """Yield task frames from the box's watch websocket until it closes.
 
     Frames are {taskId, ts, body: {assistantEvent | stateTransition}}. The
@@ -281,7 +271,7 @@ async def watch(box_url: str, task_id: str, quiet_after: float = 45):
     log.info("devbox watch connecting task_id=%s host=%s", task_id, urllib.parse.urlsplit(url).netloc)
     try:
         async with websockets.connect(
-            url, additional_headers={"Authorization": f"Bearer {token()}"}
+            url, additional_headers={"Authorization": f"Bearer {auth.token}"}
         ) as ws:
             log.info("devbox watch connected task_id=%s", task_id)
             while True:

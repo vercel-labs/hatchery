@@ -16,6 +16,9 @@ class Space(pydantic.BaseModel):
     about: str = ""  # markdown, the space's canvas
     repos: list[str] = []  # "owner/repo", autocloned into the sandbox
     resources: list[Resource] = []  # extra links; repos show up alongside these
+    owner_id: str | None = None
+    vercel_team_id: str | None = None
+    vercel_project_id: str | None = None
     color: str  # hex; the ui codes the space and its chats with it
     created_at: str  # utc isoformat, same as Event.meta.at
 

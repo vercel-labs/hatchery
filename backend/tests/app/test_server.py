@@ -28,6 +28,28 @@ async def test_chat_create_and_list():
     assert [x["id"] for x in listed] == [created["id"]]
 
 
+async def test_authenticated_users_share_spaces_and_chats(monkeypatch):
+    monkeypatch.setenv("VERCEL_APP_CLIENT_ID", "client")
+
+    async def require_user(_request):
+        return {"id": "user_2"}
+
+    monkeypatch.setattr(server.auth, "require_user", require_user)
+    space = await server.spaces.default()
+    space.owner_id = "user_1"
+    await server.spaces.save(space)
+    existing = await chats.create(space.id, "shared")
+
+    async with client() as c:
+        listed_spaces = (await c.get("/api/spaces")).json()
+        listed_chats = (await c.get("/api/chats")).json()
+        created = await c.post("/api/chats", json={"space_id": space.id})
+
+    assert [item["id"] for item in listed_spaces] == [space.id]
+    assert [item["id"] for item in listed_chats] == [existing.id]
+    assert created.status_code == 200
+
+
 async def test_chat_list_cleans_legacy_slack_title():
     space = await server.spaces.default()
     chat, _ = await chats.claim(
