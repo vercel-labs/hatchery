@@ -15,7 +15,7 @@ import {
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import type { Chat, Resource, Space } from "@/lib/api";
+import { apiBase, type Chat, type Resource, type Space } from "@/lib/api";
 import type { ChatUIMessage } from "@/lib/messages";
 import { ChatView } from "@/components/chat";
 import { TerminalPane, type CoderTask } from "@/components/terminal-pane";
@@ -754,10 +754,11 @@ function LiveChat({
     ChatUIMessage[] | null
   >(null);
   const [tasks, setTasks] = useState<CoderTask[]>([]);
+  const [messageRevision, setMessageRevision] = useState(0);
   const [showTerminal, setShowTerminal] = useState(false);
 
   const loadTasks = useCallback(() => {
-    fetch(`/api/chats/${chat.id}/tasks`)
+    fetch(`${apiBase()}/api/chats/${chat.id}/tasks`)
       .then((res) => (res.ok ? res.json() : []))
       .then((found: CoderTask[]) => {
         setTasks(found);
@@ -767,11 +768,25 @@ function LiveChat({
   }, [chat.id]);
 
   useEffect(() => {
-    fetch(`/api/chats/${chat.id}/messages`)
+    fetch(`${apiBase()}/api/chats/${chat.id}/messages`)
       .then((res) => (res.ok ? res.json() : []))
       .then(setInitialMessages)
       .catch(() => setInitialMessages([]));
     loadTasks();
+  }, [chat.id, loadTasks]);
+
+  useEffect(() => {
+    const source = new EventSource(
+      `${apiBase()}/api/chats/${chat.id}/events`,
+    );
+    source.onmessage = (message) => {
+      const event = JSON.parse(message.data) as { type?: string };
+      if (event.type === "task.changed") loadTasks();
+      if (event.type === "messages.changed") {
+        setMessageRevision((revision) => revision + 1);
+      }
+    };
+    return () => source.close();
   }, [chat.id, loadTasks]);
 
   const onMessagesChange = useCallback(
@@ -810,6 +825,7 @@ function LiveChat({
         <ChatView
           chatId={chat.id}
           initialMessages={initialMessages}
+          messageRevision={messageRevision}
           onMessagesChange={onMessagesChange}
         />
       </div>

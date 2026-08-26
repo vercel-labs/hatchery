@@ -1,6 +1,5 @@
 # local symlink to reference material (no trailing slash: it's a symlink)
 .reference
-.vercelignore
 .workflow-data
 
 # python

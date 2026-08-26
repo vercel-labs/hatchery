@@ -119,6 +119,15 @@ def agent_for(
                 )
                 raise
             launch = await tasks.finish_create(launch["id"], created)
+            await events.append(
+                chat["id"],
+                "ui",
+                {
+                    "type": "task.changed",
+                    "launch_id": launch["id"],
+                    "state": launch["state"],
+                },
+            )
 
         if on_task_created is not None:
             on_task_created(dict(launch), created)

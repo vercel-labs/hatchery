@@ -16,10 +16,14 @@ so an asyncio.Lock would bind to the first loop and raise on the next. They
 are only ever held across synchronous file I/O — never across an await.
 """
 
+import asyncio
+import contextlib
 import json
 import threading
 import typing
 import urllib.parse
+
+import asyncpg
 
 import store
 
@@ -43,6 +47,7 @@ CREATE TABLE IF NOT EXISTS hatchery_events (
 """
 
 _locks: dict[tuple[str, str], threading.Lock] = {}
+_watchers: dict[tuple[str, str], set[asyncio.Event]] = {}
 _schema_ready = False
 
 
@@ -85,6 +90,7 @@ async def append(stream_id: str, ns: str, data: dict[str, typing.Any]) -> int:
                 index,
                 json.dumps(data, separators=(",", ":")),
             )
+            await conn.execute("SELECT pg_notify('hatchery_events', $1)", stream_id)
             return index
 
     path = _path(stream_id, ns)
@@ -93,7 +99,9 @@ async def append(stream_id: str, ns: str, data: dict[str, typing.Any]) -> int:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(data, separators=(",", ":")) + "\n")
-        return index
+    for changed in tuple(_watchers.get((stream_id, ns), ())):
+        changed.set()
+    return index
 
 
 async def read(
@@ -121,6 +129,69 @@ async def read(
             for index, line in enumerate(path.read_text().splitlines())
             if line and index >= start_index
         ]
+
+
+async def watch(stream_id: str, ns: str, start_index: int = 0):
+    """Yield durable events from a cursor, waiting without polling for new ones."""
+    index = start_index
+    if store.use_postgres():
+        from store import db
+
+        changed = asyncio.Event()
+        connection = await asyncpg.connect(db.direct_dsn(), statement_cache_size=0)
+
+        def wake(_connection, _pid, _channel, payload: str) -> None:
+            if payload == stream_id:
+                changed.set()
+
+        await connection.add_listener("hatchery_events", wake)
+        try:
+            while True:
+                found = await read(stream_id, ns, index)
+                if found:
+                    for event_index, data in found:
+                        index = event_index + 1
+                        yield event_index, data
+                    continue
+                changed.clear()
+                # Re-read after clearing so a notify between the first read and
+                # clear cannot leave this subscriber asleep with unseen data.
+                found = await read(stream_id, ns, index)
+                if found:
+                    for event_index, data in found:
+                        index = event_index + 1
+                        yield event_index, data
+                    continue
+                await changed.wait()
+        finally:
+            with contextlib.suppress(Exception):
+                await connection.remove_listener("hatchery_events", wake)
+            await connection.close()
+        return
+
+    changed = asyncio.Event()
+    key = (stream_id, ns)
+    _watchers.setdefault(key, set()).add(changed)
+    try:
+        while True:
+            found = await read(stream_id, ns, index)
+            if found:
+                for event_index, data in found:
+                    index = event_index + 1
+                    yield event_index, data
+                continue
+            changed.clear()
+            found = await read(stream_id, ns, index)
+            if found:
+                for event_index, data in found:
+                    index = event_index + 1
+                    yield event_index, data
+                continue
+            await changed.wait()
+    finally:
+        _watchers[key].discard(changed)
+        if not _watchers[key]:
+            del _watchers[key]
 
 
 async def tail(stream_id: str, ns: str) -> dict[str, typing.Any] | None:

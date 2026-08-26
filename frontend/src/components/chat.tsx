@@ -28,10 +28,12 @@ import type { ChatUIMessage } from "@/lib/messages";
 export function ChatView({
   chatId,
   initialMessages,
+  messageRevision,
   onMessagesChange,
 }: {
   chatId: string;
   initialMessages: ChatUIMessage[];
+  messageRevision: number;
   onMessagesChange?: (messages: ChatUIMessage[]) => void;
 }) {
   const transport = useMemo(
@@ -45,7 +47,7 @@ export function ChatView({
     [],
   );
 
-  const { messages, sendMessage, status, stop, error } =
+  const { messages, setMessages, sendMessage, status, stop, error } =
     useChat<ChatUIMessage>({
       id: chatId,
       transport,
@@ -55,6 +57,22 @@ export function ChatView({
   useEffect(() => {
     onMessagesChange?.(messages);
   }, [messages, onMessagesChange]);
+
+  useEffect(() => {
+    if (
+      messageRevision === 0 ||
+      status === "submitted" ||
+      status === "streaming"
+    ) {
+      return;
+    }
+    fetch(`${apiBase()}/api/chats/${chatId}/messages`)
+      .then((response) => (response.ok ? response.json() : null))
+      .then((stored: ChatUIMessage[] | null) => {
+        if (stored) setMessages(stored);
+      })
+      .catch(() => {});
+  }, [chatId, messageRevision, setMessages, status]);
 
   const isStreaming = status === "submitted" || status === "streaming";
 

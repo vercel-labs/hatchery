@@ -18,6 +18,7 @@ import asyncio
 import contextlib
 import hmac
 import html
+import json
 import logging
 import re
 
@@ -289,6 +290,41 @@ async def assign_chat_space(chat_id: str, request: AssignChatSpaceRequest) -> mo
         raise fastapi.HTTPException(404, "unknown chat")
     # TODO: add history for space changes
     return await chats.assign_space(chat_id, request.space_id)
+
+
+@app.get("/api/chats/{chat_id}/events")
+async def chat_events(
+    chat_id: str, request: fastapi.Request, after: int = -1
+) -> fastapi.responses.StreamingResponse:
+    """Replay and stream durable UI invalidations for one chat."""
+    if await chats.get(chat_id) is None:
+        raise fastapi.HTTPException(404, "unknown chat")
+    header = request.headers.get("last-event-id")
+    cursor = max(after, int(header) if header and header.lstrip("-").isdigit() else -1)
+
+    async def stream():
+        watcher = events.watch(chat_id, "ui", cursor + 1)
+        pending = asyncio.create_task(anext(watcher))
+        try:
+            while True:
+                try:
+                    index, event = await asyncio.wait_for(asyncio.shield(pending), timeout=30)
+                except TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+                yield f"id: {index}\ndata: {json.dumps(event, separators=(',', ':'))}\n\n"
+                pending = asyncio.create_task(anext(watcher))
+        finally:
+            pending.cancel()
+            with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration):
+                await pending
+            await watcher.aclose()
+
+    return fastapi.responses.StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/api/chats/{chat_id}/messages")
@@ -703,6 +739,17 @@ async def supervise_task(launch_id: str, reason: str) -> bool:
             if not failures and terminal:
                 updates["completion_delivered"] = True
                 updates["completion_message"] = outcome.message
+        await events.append(
+            chat_id,
+            "ui",
+            {
+                "type": "task.changed",
+                "launch_id": launch_id,
+                "state": latest.get("state"),
+            },
+        )
+        if outcome.notify and outcome.message:
+            await events.append(chat_id, "ui", {"type": "messages.changed"})
         if terminal:
             result = latest.get("result") or {}
             artifact = next(

@@ -181,6 +181,20 @@ async def test_chat_list_cleans_legacy_slack_title():
     assert listed["title"] == "slack: old <-> title"
 
 
+async def test_chat_events_replay_after_cursor():
+    space = await server.spaces.default()
+    chat = await chats.create(space.id, "events")
+    await events.append(chat.id, "ui", {"type": "old"})
+    await events.append(chat.id, "ui", {"type": "messages.changed"})
+
+    request = httpx.Request("GET", f"http://test/api/chats/{chat.id}/events")
+    response = await server.chat_events(chat.id, request, after=0)
+    chunk = await anext(response.body_iterator)
+    await response.body_iterator.aclose()
+
+    assert chunk == 'id: 1\ndata: {"type":"messages.changed"}\n\n'
+
+
 async def test_chat_messages_from_store():
     for message in (ai.user_message("hi"), ai.assistant_message("hello")):
         await events.append("chat_x", "messages", message.model_dump(mode="json"))
@@ -608,6 +622,17 @@ async def test_devbox_completion_is_persisted_and_delivered_once(monkeypatch):
         reply = ai.messages.Message.model_validate(transcript[0][1])
         assert reply.role == "assistant"
         assert reply.text == "The coder fixed it."
+        assert await events.read(chat.id, "ui") == [
+            (
+                0,
+                {
+                    "type": "task.changed",
+                    "launch_id": launch["id"],
+                    "state": "complete",
+                },
+            ),
+            (1, {"type": "messages.changed"}),
+        ]
         assert seen_wake is not None
         assert seen_wake.role == "user"
         assert launch["id"] in seen_wake.text
