@@ -113,6 +113,31 @@ async def list_spaces() -> list[models.Space]:
     return found or [await spaces.default()]
 
 
+class CreateSpaceRequest(pydantic.BaseModel):
+    name: str
+
+    @pydantic.field_validator("name")
+    @classmethod
+    def valid_name(cls, name: str) -> str:
+        name = name.strip()
+        if not name:
+            raise ValueError("name must not be empty")
+        return name
+
+
+@app.post("/api/spaces")
+async def create_space(request: CreateSpaceRequest) -> models.Space:
+    return await spaces.create(request.name)
+
+
+@app.delete("/api/spaces/{space_id}", status_code=204)
+async def delete_space(space_id: str) -> None:
+    if any(chat.space_id == space_id for chat in await chats.list_all()):
+        raise fastapi.HTTPException(409, "space still has chats")
+    if not await spaces.delete(space_id):
+        raise fastapi.HTTPException(404, "unknown space")
+
+
 class UpdateSpaceRequest(pydantic.BaseModel):
     name: str
     about: str

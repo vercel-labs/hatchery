@@ -34,6 +34,16 @@ async def test_save_get_list():
     assert await spaces.get("spc_missing") is None
 
 
+async def test_create_and_delete():
+    created = await spaces.create("new space")
+
+    assert created.id.startswith("spc_")
+    assert created.name == "new space"
+    assert await spaces.delete(created.id)
+    assert await spaces.get(created.id) is None
+    assert not await spaces.delete(created.id)
+
+
 def test_space_repos_require_owner_repo_form():
     with pytest.raises(pydantic.ValidationError, match="owner/repo"):
         models.Space(

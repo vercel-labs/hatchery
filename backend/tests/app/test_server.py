@@ -21,6 +21,32 @@ async def test_spaces_seed_default():
     assert not listed[0]["about"].startswith("# hatchery")
 
 
+async def test_space_create_and_delete():
+    async with client() as c:
+        created = await c.post("/api/spaces", json={"name": "  docs  "})
+        listed = (await c.get("/api/spaces")).json()
+        deleted = await c.delete(f"/api/spaces/{created.json()['id']}")
+
+    assert created.status_code == 200
+    assert created.json()["name"] == "docs"
+    assert created.json()["about"] == ""
+    assert [space["id"] for space in listed] == [created.json()["id"]]
+    assert deleted.status_code == 204
+
+
+async def test_space_delete_rejects_unknown_space_and_space_with_chats():
+    space = await server.spaces.create("busy")
+    await chats.create(space.id, "chat")
+
+    async with client() as c:
+        busy = await c.delete(f"/api/spaces/{space.id}")
+        missing = await c.delete("/api/spaces/spc_missing")
+
+    assert busy.status_code == 409
+    assert busy.json() == {"detail": "space still has chats"}
+    assert missing.status_code == 404
+
+
 async def test_space_update():
     original = await server.spaces.default()
     async with client() as c:

@@ -8,6 +8,7 @@ fresh deployment has somewhere to land chats.
 import datetime
 import json
 import urllib.parse
+import uuid
 
 import pydantic
 
@@ -50,6 +51,18 @@ async def ensure_ready() -> None:
         (store.data_dir() / "spaces").mkdir(parents=True, exist_ok=True)
 
 
+async def create(name: str) -> models.Space:
+    """Create an empty space."""
+    return await save(
+        models.Space(
+            id=f"spc_{uuid.uuid4().hex[:12]}",
+            name=name,
+            color="#a78bfa",
+            created_at=datetime.datetime.now(datetime.UTC).isoformat(),
+        )
+    )
+
+
 async def save(space: models.Space) -> models.Space:
     """Insert or replace one space."""
     if store.use_postgres():
@@ -66,6 +79,22 @@ async def save(space: models.Space) -> models.Space:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(space.model_dump_json(), encoding="utf-8")
     return space
+
+
+async def delete(space_id: str) -> bool:
+    """Delete one space, returning whether it existed."""
+    if store.use_postgres():
+        from store import db
+
+        result = await (await db.pool()).execute(
+            "DELETE FROM hatchery_spaces WHERE id = $1", space_id
+        )
+        return result != "DELETE 0"
+    path = _path(space_id)
+    if not path.exists():
+        return False
+    path.unlink()
+    return True
 
 
 async def get(space_id: str) -> models.Space | None:

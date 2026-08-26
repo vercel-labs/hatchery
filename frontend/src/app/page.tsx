@@ -47,6 +47,7 @@ import {
   SidebarHeader,
   SidebarInset,
   SidebarMenu,
+  SidebarMenuAction,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarMenuSkeleton,
@@ -74,6 +75,8 @@ export default function Home() {
   const [chats, setChats] = useState<Chat[] | null>(null);
   const [failed, setFailed] = useState(false);
   const [selection, setSelection] = useState<Selection>(null);
+  const [addingSpace, setAddingSpace] = useState(false);
+  const [spaceName, setSpaceName] = useState("");
   // set by space clicks only; chat clicks leave the order alone
   const [sortSpaceId, setSortSpaceId] = useState<string | null>(null);
 
@@ -111,6 +114,36 @@ export default function Home() {
         )
       : chats;
 
+  const createSpace = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!spaceName.trim()) return;
+    const res = await fetch("/api/spaces", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: spaceName }),
+    });
+    if (!res.ok) return;
+    const space: Space = await res.json();
+    setSpaces((current) => [...(current ?? []), space]);
+    setSelection({ kind: "space", id: space.id });
+    setSortSpaceId(space.id);
+    setSpaceName("");
+    setAddingSpace(false);
+  };
+
+  const deleteSpace = async (space: Space) => {
+    if (!window.confirm(`Remove ${space.name}?`)) return;
+    const res = await fetch(`/api/spaces/${space.id}`, { method: "DELETE" });
+    if (res.status === 409) {
+      window.alert("Remove this space's chats first.");
+      return;
+    }
+    if (!res.ok) return;
+    setSpaces((current) => current?.filter((item) => item.id !== space.id) ?? null);
+    if (selection?.kind === "space" && selection.id === space.id) setSelection(null);
+    if (sortSpaceId === space.id) setSortSpaceId(null);
+  };
+
   const createChat = async () => {
     const spaceId = selectedSpace?.id ?? sortSpaceId ?? spaces?.[0]?.id ?? null;
     const res = await fetch("/api/chats", {
@@ -138,7 +171,42 @@ export default function Home() {
         <SidebarContent>
           <SidebarGroup>
             <SidebarGroupLabel>Spaces</SidebarGroupLabel>
+            <SidebarGroupAction
+              title="New space"
+              aria-label="New space"
+              onClick={() => setAddingSpace(true)}
+            >
+              <PlusIcon />
+            </SidebarGroupAction>
             <SidebarGroupContent>
+              {addingSpace && (
+                <form className="flex gap-1 px-2 pb-1" onSubmit={createSpace}>
+                  <Input
+                    autoFocus
+                    value={spaceName}
+                    onChange={(event) => setSpaceName(event.target.value)}
+                    placeholder="Space name"
+                    aria-label="Space name"
+                    className="h-7"
+                  />
+                  <Button type="submit" size="icon-xs" disabled={!spaceName.trim()}>
+                    <CheckIcon />
+                    <span className="sr-only">Add space</span>
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-xs"
+                    onClick={() => {
+                      setAddingSpace(false);
+                      setSpaceName("");
+                    }}
+                  >
+                    <XIcon />
+                    <span className="sr-only">Cancel</span>
+                  </Button>
+                </form>
+              )}
               <SidebarMenu>
                 {spaces === null
                   ? Array.from({ length: failed ? 0 : 2 }).map((_, i) => (
@@ -159,6 +227,14 @@ export default function Home() {
                           <Dot color={space.color} />
                           <span className="truncate">{space.name}</span>
                         </SidebarMenuButton>
+                        <SidebarMenuAction
+                          showOnHover
+                          aria-label={`Remove ${space.name}`}
+                          title={`Remove ${space.name}`}
+                          onClick={() => deleteSpace(space)}
+                        >
+                          <Trash2Icon />
+                        </SidebarMenuAction>
                       </SidebarMenuItem>
                     ))}
               </SidebarMenu>
