@@ -112,7 +112,7 @@ async def create_task(
     webhook_secret: str | None = None,
     webhook_task_id: str | None = None,
 ) -> dict:
-    """Start a claude-code task on the box: {task_id, session_id, state}.
+    """Start an fx task on the box: {task_id, session_id, state}.
 
     session_id names the box pty session the agent runs in. A fresh box can
     409 for a moment right after create (registration settles just behind
@@ -120,7 +120,7 @@ async def create_task(
     secret rides in the URL because devbox task webhooks do not support custom
     headers or signatures.
     """
-    body = {"devbox_id": box_id, "set_id": set_id, "assistant": "claude-code", "prompt": prompt}
+    body = {"devbox_id": box_id, "set_id": set_id, "assistant": "fx", "prompt": prompt}
     if url := webhook_url():
         if not webhook_secret:
             raise RuntimeError("deployed task webhooks require a per-task secret")

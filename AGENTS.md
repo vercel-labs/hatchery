@@ -44,7 +44,7 @@ schema is idempotent DDL, created on startup — no migrations.
 ## devbox
 
 the worker layer: the dispatcher (backend/agent/) hands coding tasks to a
-devbox over api.vercel.com (`POST /v1/tasks`, assistant=claude-code), gets
+devbox over api.vercel.com (`POST /v1/tasks`, assistant=fx), gets
 state pushed back over the task watch websocket, and the ui attaches to the
 task's pty via the backend's tty proxy. no polling anywhere.
 

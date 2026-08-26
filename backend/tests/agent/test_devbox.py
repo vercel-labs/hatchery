@@ -48,6 +48,32 @@ async def test_create_box_sends_clone_repos(monkeypatch):
     }
 
 
+async def test_create_task_uses_fx(monkeypatch):
+    seen = {}
+
+    async def send(self, request, **kwargs):
+        seen["request"] = request
+        return httpx.Response(
+            200,
+            request=request,
+            json={"task_id": "task_1", "session_id": "session_1", "state": "pending"},
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
+    monkeypatch.setattr(devbox, "token", lambda: "token")
+    monkeypatch.setattr(devbox, "webhook_url", lambda: None)
+
+    task = await devbox.create_task("box_1", "set_1", "fix it")
+
+    assert task == {"task_id": "task_1", "session_id": "session_1", "state": "pending"}
+    assert json.loads(seen["request"].content) == {
+        "devbox_id": "box_1",
+        "set_id": "set_1",
+        "assistant": "fx",
+        "prompt": "fix it",
+    }
+
+
 def test_tty_url_targets_real_devbox_session(monkeypatch):
     monkeypatch.setattr(devbox, "token", lambda: "token")
     url = devbox.tty_url("https://box.example", "session_1", "12", "80", "24")
