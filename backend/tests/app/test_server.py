@@ -19,6 +19,43 @@ async def test_spaces_seed_default():
     assert [s["id"] for s in listed] == ["spc_hatchery"]
 
 
+async def test_space_resources_update():
+    await server.spaces.default()
+    async with client() as c:
+        response = await c.patch(
+            "/api/spaces/spc_hatchery/resources",
+            json={
+                "repos": ["anbuzin/hatchery"],
+                "resources": [
+                    {"title": "docs", "url": "https://example.com/docs", "kind": "link"}
+                ],
+            },
+        )
+        listed = (await c.get("/api/spaces")).json()
+
+    assert response.status_code == 200
+    assert response.json()["repos"] == ["anbuzin/hatchery"]
+    assert response.json()["resources"] == [
+        {"title": "docs", "url": "https://example.com/docs", "kind": "link"}
+    ]
+    assert listed[0]["resources"] == response.json()["resources"]
+
+
+async def test_space_resources_update_rejects_unknown_space_and_invalid_repo():
+    await server.spaces.default()
+    async with client() as c:
+        missing = await c.patch(
+            "/api/spaces/spc_missing/resources", json={"repos": [], "resources": []}
+        )
+        invalid = await c.patch(
+            "/api/spaces/spc_hatchery/resources",
+            json={"repos": ["https://github.com/anbuzin/hatchery"], "resources": []},
+        )
+
+    assert missing.status_code == 404
+    assert invalid.status_code == 422
+
+
 async def test_chat_create_and_list():
     async with client() as c:
         created = (await c.post("/api/chats", json={})).json()

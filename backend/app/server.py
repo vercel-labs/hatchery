@@ -113,6 +113,37 @@ async def list_spaces() -> list[models.Space]:
     return found or [await spaces.default()]
 
 
+class UpdateSpaceResourcesRequest(pydantic.BaseModel):
+    repos: list[str]
+    resources: list[models.Resource]
+
+    @pydantic.field_validator("repos")
+    @classmethod
+    def valid_repos(cls, repos: list[str]) -> list[str]:
+        for repo in repos:
+            parts = repo.split("/")
+            if len(parts) != 2 or not all(parts) or any(part.strip() != part for part in parts):
+                raise ValueError("repos must use owner/repo form")
+        return repos
+
+
+@app.patch("/api/spaces/{space_id}/resources")
+async def update_space_resources(
+    space_id: str, request: UpdateSpaceResourcesRequest
+) -> models.Space:
+    space = await spaces.get(space_id)
+    if space is None:
+        raise fastapi.HTTPException(404, "unknown space")
+    updated = models.Space.model_validate(
+        {
+            **space.model_dump(),
+            "repos": request.repos,
+            "resources": request.resources,
+        }
+    )
+    return await spaces.save(updated)
+
+
 @app.get("/api/chats")
 async def list_chats() -> list[models.Chat]:
     found = await chats.list_all()

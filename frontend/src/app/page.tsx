@@ -3,10 +3,14 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   BookMarkedIcon,
+  CheckIcon,
   FolderGitIcon,
   LinkIcon,
+  PencilIcon,
   PlusIcon,
   TerminalIcon,
+  Trash2Icon,
+  XIcon,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -23,6 +27,14 @@ import {
   EmptyHeader,
   EmptyTitle,
 } from "@/components/ui/empty";
+import {
+  Field,
+  FieldDescription,
+  FieldError,
+  FieldGroup,
+  FieldLabel,
+} from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import {
   Sidebar,
@@ -216,7 +228,16 @@ export default function Home() {
                 </EmptyHeader>
               </Empty>
             ) : selectedSpace ? (
-              <SpacePane space={selectedSpace} />
+              <SpacePane
+                space={selectedSpace}
+                onChange={(updated) =>
+                  setSpaces((current) =>
+                    current?.map((space) =>
+                      space.id === updated.id ? updated : space,
+                    ) ?? null,
+                  )
+                }
+              />
             ) : (
               <Empty>
                 <EmptyHeader>
@@ -260,7 +281,22 @@ function ResourceCard({ resource }: { resource: Resource }) {
   );
 }
 
-function SpacePane({ space }: { space: Space }) {
+function SpacePane({
+  space,
+  onChange,
+}: {
+  space: Space;
+  onChange: (space: Space) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [repos, setRepos] = useState(space.repos);
+  const [links, setLinks] = useState(space.resources);
+  const [kind, setKind] = useState<"repo" | "link">("repo");
+  const [title, setTitle] = useState("");
+  const [url, setUrl] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
   const resources = [
     ...space.repos.map((repo) => ({
       title: repo,
@@ -269,20 +305,209 @@ function SpacePane({ space }: { space: Space }) {
     })),
     ...space.resources,
   ];
+
+  const startEditing = () => {
+    setRepos(space.repos);
+    setLinks(space.resources);
+    setError("");
+    setEditing(true);
+  };
+
+  const addResource = (event: React.FormEvent) => {
+    event.preventDefault();
+    setError("");
+    if (kind === "repo") {
+      const repo = url.trim();
+      if (!/^[^/\s]+\/[^/\s]+$/.test(repo)) {
+        setError("Use owner/repo form.");
+        return;
+      }
+      if (!repos.includes(repo)) setRepos([...repos, repo]);
+    } else {
+      const nextTitle = title.trim();
+      const nextUrl = url.trim();
+      try {
+        const parsed = new URL(nextUrl);
+        if (!nextTitle || !["http:", "https:"].includes(parsed.protocol)) {
+          throw new Error();
+        }
+      } catch {
+        setError("Add a title and a valid http(s) URL.");
+        return;
+      }
+      if (!links.some((resource) => resource.url === nextUrl)) {
+        setLinks([...links, { title: nextTitle, url: nextUrl, kind: "link" }]);
+      }
+    }
+    setTitle("");
+    setUrl("");
+  };
+
+  const save = async () => {
+    setSaving(true);
+    setError("");
+    try {
+      const response = await fetch(`/api/spaces/${space.id}/resources`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ repos, resources: links }),
+      });
+      if (!response.ok) throw new Error();
+      onChange(await response.json());
+      setEditing(false);
+    } catch {
+      setError("Could not save resources.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <div className="mx-auto grid w-full max-w-6xl gap-10 lg:grid-cols-[minmax(0,1fr)_18rem]">
       <article className="typeset typeset-docs mx-auto w-full max-w-2xl min-w-0">
         <ReactMarkdown remarkPlugins={[remarkGfm]}>{space.about}</ReactMarkdown>
       </article>
       <aside className="mx-auto flex w-full max-w-2xl flex-col gap-2 lg:mx-0 lg:max-w-none">
-        <span className="px-1 text-xs font-medium text-muted-foreground">
-          Resources
-        </span>
-        {resources.map((resource) => (
-          <ResourceCard key={resource.url} resource={resource} />
-        ))}
+        <div className="flex h-7 items-center justify-between px-1">
+          <span className="text-xs font-medium text-muted-foreground">
+            Resources
+          </span>
+          {!editing && (
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              aria-label="Edit resources"
+              onClick={startEditing}
+            >
+              <PencilIcon />
+            </Button>
+          )}
+        </div>
+        {editing ? (
+          <div className="flex flex-col gap-4">
+            <div className="flex flex-col gap-2">
+              {repos.map((repo) => (
+                <EditableResource
+                  key={`repo:${repo}`}
+                  resource={{
+                    title: repo,
+                    url: `https://github.com/${repo}`,
+                    kind: "repo",
+                  }}
+                  onDelete={() => setRepos(repos.filter((item) => item !== repo))}
+                />
+              ))}
+              {links.map((resource, index) => (
+                <EditableResource
+                  key={`${resource.url}:${index}`}
+                  resource={resource}
+                  onDelete={() => setLinks(links.filter((_, item) => item !== index))}
+                />
+              ))}
+            </div>
+            <form onSubmit={addResource}>
+              <FieldGroup>
+                <Field>
+                  <FieldLabel htmlFor={`resource-kind-${space.id}`}>Add resource</FieldLabel>
+                  <select
+                    id={`resource-kind-${space.id}`}
+                    value={kind}
+                    onChange={(event) => {
+                      setKind(event.target.value as "repo" | "link");
+                      setTitle("");
+                      setUrl("");
+                      setError("");
+                    }}
+                    className="h-8 rounded-lg border border-input bg-transparent px-2.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+                  >
+                    <option value="repo">GitHub repository</option>
+                    <option value="link">Link</option>
+                  </select>
+                </Field>
+                {kind === "link" && (
+                  <Field>
+                    <FieldLabel htmlFor={`resource-title-${space.id}`}>Title</FieldLabel>
+                    <Input
+                      id={`resource-title-${space.id}`}
+                      value={title}
+                      onChange={(event) => setTitle(event.target.value)}
+                      placeholder="Documentation"
+                    />
+                  </Field>
+                )}
+                <Field data-invalid={Boolean(error)}>
+                  <FieldLabel htmlFor={`resource-url-${space.id}`}>
+                    {kind === "repo" ? "Repository" : "URL"}
+                  </FieldLabel>
+                  <Input
+                    id={`resource-url-${space.id}`}
+                    value={url}
+                    onChange={(event) => setUrl(event.target.value)}
+                    placeholder={kind === "repo" ? "owner/repo" : "https://example.com"}
+                    aria-invalid={Boolean(error)}
+                  />
+                  {kind === "repo" && (
+                    <FieldDescription>Enter a GitHub repository as owner/repo.</FieldDescription>
+                  )}
+                  <FieldError>{error}</FieldError>
+                </Field>
+                <Button type="submit" variant="outline">
+                  <PlusIcon />
+                  Add
+                </Button>
+              </FieldGroup>
+            </form>
+            <div className="flex justify-end gap-2">
+              <Button
+                variant="ghost"
+                disabled={saving}
+                onClick={() => setEditing(false)}
+              >
+                <XIcon />
+                Cancel
+              </Button>
+              <Button disabled={saving} onClick={save}>
+                <CheckIcon />
+                {saving ? "Saving" : "Save"}
+              </Button>
+            </div>
+          </div>
+        ) : resources.length ? (
+          resources.map((resource, index) => (
+            <ResourceCard key={`${resource.url}:${index}`} resource={resource} />
+          ))
+        ) : (
+          <span className="px-1 text-sm text-muted-foreground">No resources yet.</span>
+        )}
       </aside>
     </div>
+  );
+}
+
+function EditableResource({
+  resource,
+  onDelete,
+}: {
+  resource: Resource;
+  onDelete: () => void;
+}) {
+  const Icon =
+    resourceIcon[resource.kind as keyof typeof resourceIcon] ?? LinkIcon;
+  return (
+    <Card className="flex-row items-center gap-3 p-3">
+      <Icon className="size-4 shrink-0 text-muted-foreground" />
+      <span className="min-w-0 flex-1 truncate text-sm font-medium">
+        {resource.title}
+      </span>
+      <Button
+        variant="ghost"
+        size="icon-xs"
+        aria-label={`Delete ${resource.title}`}
+        onClick={onDelete}
+      >
+        <Trash2Icon />
+      </Button>
+    </Card>
   );
 }
 
