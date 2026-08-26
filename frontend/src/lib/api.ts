@@ -40,6 +40,7 @@ export type Chat = {
   id: string;
   space_id: string | null;
   title: string;
+  topic: string | null;
   trigger: string;
   status: "queued" | "running" | "done" | "failed";
   sandbox_id: string | null;

@@ -124,40 +124,66 @@ async def list_all() -> list[models.Chat]:
 
 
 async def assign_space(chat_id: str, space_id: str) -> models.Chat | None:
-    chat = await get(chat_id)
-    if chat is None:
-        return None
-    chat.space_id = space_id
     if store.use_postgres():
         from store import db
 
-        await (await db.pool()).execute(
-            "UPDATE hatchery_chats SET space_id = $2, data = $3::jsonb WHERE id = $1",
+        row = await (await db.pool()).fetchrow(
+            "UPDATE hatchery_chats SET space_id = $2, "
+            "data = jsonb_set(data, '{space_id}', to_jsonb($2::text)) "
+            "WHERE id = $1 RETURNING data",
             chat_id,
             space_id,
-            chat.model_dump_json(),
         )
-        return chat
+        return _chat(row["data"]) if row is not None else None
     with _lock:
+        chat = _read_chat(chat_id)
+        if chat is None:
+            return None
+        chat.space_id = space_id
+        _write_chat(chat)
+        return chat
+
+
+async def set_topic(chat_id: str, topic: str) -> models.Chat | None:
+    if store.use_postgres():
+        from store import db
+
+        row = await (await db.pool()).fetchrow(
+            "UPDATE hatchery_chats SET data = data || jsonb_build_object('topic', $2::text) "
+            "WHERE id = $1 RETURNING data",
+            chat_id,
+            topic,
+        )
+        return _chat(row["data"]) if row is not None else None
+    with _lock:
+        chat = _read_chat(chat_id)
+        if chat is None:
+            return None
+        chat.topic = topic
         _write_chat(chat)
         return chat
 
 
 async def finish(chat_id: str, status: str, artifact: str | None = None) -> models.Chat | None:
     """Record a chat's worker status and optional terminal artifact."""
-    chat = await get(chat_id)
-    if chat is None:
-        return None
-    chat.status = status
-    chat.artifact = artifact
     if store.use_postgres():
         from store import db
 
-        await (await db.pool()).execute(
-            "UPDATE hatchery_chats SET data = $2::jsonb WHERE id = $1", chat_id, chat.model_dump_json()
+        row = await (await db.pool()).fetchrow(
+            "UPDATE hatchery_chats SET data = data || "
+            "jsonb_build_object('status', $2::text, 'artifact', $3::text) "
+            "WHERE id = $1 RETURNING data",
+            chat_id,
+            status,
+            artifact,
         )
-        return chat
+        return _chat(row["data"]) if row is not None else None
     with _lock:
+        chat = _read_chat(chat_id)
+        if chat is None:
+            return None
+        chat.status = status
+        chat.artifact = artifact
         _write_chat(chat)
         return chat
 

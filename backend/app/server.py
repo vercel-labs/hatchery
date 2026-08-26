@@ -35,7 +35,7 @@ import channels
 import models
 import store
 import vercel.functions
-from agent import classifier, devbox, dispatcher
+from agent import classifier, devbox, dispatcher, topic
 from channels import github, slack
 from store import activity, chats, events, spaces, tasks, turns
 
@@ -88,6 +88,7 @@ class _StoreHub:
                 found,
             )
             chat = await chats.get(chat.id) or chat
+            _spawn(_name_chat(chat.id, inbound.text))
         elif chat.space_id is None:
             await _classify_chat(
                 chat.id,
@@ -119,6 +120,12 @@ def _inbound_author(inbound: channels.Inbound) -> str:
         or inbound.state.get("author")
         or "unknown"
     )
+
+
+async def _name_chat(chat_id: str, prompt: str) -> None:
+    generated = await topic.generate(prompt)
+    if generated and await chats.set_topic(chat_id, generated):
+        await events.append(chat_id, "ui", {"type": "chat.changed"})
 
 
 async def _classify_chat(
@@ -389,6 +396,10 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                 )
 
             current = await chats.get(request.chat_id)
+            if received and current is not None and current.topic is None:
+                first = next((message for message in stored if message.role == "user"), None)
+                if first is not None:
+                    _spawn(_name_chat(request.chat_id, first.text))
             if current is None:
                 raise fastapi.HTTPException(404, "unknown chat")
             if current.space_id is None:
@@ -742,17 +753,6 @@ async def supervise_task(launch_id: str, reason: str) -> bool:
             if not failures and terminal:
                 updates["completion_delivered"] = True
                 updates["completion_message"] = outcome.message
-        await events.append(
-            chat_id,
-            "ui",
-            {
-                "type": "task.changed",
-                "launch_id": launch_id,
-                "state": latest.get("state"),
-            },
-        )
-        if outcome.notify and outcome.message:
-            await events.append(chat_id, "ui", {"type": "messages.changed"})
         if terminal:
             result = latest.get("result") or {}
             artifact = next(
@@ -768,6 +768,17 @@ async def supervise_task(launch_id: str, reason: str) -> bool:
                 await chats.finish(
                     chat_id, "done" if latest.get("state") == "complete" else "failed", artifact
                 )
+        await events.append(
+            chat_id,
+            "ui",
+            {
+                "type": "task.changed",
+                "launch_id": launch_id,
+                "state": latest.get("state"),
+            },
+        )
+        if outcome.notify and outcome.message:
+            await events.append(chat_id, "ui", {"type": "messages.changed"})
         await tasks.finish_supervision(launch_id, generation, **updates)
         return terminal
     except Exception:
