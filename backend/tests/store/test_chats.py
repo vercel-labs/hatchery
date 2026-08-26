@@ -46,6 +46,19 @@ async def test_create_get_list():
     assert await chats.get("chat_missing") is None
 
 
+async def test_assign_space_updates_chat():
+    original = await spaces.default()
+    destination = await spaces.create("docs")
+    chat = await chats.create(original.id, "work")
+
+    assigned = await chats.assign_space(chat.id, destination.id)
+
+    assert assigned is not None and assigned.space_id == destination.id
+    loaded = await chats.get(chat.id)
+    assert loaded is not None and loaded.space_id == destination.id
+    assert await chats.assign_space("chat_missing", destination.id) is None
+
+
 async def test_finish_updates_status_and_artifact():
     space = await spaces.default()
     chat = await chats.create(space.id, "work")

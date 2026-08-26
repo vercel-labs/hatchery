@@ -117,6 +117,26 @@ async def list_all() -> list[models.Chat]:
         return found
 
 
+async def assign_space(chat_id: str, space_id: str) -> models.Chat | None:
+    chat = await get(chat_id)
+    if chat is None:
+        return None
+    chat.space_id = space_id
+    if store.use_postgres():
+        from store import db
+
+        await (await db.pool()).execute(
+            "UPDATE hatchery_chats SET space_id = $2, data = $3::jsonb WHERE id = $1",
+            chat_id,
+            space_id,
+            chat.model_dump_json(),
+        )
+        return chat
+    with _lock:
+        _write_chat(chat)
+        return chat
+
+
 async def finish(chat_id: str, status: str, artifact: str | None = None) -> models.Chat | None:
     """Record a chat's worker status and optional terminal artifact."""
     chat = await get(chat_id)

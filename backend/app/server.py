@@ -218,6 +218,21 @@ async def create_chat(request: CreateChatRequest) -> models.Chat:
     return await chats.create(space_id, request.title)
 
 
+class AssignChatSpaceRequest(pydantic.BaseModel):
+    space_id: str
+
+
+@app.patch("/api/chats/{chat_id}/space")
+async def assign_chat_space(chat_id: str, request: AssignChatSpaceRequest) -> models.Chat:
+    if await spaces.get(request.space_id) is None:
+        raise fastapi.HTTPException(404, "unknown space")
+    # TODO: add history for space changes
+    chat = await chats.assign_space(chat_id, request.space_id)
+    if chat is None:
+        raise fastapi.HTTPException(404, "unknown chat")
+    return chat
+
+
 @app.get("/api/chats/{chat_id}/messages")
 async def chat_messages(chat_id: str) -> list[ai.ui.ai_sdk.UIMessage]:
     """The stored transcript as UI messages, with channel envelopes hidden."""

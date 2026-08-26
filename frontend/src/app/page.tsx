@@ -35,6 +35,14 @@ import {
   FieldLabel,
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -155,6 +163,19 @@ export default function Home() {
     const chat: Chat = await res.json();
     setChats((prev) => [chat, ...(prev ?? [])]);
     setSelection({ kind: "chat", id: chat.id });
+  };
+
+  const assignChatSpace = async (chat: Chat, spaceId: string) => {
+    const res = await fetch(`/api/chats/${chat.id}/space`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ space_id: spaceId }),
+    });
+    if (!res.ok) return;
+    const updated: Chat = await res.json();
+    setChats((current) =>
+      current?.map((item) => (item.id === updated.id ? updated : item)) ?? null,
+    );
   };
 
   return (
@@ -286,9 +307,31 @@ export default function Home() {
               }
             />
           )}
-          <span className="text-sm font-medium">
+          <span className="min-w-0 flex-1 truncate text-sm font-medium">
             {selectedSpace?.name ?? selectedChat?.title ?? "hatchery"}
           </span>
+          {selectedChat && spaces && (
+            <Select
+              value={selectedChat.space_id}
+              onValueChange={(spaceId) => {
+                if (spaceId) void assignChatSpace(selectedChat, spaceId);
+              }}
+            >
+              <SelectTrigger size="sm" aria-label="Chat space">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent align="end">
+                <SelectGroup>
+                  {spaces.map((space) => (
+                    <SelectItem key={space.id} value={space.id}>
+                      <Dot color={space.color} />
+                      {space.name}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+          )}
         </header>
         {selectedChat && !failed ? (
           <LiveChat key={selectedChat.id} chat={selectedChat} />
