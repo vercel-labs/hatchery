@@ -67,8 +67,8 @@ async def test_launch_coder_clones_selected_repos_and_persists_workspace(monkeyp
         seen["box"] = (name, repos)
         return {"id": "box_1", "url": "https://box.example"}
 
-    async def create_task(box_id, set_id, prompt, webhook_secret, webhook_task_id):
-        seen["task"] = (box_id, set_id, prompt)
+    async def create_task(box_id, set_id, prompt, webhook_secret, webhook_task_id, model):
+        seen["task"] = (box_id, set_id, prompt, model)
         return {"task_id": "task_1", "session_id": "session_1", "state": "pending"}
 
     monkeypatch.setattr(dispatcher.devbox, "create_taskset", create_taskset)
@@ -80,16 +80,27 @@ async def test_launch_coder_clones_selected_repos_and_persists_workspace(monkeyp
     tool = next(tool for tool in agent.tools if tool.name == "launch_coder")
     updates = [
         update
-        async for update in tool.fn("answer questions", repos=["vercel/vercel-py"])
+        async for update in tool.fn(
+            "answer questions",
+            repos=["vercel/vercel-py"],
+            model="anthropic/claude-sonnet-4.6",
+        )
     ]
 
     assert seen["box"] == (f"hatchery-{chat.id}", ["vercel/vercel-py"])
-    assert seen["task"] == ("box_1", "set_1", "answer questions")
+    assert seen["task"] == (
+        "box_1",
+        "set_1",
+        "answer questions",
+        "anthropic/claude-sonnet-4.6",
+    )
     assert updates[-1]["task_id"] == "task_1"
     workspace = await events.tail(chat.id, "worker")
     assert workspace is not None
     assert workspace["repos"] == ["vercel/vercel-py"]
     assert workspace["workspace_version"] == 1
+    [launch] = await tasks.list_for_chat(chat.id)
+    assert launch["model"] == "anthropic/claude-sonnet-4.6"
     saved_chat = await chats.get(chat.id)
     assert saved_chat is not None and saved_chat.status == "running"
 

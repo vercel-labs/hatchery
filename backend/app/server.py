@@ -679,7 +679,10 @@ async def _watch_local_task(chat_id: str, record: dict, created: dict) -> None:
         await asyncio.sleep(20)
         try:
             created = await devbox.create_task(
-                workspace["box"]["id"], workspace["set_id"], record["prompt"]
+                workspace["box"]["id"],
+                workspace["set_id"],
+                record["prompt"],
+                model=record.get("model", devbox.DEFAULT_MODEL),
             )
         except Exception as error:
             record["state"] = "errored"

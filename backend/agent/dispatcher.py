@@ -68,14 +68,17 @@ def agent_for(
 
     @ai.tool
     async def launch_coder(
-        task: str, repos: list[str] | None = None
+        task: str,
+        repos: list[str] | None = None,
+        model: str = devbox.DEFAULT_MODEL,
     ) -> ai.StreamingStatusTool[typing.Any]:
         """Hand a coding task to this chat's devbox.
 
         The task should be self-contained: what to build or do, and what
         "done" looks like. Select only the owner/repo repositories the coder
-        needs. Omit repos for an empty sandbox. It returns as soon as the task
-        is accepted; completion arrives in a later turn.
+        needs. Omit repos for an empty sandbox. Override model with a Vercel AI
+        Gateway model ID when needed. It returns as soon as the task is accepted;
+        completion arrives in a later turn.
         """
         desired_repos = list(repos or [])
         async with workspaces.provision(chat["id"]):
@@ -103,6 +106,8 @@ def agent_for(
 
             yield "dispatching task…"
             launch = await tasks.create(chat["id"], task, secrets.token_urlsafe(32))
+            launch["model"] = model
+            await tasks.save(launch)
             await chats.finish(chat["id"], "running")
             try:
                 created = await devbox.create_task(
@@ -111,6 +116,7 @@ def agent_for(
                     task,
                     launch["webhook_secret"],
                     launch["id"],
+                    model,
                 )
             except Exception as error:
                 launch["state"] = "errored"
