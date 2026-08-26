@@ -28,6 +28,13 @@ async def test_chat_create_and_list():
     assert [x["id"] for x in listed] == [created["id"]]
 
 
+async def test_chat_create_rejects_unknown_space():
+    async with client() as c:
+        response = await c.post("/api/chats", json={"space_id": "spc_missing"})
+    assert response.status_code == 404
+    assert response.json() == {"detail": "unknown space"}
+
+
 async def test_chat_list_cleans_legacy_slack_title():
     space = await server.spaces.default()
     chat, _ = await chats.claim(
@@ -235,7 +242,9 @@ async def test_ui_turn_is_mirrored_to_bound_channel(monkeypatch):
     channel = FakeChannel()
     previous = server.bot.channels.get("fake")
     server.bot.channels["fake"] = channel
-    monkeypatch.setattr(server.dispatcher, "agent_for", lambda record, observe: FakeAgent())
+    monkeypatch.setattr(
+        server.dispatcher, "agent_for", lambda record, repos, observe: FakeAgent()
+    )
     monkeypatch.setattr(server.ai.ui.ai_sdk, "to_sse", fake_sse)
     try:
         space = await server.spaces.default()
@@ -451,7 +460,7 @@ async def test_supervision_history_ends_with_unpersisted_user_wake(monkeypatch):
             run.messages = list(history)
             return run
 
-    monkeypatch.setattr(server.dispatcher, "agent_for", lambda record: FakeAgent())
+    monkeypatch.setattr(server.dispatcher, "agent_for", lambda record, repos: FakeAgent())
     outcome = await server._run_supervision_turn(chat.id, {"id": chat.id}, wake)
     assert outcome.notify is False
     assert seen is not None

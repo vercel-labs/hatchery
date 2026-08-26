@@ -1,3 +1,6 @@
+import pytest
+import pydantic
+
 import models
 from store import spaces
 
@@ -19,3 +22,15 @@ async def test_save_get_list():
     assert loaded is not None and loaded.name == "x"
     assert [s.id for s in await spaces.list_all()] == [spaces.DEFAULT_ID, "spc_x"]
     assert await spaces.get("spc_missing") is None
+
+
+def test_space_repos_require_owner_repo_form():
+    with pytest.raises(pydantic.ValidationError, match="owner/repo"):
+        models.Space(
+            id="spc_x",
+            name="x",
+            goal="g",
+            repos=["https://github.com/anbuzin/hatchery"],
+            color="#fff",
+            created_at="2099-01-01T00:00:00+00:00",
+        )

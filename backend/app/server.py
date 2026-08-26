@@ -133,6 +133,8 @@ class CreateChatRequest(pydantic.BaseModel):
 @app.post("/api/chats")
 async def create_chat(request: CreateChatRequest) -> models.Chat:
     space_id = request.space_id or (await spaces.default()).id
+    if await spaces.get(space_id) is None:
+        raise fastapi.HTTPException(404, "unknown space")
     return await chats.create(space_id, request.title)
 
 
@@ -199,13 +201,8 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
 
             history = [ai.system_message(dispatcher.SYSTEM), *stored]
             record = await events.tail(request.chat_id, "worker") or {"id": request.chat_id}
-
-            def observe_task(launch: dict, created: dict) -> None:
-                if devbox.webhook_url() is None:
-                    _spawn(_watch_local_task(request.chat_id, launch, created))
-                    _spawn(_supervise_local(launch["id"]))
-
-            agent = dispatcher.agent_for(record, observe_task)
+            repos = await _repos_for_chat(request.chat_id)
+            agent = dispatcher.agent_for(record, repos, _task_observer(request.chat_id))
             await _emit(request.chat_id, channels.event(channels.protocol.TURN_STARTED))
             try:
                 async with agent.run(dispatcher.model(), history) as result:
@@ -232,6 +229,25 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
     return fastapi.responses.StreamingResponse(
         stream(), headers=ai.ui.ai_sdk.UI_MESSAGE_STREAM_HEADERS
     )
+
+
+async def _repos_for_chat(chat_id: str) -> list[str]:
+    chat = await chats.get(chat_id)
+    if chat is None:
+        raise fastapi.HTTPException(404, "unknown chat")
+    space = await spaces.get(chat.space_id)
+    if space is None:
+        raise RuntimeError(f"chat {chat_id} belongs to unknown space {chat.space_id}")
+    return list(space.repos)
+
+
+def _task_observer(chat_id: str):
+    def observe(launch: dict, created: dict) -> None:
+        if devbox.webhook_url() is None:
+            _spawn(_watch_local_task(chat_id, launch, created))
+            _spawn(_supervise_local(launch["id"]))
+
+    return observe
 
 
 async def _transcript(chat_id: str) -> list[ai.messages.Message]:
@@ -565,7 +581,7 @@ async def _run_supervision_turn(
 ) -> SupervisionOutcome:
     stored = await _transcript(chat_id)
     history = [ai.system_message(dispatcher.SYSTEM), *stored, wake]
-    agent = dispatcher.agent_for(record)
+    agent = dispatcher.agent_for(record, await _repos_for_chat(chat_id))
     async with agent.run(dispatcher.model(), history, output_type=SupervisionOutcome) as result:
         async for _ in result:
             pass
@@ -590,7 +606,9 @@ async def _run_dispatcher_turn(
     history = [ai.system_message(dispatcher.SYSTEM), *stored]
     if wake is not None:
         history.append(wake)
-    agent = dispatcher.agent_for(record)
+    agent = dispatcher.agent_for(
+        record, await _repos_for_chat(chat_id), _task_observer(chat_id)
+    )
     async with agent.run(dispatcher.model(), history) as result:
         async for _ in result:
             pass

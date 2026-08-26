@@ -118,7 +118,7 @@ async def list_all() -> list[models.Chat]:
 
 
 async def finish(chat_id: str, status: str, artifact: str | None = None) -> models.Chat | None:
-    """Record a chat's terminal worker outcome."""
+    """Record a chat's worker status and optional terminal artifact."""
     chat = await get(chat_id)
     if chat is None:
         return None

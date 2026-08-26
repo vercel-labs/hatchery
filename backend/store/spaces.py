@@ -109,7 +109,7 @@ async def default() -> models.Space:
                 "Keep changes small and reviewable. Prefer a report over a pr when "
                 "uncertain."
             ),
-            repos=["anbuzin/hatchery"],
+            repos=["vercel/vercel-py"],
             resources=[
                 models.Resource(
                     title="ai sdk for python",

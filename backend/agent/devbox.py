@@ -65,8 +65,8 @@ def _team() -> str:
     return json.loads((_CLI / "config.json").read_text())["currentTeam"]
 
 
-async def create_box(name: str) -> dict:
-    """Boot a repo-less devbox, install devboxd, block until READY.
+async def create_box(name: str, repos: list[str]) -> dict:
+    """Boot a devbox, clone its repos, install devboxd, and block until READY.
 
     One call (`setup: true` + a sandbox spec opts into the server-side flow).
     Cold boot is ~1 minute. Returns {"id", "url"} — url is the box's devboxd
@@ -82,7 +82,12 @@ async def create_box(name: str) -> dict:
                 f"{API}/v2/devbox/create",
                 params={"teamId": _team()},
                 headers={"Authorization": f"Bearer {token()}"},
-                json={"name": name, "setup": True, "sandbox": {}},
+                json={
+                    "name": name,
+                    "setup": True,
+                    "sandbox": {},
+                    "cloneRepos": repos,
+                },
             )
             if r.status_code < 500 or attempt == 2:
                 box = _checked(r).json()

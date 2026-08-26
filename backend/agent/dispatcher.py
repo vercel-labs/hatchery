@@ -14,7 +14,7 @@ import ai
 from vercel import workflow
 
 from agent import devbox, supervisor
-from store import activity, events, tasks, workspaces
+from store import activity, chats, events, tasks, workspaces
 
 SYSTEM = """\
 You are hatchery's dispatcher. You coordinate coding work; you never write
@@ -33,13 +33,17 @@ def model() -> ai.Model:
 
 
 def agent_for(
-    chat: dict, on_task_created: typing.Callable[[dict, dict], None] | None = None
+    chat: dict,
+    repos: list[str] | None = None,
+    on_task_created: typing.Callable[[dict, dict], None] | None = None,
 ) -> ai.Agent:
     """Build the dispatcher agent bound to one chat's worker state.
 
     `chat` is the tail of the chat's (chat_id, "worker") stream. It owns the
     shared box and taskset; each launch stores its own task and PTY session.
+    `repos` is frozen from the chat's space for this dispatcher turn.
     """
+    desired_repos = list(repos or [])
 
     @ai.tool
     async def launch_coder(task: str) -> ai.StreamingStatusTool[typing.Any]:
@@ -49,27 +53,53 @@ def agent_for(
         "done" looks like. It returns as soon as the task is accepted;
         completion arrives in a later turn.
         """
-        if not chat.get("set_id") or not chat.get("box"):
-            async with workspaces.provision(chat["id"]):
-                current = await events.tail(chat["id"], "worker") or chat
-                chat.update(current)
+        async with workspaces.provision(chat["id"]):
+            current = await events.tail(chat["id"], "worker") or chat
+            chat.update(current)
+            launches = await tasks.list_for_chat(chat["id"])
+            if any(launch.get("state") not in devbox.TERMINAL_STATES for launch in launches):
+                raise RuntimeError("a coder is already running for this chat")
+
+            try:
                 if not chat.get("set_id"):
                     chat["set_id"] = await devbox.create_taskset(f"hatchery {chat['id']}")
-                if not chat.get("box"):
-                    yield "creating devbox (cold boot, about a minute)…"
-                    chat["box"] = await devbox.create_box(f"hatchery-{chat['id']}")
+                    await events.append(chat["id"], "worker", dict(chat))
+                if not chat.get("box") or chat.get("repos") != desired_repos:
+                    yield "creating devbox and cloning repos (cold boot, about a minute)…"
+                    chat["box"] = await devbox.create_box(
+                        f"hatchery-{chat['id']}", desired_repos
+                    )
+                    chat["repos"] = desired_repos
+                    chat["workspace_version"] = 1
                 await events.append(chat["id"], "worker", dict(chat))
+            except Exception as error:
+                await chats.finish(chat["id"], "failed", str(error))
+                raise
 
-        yield "dispatching task…"
-        launch = await tasks.create(chat["id"], task, secrets.token_urlsafe(32))
-        created = await devbox.create_task(
-            chat["box"]["id"],
-            chat["set_id"],
-            task,
-            launch["webhook_secret"],
-            launch["id"],
-        )
-        launch = await tasks.finish_create(launch["id"], created)
+            yield "dispatching task…"
+            launch = await tasks.create(chat["id"], task, secrets.token_urlsafe(32))
+            await chats.finish(chat["id"], "running")
+            try:
+                created = await devbox.create_task(
+                    chat["box"]["id"],
+                    chat["set_id"],
+                    task,
+                    launch["webhook_secret"],
+                    launch["id"],
+                )
+            except Exception as error:
+                launch["state"] = "errored"
+                launch["result"] = {"error": str(error)}
+                await tasks.save(launch)
+                await chats.finish(chat["id"], "failed", str(error))
+                await activity.append(
+                    launch["id"],
+                    "state_transition",
+                    {"from": "creating", "to": "errored", "error": str(error)},
+                )
+                raise
+            launch = await tasks.finish_create(launch["id"], created)
+
         if on_task_created is not None:
             on_task_created(dict(launch), created)
         if devbox.webhook_url() is not None:
