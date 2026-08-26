@@ -7,8 +7,8 @@ UI at once. Single-owner: one chat per token, enforced by an atomic claim
 (postgres: INSERT .. ON CONFLICT DO NOTHING; local: one lock). dedupe gives
 webhooks durable replay protection.
 
-Chat rows are the models.Chat json verbatim, plus a space_id column for
-filtering. Postgres when DATABASE_URL is set, otherwise json files under
+Chat rows are the models.Chat json verbatim, plus a nullable space_id column
+for filtering. Postgres when DATABASE_URL is set, otherwise json files under
 HATCHERY_DATA_DIR. Locking mirrors store.events.
 """
 
@@ -26,10 +26,12 @@ import store
 _SCHEMA = """\
 CREATE TABLE IF NOT EXISTS hatchery_chats (
     id         TEXT PRIMARY KEY,
-    space_id   TEXT NOT NULL,
+    space_id   TEXT,
     data       JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE hatchery_chats ALTER COLUMN space_id DROP NOT NULL;
 
 CREATE TABLE IF NOT EXISTS hatchery_bindings (
     token      TEXT PRIMARY KEY,
@@ -70,7 +72,11 @@ async def ensure_ready() -> None:
         (store.data_dir() / "chats").mkdir(parents=True, exist_ok=True)
 
 
-async def create(space_id: str, title: str, trigger: str = "ui") -> models.Chat:
+async def create(
+    space_id: str | None,
+    title: str,
+    trigger: str = "ui",
+) -> models.Chat:
     chat = models.Chat(
         id=f"chat_{uuid.uuid4().hex[:12]}",
         space_id=space_id,
@@ -117,6 +123,26 @@ async def list_all() -> list[models.Chat]:
         return found
 
 
+async def assign_space(chat_id: str, space_id: str) -> models.Chat | None:
+    chat = await get(chat_id)
+    if chat is None:
+        return None
+    chat.space_id = space_id
+    if store.use_postgres():
+        from store import db
+
+        await (await db.pool()).execute(
+            "UPDATE hatchery_chats SET space_id = $2, data = $3::jsonb WHERE id = $1",
+            chat_id,
+            space_id,
+            chat.model_dump_json(),
+        )
+        return chat
+    with _lock:
+        _write_chat(chat)
+        return chat
+
+
 async def finish(chat_id: str, status: str, artifact: str | None = None) -> models.Chat | None:
     """Record a chat's worker status and optional terminal artifact."""
     chat = await get(chat_id)
@@ -137,7 +163,11 @@ async def finish(chat_id: str, status: str, artifact: str | None = None) -> mode
 
 
 async def claim(
-    token: str, channel: str, space_id: str, title: str, state: dict
+    token: str,
+    channel: str,
+    space_id: str | None,
+    title: str,
+    state: dict,
 ) -> tuple[models.Chat, bool]:
     """Atomically map a channel token to its owning chat.
 

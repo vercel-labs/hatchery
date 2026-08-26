@@ -120,17 +120,48 @@ async def test_space_resources_update_rejects_unknown_space_and_invalid_repo():
 async def test_chat_create_and_list():
     async with client() as c:
         created = (await c.post("/api/chats", json={})).json()
-        assert created["space_id"] == "spc_hatchery"
+        assert created["space_id"] is None
         assert created["title"] == "new chat"
         listed = (await c.get("/api/chats")).json()
     assert [x["id"] for x in listed] == [created["id"]]
 
 
-async def test_chat_create_rejects_unknown_space():
+async def test_chat_space_assignment():
+    destination = await server.spaces.create("docs")
+    chat = await chats.create(None, "work")
+
     async with client() as c:
-        response = await c.post("/api/chats", json={"space_id": "spc_missing"})
-    assert response.status_code == 404
-    assert response.json() == {"detail": "unknown space"}
+        response = await c.patch(
+            f"/api/chats/{chat.id}/space", json={"space_id": destination.id}
+        )
+        listed = (await c.get("/api/chats")).json()
+
+    assert response.status_code == 200
+    assert response.json()["space_id"] == destination.id
+    assert listed[0]["space_id"] == destination.id
+    assert (await server._space_for_chat(chat.id)).id == destination.id
+
+
+async def test_chat_space_assignment_rejects_unknown_chat_space_and_null():
+    destination = await server.spaces.create("docs")
+    chat = await chats.create(destination.id, "work")
+    async with client() as c:
+        missing_chat = await c.patch(
+            "/api/chats/chat_missing/space", json={"space_id": destination.id}
+        )
+        missing_space = await c.patch(
+            "/api/chats/chat_missing/space", json={"space_id": "spc_missing"}
+        )
+        null_space = await c.patch(
+            f"/api/chats/{chat.id}/space", json={"space_id": None}
+        )
+
+    assert missing_chat.status_code == 404
+    assert missing_chat.json() == {"detail": "unknown chat"}
+    assert missing_space.status_code == 404
+    assert missing_space.json() == {"detail": "unknown space"}
+    assert null_space.status_code == 422
+    assert (await chats.get(chat.id)).space_id == destination.id
 
 
 async def test_chat_list_cleans_legacy_slack_title():
@@ -200,6 +231,9 @@ async def test_hub_lands_inbound_in_one_chat(monkeypatch):
     async def turn(chat_id, record):
         return "reply"
 
+    async def classify(prompt, metadata, candidates):
+        return candidates[0]
+
     delivered = []
 
     async def deliver(chat_id, message):
@@ -211,6 +245,7 @@ async def test_hub_lands_inbound_in_one_chat(monkeypatch):
         return []
 
     monkeypatch.setattr(server, "_run_dispatcher_turn", turn)
+    monkeypatch.setattr(server.classifier, "classify", classify)
     monkeypatch.setattr(server, "_deliver", deliver)
     monkeypatch.setattr(server, "_emit", emit)
 
@@ -226,11 +261,71 @@ async def test_hub_lands_inbound_in_one_chat(monkeypatch):
     stored = await events.read(chat.id, "messages")
     assert len(stored) == 2
     assert delivered == [
+        (chat.id, channels.protocol.SPACE_ASSIGNING),
+        (chat.id, channels.protocol.SPACE_ASSIGNED),
         (chat.id, channels.protocol.TURN_STARTED),
         (chat.id, "reply"),
         (chat.id, channels.protocol.TURN_STARTED),
         (chat.id, "reply"),
     ]
+
+
+async def test_ambiguous_repo_classifies_then_runs_original_request(monkeypatch):
+    first = await server.spaces.create("docs")
+    first.repos = ["vercel/repo"]
+    await server.spaces.save(first)
+    second = await server.spaces.create("release")
+    second.repos = ["vercel/repo"]
+    await server.spaces.save(second)
+    emitted = []
+    runs = []
+    classified = []
+
+    async def emit(chat_id, event):
+        emitted.append((chat_id, event))
+        return []
+
+    async def classify(prompt, metadata, candidates):
+        classified.append((prompt, metadata, [space.id for space in candidates]))
+        return second
+
+    async def run(chat_id):
+        runs.append(chat_id)
+
+    monkeypatch.setattr(server, "_emit", emit)
+    monkeypatch.setattr(server.classifier, "classify", classify)
+    monkeypatch.setattr(server, "_run_inbound_turn", run)
+    await server.bot.hub.dispatch(
+        "github",
+        channels.Inbound(
+            token="repo:1:issue:7",
+            text="fix the docs",
+            state={"kind": "issue", "sender": "octocat"},
+            repo="vercel/repo",
+        ),
+    )
+
+    [chat] = await chats.list_all()
+    assert chat.space_id == second.id
+    assert classified == [
+        (
+            "fix the docs",
+            {
+                "origin": "github",
+                "author": "octocat",
+                "repo": "vercel/repo",
+                "channel_state": {"kind": "issue", "sender": "octocat"},
+            },
+            [first.id, second.id],
+        )
+    ]
+    assert [event.type for _, event in emitted] == [
+        channels.protocol.SPACE_ASSIGNING,
+        channels.protocol.SPACE_ASSIGNED,
+    ]
+    assert emitted[-1][1].data["space"]["name"] == "release"
+    assert len(await events.read(chat.id, "messages")) == 1
+    assert runs == [chat.id]
 
 
 async def test_inbound_turn_delivers_failure(monkeypatch):
@@ -273,11 +368,15 @@ async def test_slack_webhook_runs_dispatcher_and_replies_in_thread(monkeypatch):
         seen["record"] = record
         return "I can help with that."
 
+    async def classify(prompt, metadata, candidates):
+        return candidates[0]
+
     async def on_event(event, state):
         delivered.append((event, state))
 
     monkeypatch.setattr(server.slack.connect, "verify_connect_webhook", verify)
     monkeypatch.setattr(server, "_run_dispatcher_turn", turn)
+    monkeypatch.setattr(server.classifier, "classify", classify)
     monkeypatch.setattr(slack_channel, "on_event", on_event)
 
     payload = {
@@ -302,12 +401,75 @@ async def test_slack_webhook_runs_dispatcher_and_replies_in_thread(monkeypatch):
     [chat] = await chats.list_all()
     assert seen == {"chat_id": chat.id, "record": {"id": chat.id}}
     assert [event.type for event, _ in delivered] == [
+        channels.protocol.SPACE_ASSIGNING,
+        channels.protocol.SPACE_ASSIGNED,
         channels.protocol.TURN_STARTED,
         channels.protocol.MESSAGE_COMPLETED,
     ]
     assert delivered[-1][0].data == {"message": "I can help with that."}
     assert delivered[-1][1]["channel_id"] == "C1"
     assert delivered[-1][1]["thread_ts"] == "100.1"
+
+
+async def test_first_ui_prompt_classifies_before_dispatcher(monkeypatch):
+    docs = await server.spaces.create("docs")
+    docs.repos = ["vercel/docs"]
+    await server.spaces.save(docs)
+    chat = await chats.create(None, "new chat")
+    seen = {}
+
+    async def classify(prompt, metadata, candidates):
+        seen["classification"] = (prompt, metadata, [space.id for space in candidates])
+        return docs
+
+    class FakeRun:
+        def __init__(self, history):
+            self.messages = [*history, ai.assistant_message("dispatched")]
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+    class FakeAgent:
+        def run(self, model, history):
+            seen["history"] = history
+            return FakeRun(history)
+
+    async def fake_sse(result):
+        yield 'data: {"type":"finish"}\n\n'
+
+    monkeypatch.setattr(server.classifier, "classify", classify)
+    def agent_for(record, repos, observe):
+        seen["repos"] = repos
+        return FakeAgent()
+
+    monkeypatch.setattr(server.dispatcher, "agent_for", agent_for)
+    monkeypatch.setattr(server.ai.ui.ai_sdk, "to_sse", fake_sse)
+    ui = ai.ui.ai_sdk.to_ui_messages([ai.user_message("fix the docs")])
+    async with client() as c:
+        response = await c.post(
+            "/api/chat",
+            json={
+                "chat_id": chat.id,
+                "messages": [message.model_dump(mode="json") for message in ui],
+            },
+        )
+
+    assert response.status_code == 200
+    assert seen["classification"] == (
+        "fix the docs",
+        {"origin": "ui", "author": "current user"},
+        [docs.id],
+    )
+    assert seen["repos"] == ["vercel/docs"]
+    assert (await chats.get(chat.id)).space_id == docs.id
+    assert '"state": "assigning"' in response.text
+    assert '"state": "assigned"' in response.text
+    assert response.text.index('"state": "assigned"') < response.text.index('"type":"finish"')
+    assert seen["history"][0].role == "system"
+    assert seen["history"][1].text == "fix the docs"
 
 
 async def test_ui_turn_is_mirrored_to_bound_channel(monkeypatch):

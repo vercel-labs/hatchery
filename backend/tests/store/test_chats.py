@@ -37,13 +37,25 @@ async def test_claim_is_single_owner_under_concurrency():
 
 
 async def test_create_get_list():
-    space = await spaces.default()
-    chat = await chats.create(space.id, "manual chat")
+    chat = await chats.create(None, "manual chat")
     assert chat.trigger == "ui"
+    assert chat.space_id is None
     assert [c.id for c in await chats.list_all()] == [chat.id]
     loaded = await chats.get(chat.id)
     assert loaded is not None and loaded.title == "manual chat"
     assert await chats.get("chat_missing") is None
+
+
+async def test_assign_space_updates_chat():
+    destination = await spaces.create("docs")
+    chat = await chats.create(None, "work")
+
+    assigned = await chats.assign_space(chat.id, destination.id)
+
+    assert assigned is not None and assigned.space_id == destination.id
+    loaded = await chats.get(chat.id)
+    assert loaded is not None and loaded.space_id == destination.id
+    assert await chats.assign_space("chat_missing", destination.id) is None
 
 
 async def test_finish_updates_status_and_artifact():

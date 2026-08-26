@@ -21,6 +21,8 @@ TURN_FAILED = "turn.failed"
 MESSAGE_RECEIVED = "message.received"
 MESSAGE_COMPLETED = "message.completed"
 STATUS_UPDATED = "status.updated"
+SPACE_ASSIGNING = "space.assigning"
+SPACE_ASSIGNED = "space.assigned"
 
 
 class Meta(pydantic.BaseModel):

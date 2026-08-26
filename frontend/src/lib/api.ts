@@ -38,7 +38,7 @@ export type Space = {
 
 export type Chat = {
   id: string;
-  space_id: string;
+  space_id: string | null;
   title: string;
   trigger: string;
   status: "queued" | "running" | "done" | "failed";

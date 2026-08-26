@@ -35,6 +35,14 @@ import {
   FieldLabel,
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -93,7 +101,7 @@ export default function Home() {
     load().catch(() => setFailed(true));
   }, []);
 
-  const colorOf = (spaceId: string) =>
+  const colorOf = (spaceId: string | null) =>
     spaces?.find((s) => s.id === spaceId)?.color;
 
   const selectedSpace =
@@ -145,16 +153,28 @@ export default function Home() {
   };
 
   const createChat = async () => {
-    const spaceId = selectedSpace?.id ?? sortSpaceId ?? spaces?.[0]?.id ?? null;
     const res = await fetch("/api/chats", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ space_id: spaceId }),
+      body: JSON.stringify({}),
     });
     if (!res.ok) return;
     const chat: Chat = await res.json();
     setChats((prev) => [chat, ...(prev ?? [])]);
     setSelection({ kind: "chat", id: chat.id });
+  };
+
+  const assignChatSpace = async (chat: Chat, spaceId: string) => {
+    const res = await fetch(`/api/chats/${chat.id}/space`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ space_id: spaceId }),
+    });
+    if (!res.ok) return;
+    const updated: Chat = await res.json();
+    setChats((current) =>
+      current?.map((item) => (item.id === updated.id ? updated : item)) ?? null,
+    );
   };
 
   return (
@@ -286,12 +306,54 @@ export default function Home() {
               }
             />
           )}
-          <span className="text-sm font-medium">
+          <span className="min-w-0 flex-1 truncate text-sm font-medium">
             {selectedSpace?.name ?? selectedChat?.title ?? "hatchery"}
           </span>
+          {selectedChat?.space_id && spaces && (
+            <Select
+              value={selectedChat.space_id}
+              onValueChange={(spaceId) => {
+                if (spaceId) void assignChatSpace(selectedChat, spaceId);
+              }}
+            >
+              <SelectTrigger size="sm" aria-label="Chat space">
+                <SelectValue placeholder="Assign space" />
+              </SelectTrigger>
+              <SelectContent align="end">
+                <SelectGroup>
+                  {spaces.map((space) => (
+                    <SelectItem key={space.id} value={space.id}>
+                      <Dot color={space.color} />
+                      {space.name}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+          )}
         </header>
         {selectedChat && !failed ? (
-          <LiveChat key={selectedChat.id} chat={selectedChat} />
+          <LiveChat
+            key={selectedChat.id}
+            chat={selectedChat}
+            onSpaceAssigned={(spaceId) =>
+              setChats((current) => {
+                if (
+                  current?.find((chat) => chat.id === selectedChat.id)
+                    ?.space_id === spaceId
+                ) {
+                  return current;
+                }
+                return (
+                  current?.map((chat) =>
+                    chat.id === selectedChat.id
+                      ? { ...chat, space_id: spaceId }
+                      : chat,
+                  ) ?? null
+                );
+              })
+            }
+          />
         ) : (
           <div className="flex-1 overflow-y-auto p-6 md:p-10">
             {failed ? (
@@ -681,7 +743,13 @@ function EditableResource({
 // dispatcher launches work. Keyed by chat.id at the call site so useChat
 // remounts per chat. The stored transcript loads first: useChat only takes
 // initial messages at construction.
-function LiveChat({ chat }: { chat: Chat }) {
+function LiveChat({
+  chat,
+  onSpaceAssigned,
+}: {
+  chat: Chat;
+  onSpaceAssigned: (spaceId: string) => void;
+}) {
   const [initialMessages, setInitialMessages] = useState<
     ChatUIMessage[] | null
   >(null);
@@ -708,6 +776,19 @@ function LiveChat({ chat }: { chat: Chat }) {
 
   const onMessagesChange = useCallback(
     (messages: ChatUIMessage[]) => {
+      const assignment = messages
+        .flatMap((message) => message.parts)
+        .findLast(
+          (part) =>
+            part.type === "data-space-assignment" &&
+            part.data.state === "assigned",
+        );
+      if (
+        assignment?.type === "data-space-assignment" &&
+        assignment.data.space_id
+      ) {
+        onSpaceAssigned(assignment.data.space_id);
+      }
       const accepted = messages.some((message) =>
         message.parts.some(
           (part) =>
@@ -718,7 +799,7 @@ function LiveChat({ chat }: { chat: Chat }) {
       );
       if (accepted) loadTasks();
     },
-    [loadTasks],
+    [loadTasks, onSpaceAssigned],
   );
 
   if (initialMessages === null) return <div className="flex-1" />;

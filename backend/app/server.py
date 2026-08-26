@@ -28,11 +28,13 @@ import pydantic
 import websockets
 
 import ai
+import ai.ui.ai_sdk.outbound_stream
+import ai.ui.ai_sdk.ui_events
 import channels
 import models
 import store
 import vercel.functions
-from agent import devbox, dispatcher
+from agent import classifier, devbox, dispatcher
 from channels import github, slack
 from store import activity, chats, events, spaces, tasks, turns
 
@@ -60,22 +62,80 @@ class _StoreHub:
     """
 
     async def dispatch(self, channel: str, inbound: channels.Inbound) -> None:
-        space = None
-        if inbound.repo:
-            space = next((s for s in await spaces.list_all() if inbound.repo in s.repos), None)
-        space = space or await spaces.default()
+        found = await spaces.list_all() or [await spaces.default()]
         title = inbound.title or inbound.text.strip().splitlines()[0][:80]
         chat, created = await chats.claim(
-            f"{channel}:{inbound.token}", channel, space.id, title, inbound.state
+            f"{channel}:{inbound.token}",
+            channel,
+            None,
+            title,
+            inbound.state,
         )
-        await events.append(
-            chat.id, "messages", ai.user_message(inbound.text).model_dump(mode="json")
-        )
+        if created:
+            await events.append(
+                chat.id, "messages", ai.user_message(inbound.text).model_dump(mode="json")
+            )
+            await _classify_chat(
+                chat.id,
+                inbound.text,
+                {
+                    "origin": channel,
+                    "author": _inbound_author(inbound),
+                    "repo": inbound.repo,
+                    "channel_state": inbound.state,
+                },
+                found,
+            )
+            chat = await chats.get(chat.id) or chat
+        elif chat.space_id is None:
+            await _classify_chat(
+                chat.id,
+                inbound.text,
+                {
+                    "origin": channel,
+                    "author": _inbound_author(inbound),
+                    "repo": inbound.repo,
+                    "channel_state": inbound.state,
+                },
+                found,
+            )
+            chat = await chats.get(chat.id) or chat
+        else:
+            await events.append(
+                chat.id, "messages", ai.user_message(inbound.text).model_dump(mode="json")
+            )
         log.info("inbound %s -> %s chat %s", channel, "new" if created else "existing", chat.id)
         await _run_inbound_turn(chat.id)
 
     async def dedupe(self, key: str) -> bool:
         return await chats.dedupe(key)
+
+
+def _inbound_author(inbound: channels.Inbound) -> str:
+    return str(
+        inbound.state.get("user_id")
+        or inbound.state.get("sender")
+        or inbound.state.get("author")
+        or "unknown"
+    )
+
+
+async def _classify_chat(
+    chat_id: str, prompt: str, metadata: dict, candidates: list[models.Space]
+) -> models.Space:
+    await _emit(chat_id, channels.event(channels.protocol.SPACE_ASSIGNING))
+    selected = await classifier.classify(prompt, metadata, candidates)
+    assigned = await chats.assign_space(chat_id, selected.id)
+    if assigned is None:
+        raise fastapi.HTTPException(404, "unknown chat")
+    await _emit(
+        chat_id,
+        channels.event(
+            channels.protocol.SPACE_ASSIGNED,
+            space={"id": selected.id, "name": selected.name, "color": selected.color},
+        ),
+    )
+    return selected
 
 
 bot = channels.App(_StoreHub())
@@ -206,16 +266,29 @@ async def list_chats() -> list[models.Chat]:
 
 
 class CreateChatRequest(pydantic.BaseModel):
-    space_id: str | None = None
     title: str = "new chat"
 
 
 @app.post("/api/chats")
 async def create_chat(request: CreateChatRequest) -> models.Chat:
-    space_id = request.space_id or (await spaces.default()).id
-    if await spaces.get(space_id) is None:
+    found = await spaces.list_all()
+    if not found:
+        found = [await spaces.default()]
+    return await chats.create(None, request.title)
+
+
+class AssignChatSpaceRequest(pydantic.BaseModel):
+    space_id: str
+
+
+@app.patch("/api/chats/{chat_id}/space")
+async def assign_chat_space(chat_id: str, request: AssignChatSpaceRequest) -> models.Chat:
+    if await spaces.get(request.space_id) is None:
         raise fastapi.HTTPException(404, "unknown space")
-    return await chats.create(space_id, request.title)
+    if await chats.get(chat_id) is None:
+        raise fastapi.HTTPException(404, "unknown chat")
+    # TODO: add history for space changes
+    return await chats.assign_space(chat_id, request.space_id)
 
 
 @app.get("/api/chats/{chat_id}/messages")
@@ -279,6 +352,35 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                     ),
                 )
 
+            current = await chats.get(request.chat_id)
+            if current is None:
+                raise fastapi.HTTPException(404, "unknown chat")
+            if current.space_id is None:
+                first = next((message for message in stored if message.role == "user"), None)
+                if first is None:
+                    raise fastapi.HTTPException(409, "chat has no first prompt")
+                yield ai.ui.ai_sdk.outbound_stream.format_sse(
+                    ai.ui.ai_sdk.ui_events.UIDataEvent(
+                        data_type="space-assignment",
+                        data={"state": "assigning"},
+                    )
+                )
+                selected = await _classify_chat(
+                    request.chat_id,
+                    first.text,
+                    {"origin": "ui", "author": "current user"},
+                    await spaces.list_all() or [await spaces.default()],
+                )
+                yield ai.ui.ai_sdk.outbound_stream.format_sse(
+                    ai.ui.ai_sdk.ui_events.UIDataEvent(
+                        data_type="space-assignment",
+                        data={
+                            "state": "assigned",
+                            "space_id": selected.id,
+                            "space_name": selected.name,
+                        },
+                    )
+                )
             space = await _space_for_chat(request.chat_id)
             history = [ai.system_message(dispatcher.system_prompt(space)), *stored]
             record = await events.tail(request.chat_id, "worker") or {"id": request.chat_id}
@@ -315,6 +417,8 @@ async def _space_for_chat(chat_id: str) -> models.Space:
     chat = await chats.get(chat_id)
     if chat is None:
         raise fastapi.HTTPException(404, "unknown chat")
+    if chat.space_id is None:
+        raise fastapi.HTTPException(409, "chat has no space")
     space = await spaces.get(chat.space_id)
     if space is None:
         raise RuntimeError(f"chat {chat_id} belongs to unknown space {chat.space_id}")

@@ -26,6 +26,7 @@ import html
 import json
 import os
 import re
+import urllib.parse
 
 import httpx
 from vercel import connect
@@ -58,7 +59,13 @@ class SlackChannel:
         except connect.ConnectWebhookVerificationError:
             return channels.Ack(401, '{"error": "unverified webhook"}')
 
-        payload = json.loads(webhook.body)
+        if webhook.headers.get("content-type", "").startswith("application/x-www-form-urlencoded"):
+            form = urllib.parse.parse_qs(webhook.body.decode())
+            payload = json.loads((form.get("payload") or ["{}"])[0])
+        else:
+            payload = json.loads(webhook.body)
+        if payload.get("type") == "block_actions":
+            return channels.Ack(400, '{"error": "unsupported interaction"}')
         if payload.get("type") == "url_verification":
             return channels.Ack(200, str(payload.get("challenge", "")), "text/plain")
         retries = webhook.headers.get("x-slack-retry-num", "")
@@ -107,11 +114,22 @@ class SlackChannel:
         title_text = re.sub(rf"<@{re.escape(bot_user_id)}>", "", str(event.get("text", "")))
         title_text = html.unescape(" ".join(title_text.split())).strip()
         title = f"slack: {title_text[:53]}" if title_text else "slack: thread"
-        return channels.Inbound(token=f"{channel_id}:{thread_ts}", text=text, state=state, title=title)
+        return channels.Inbound(
+            token=f"{channel_id}:{thread_ts}",
+            text=text,
+            state=state,
+            title=title,
+        )
 
     async def on_event(self, event: channels.Event, state: dict) -> None:
         if event.type == channels.protocol.TURN_STARTED:
             await self._set_status(state, "is thinking...")
+        elif event.type == channels.protocol.SPACE_ASSIGNING:
+            await self._set_status(state, "assigning a space...")
+        elif event.type == channels.protocol.SPACE_ASSIGNED:
+            await self._set_status(
+                state, f"assigned {event.data.get('space', {}).get('name', 'space')}"
+            )
         elif event.type == channels.protocol.STATUS_UPDATED:
             await self._set_status(state, str(event.data.get("status", ""))[:STATUS_LIMIT])
         elif event.type == channels.protocol.MESSAGE_RECEIVED and event.data.get("origin") == "ui":

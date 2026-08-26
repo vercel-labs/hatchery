@@ -16,6 +16,16 @@ function renderParts(
   role: ChatUIMessage["role"],
 ): ReactNode {
   return parts.map((part, index) => {
+    if (part.type === "data-space-assignment") {
+      return (
+        <div key={index} className="px-1.5 text-sm text-muted-foreground">
+          {part.data.state === "assigning"
+            ? "Assigning a space…"
+            : `Assigned ${part.data.space_name ?? "space"}`}
+        </div>
+      );
+    }
+
     if (isToolUIPart(part)) {
       return (
         <div

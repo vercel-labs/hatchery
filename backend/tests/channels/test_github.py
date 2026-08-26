@@ -160,6 +160,8 @@ async def test_turn_started_reacts_eyes_with_connect_token(connect_stub):
     assert connect_stub == ["github/e2e-bot"]  # token minted from the connector
 
 
+
+
 async def test_reply_posts_issue_comment_with_marker():
     calls: list[httpx.Request] = []
     await api_channel(calls).on_event(channels.event(channels.protocol.MESSAGE_COMPLETED, message="ported!"), state())
