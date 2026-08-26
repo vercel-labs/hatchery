@@ -20,14 +20,7 @@ import type { ChatUIMessage } from "@/lib/messages";
 import { ChatView } from "@/components/chat";
 import { TerminalPane, type CoderTask } from "@/components/terminal-pane";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardFooter,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card } from "@/components/ui/card";
 import {
   Empty,
   EmptyDescription,
@@ -52,7 +45,6 @@ import {
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import {
   Sidebar,
   SidebarContent,
@@ -317,7 +309,7 @@ export default function Home() {
           <span className="min-w-0 flex-1 truncate text-sm font-medium">
             {selectedSpace?.name ?? selectedChat?.title ?? "hatchery"}
           </span>
-          {selectedChat && selectedChat.pending_space_ids.length === 0 && spaces && (
+          {selectedChat?.space_id && spaces && (
             <Select
               value={selectedChat.space_id}
               onValueChange={(spaceId) => {
@@ -340,15 +332,27 @@ export default function Home() {
             </Select>
           )}
         </header>
-        {selectedChat && selectedChat.space_id && !failed ? (
-          <LiveChat key={selectedChat.id} chat={selectedChat} />
-        ) : selectedChat && selectedChat.pending_space_ids.length > 0 && spaces ? (
-          <SpaceQuestionnaire
+        {selectedChat && !failed ? (
+          <LiveChat
+            key={selectedChat.id}
             chat={selectedChat}
-            spaces={spaces.filter((space) =>
-              selectedChat.pending_space_ids.includes(space.id),
-            )}
-            onSelect={(spaceId) => void assignChatSpace(selectedChat, spaceId)}
+            onSpaceAssigned={(spaceId) =>
+              setChats((current) => {
+                if (
+                  current?.find((chat) => chat.id === selectedChat.id)
+                    ?.space_id === spaceId
+                ) {
+                  return current;
+                }
+                return (
+                  current?.map((chat) =>
+                    chat.id === selectedChat.id
+                      ? { ...chat, space_id: spaceId }
+                      : chat,
+                  ) ?? null
+                );
+              })
+            }
           />
         ) : (
           <div className="flex-1 overflow-y-auto p-6 md:p-10">
@@ -359,15 +363,6 @@ export default function Home() {
                   <EmptyDescription>
                     Could not load spaces and chats. Locally: run `uv run
                     dev.py` in backend/ and reload.
-                  </EmptyDescription>
-                </EmptyHeader>
-              </Empty>
-            ) : selectedChat ? (
-              <Empty>
-                <EmptyHeader>
-                  <EmptyTitle>Assign a space</EmptyTitle>
-                  <EmptyDescription>
-                    Choose a space above before starting this chat.
                   </EmptyDescription>
                 </EmptyHeader>
               </Empty>
@@ -396,57 +391,6 @@ export default function Home() {
         )}
       </SidebarInset>
     </SidebarProvider>
-  );
-}
-
-function SpaceQuestionnaire({
-  chat,
-  spaces,
-  onSelect,
-}: {
-  chat: Chat;
-  spaces: Space[];
-  onSelect: (spaceId: string) => void;
-}) {
-  const [value, setValue] = useState("");
-
-  return (
-    <div className="flex flex-1 items-center justify-center p-6">
-      <Card className="w-full max-w-lg">
-        <CardHeader>
-          <CardTitle>Which space should handle this?</CardTitle>
-          <CardDescription>
-            Choose the context and repositories to use for this conversation.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <ToggleGroup
-            value={[value]}
-            onValueChange={(values) => setValue(values.at(-1) ?? "")}
-            orientation="vertical"
-            variant="outline"
-            className="w-full"
-          >
-            {spaces.map((space) => (
-              <ToggleGroupItem
-                key={space.id}
-                value={space.id}
-                aria-label={space.name}
-                className="w-full justify-start"
-              >
-                <Dot color={space.color} />
-                {space.name}
-              </ToggleGroupItem>
-            ))}
-          </ToggleGroup>
-        </CardContent>
-        <CardFooter className="justify-end">
-          <Button disabled={!value} onClick={() => onSelect(value)}>
-            Continue {chat.trigger.startsWith("ui") ? "chat" : "conversation"}
-          </Button>
-        </CardFooter>
-      </Card>
-    </div>
   );
 }
 
@@ -799,7 +743,13 @@ function EditableResource({
 // dispatcher launches work. Keyed by chat.id at the call site so useChat
 // remounts per chat. The stored transcript loads first: useChat only takes
 // initial messages at construction.
-function LiveChat({ chat }: { chat: Chat }) {
+function LiveChat({
+  chat,
+  onSpaceAssigned,
+}: {
+  chat: Chat;
+  onSpaceAssigned: (spaceId: string) => void;
+}) {
   const [initialMessages, setInitialMessages] = useState<
     ChatUIMessage[] | null
   >(null);
@@ -826,6 +776,19 @@ function LiveChat({ chat }: { chat: Chat }) {
 
   const onMessagesChange = useCallback(
     (messages: ChatUIMessage[]) => {
+      const assignment = messages
+        .flatMap((message) => message.parts)
+        .findLast(
+          (part) =>
+            part.type === "data-space-assignment" &&
+            part.data.state === "assigned",
+        );
+      if (
+        assignment?.type === "data-space-assignment" &&
+        assignment.data.space_id
+      ) {
+        onSpaceAssigned(assignment.data.space_id);
+      }
       const accepted = messages.some((message) =>
         message.parts.some(
           (part) =>
@@ -836,7 +799,7 @@ function LiveChat({ chat }: { chat: Chat }) {
       );
       if (accepted) loadTasks();
     },
-    [loadTasks],
+    [loadTasks, onSpaceAssigned],
   );
 
   if (initialMessages === null) return <div className="flex-1" />;

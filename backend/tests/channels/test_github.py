@@ -160,17 +160,6 @@ async def test_turn_started_reacts_eyes_with_connect_token(connect_stub):
     assert connect_stub == ["github/e2e-bot"]  # token minted from the connector
 
 
-async def test_space_questionnaire_posts_numbered_choices():
-    calls: list[httpx.Request] = []
-    event = channels.event(
-        channels.protocol.SPACE_SELECTION_REQUESTED,
-        spaces=[{"id": "spc_docs", "name": "docs"}, {"id": "spc_release", "name": "release"}],
-    )
-    await api_channel(calls).on_event(event, state())
-    body = json.loads(calls[0].read())["body"]
-    assert "1. docs" in body
-    assert "2. release" in body
-    assert "@e2e-bot 1" in body
 
 
 async def test_reply_posts_issue_comment_with_marker():

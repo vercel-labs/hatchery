@@ -50,8 +50,6 @@ class Inbound:
     state: dict  # channel state derived from this event
     title: str = ""  # chat title if this message opens a new chat
     repo: str | None = None  # "owner/repo" for project routing, github only
-    space_answer: str | None = None  # space id, number, or name when answering a questionnaire
-    selection_only: bool = False  # interactive answer with no user message for the model
 
 
 @dataclasses.dataclass

@@ -88,7 +88,9 @@ export function ChatView({
                 {status === "submitted" && (
                   <MessageScrollerItem messageId="thinking">
                     <div className="flex animate-pulse items-center gap-2 px-3 text-sm text-muted-foreground">
-                      Thinking…
+                      {initialMessages.length === 0
+                        ? "Assigning a space…"
+                        : "Thinking…"}
                     </div>
                   </MessageScrollerItem>
                 )}

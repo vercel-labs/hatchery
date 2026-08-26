@@ -142,18 +142,11 @@ class GitHubChannel:
             state=state,
             title=f"{owner}/{repo}#{number}",
             repo=f"{owner}/{repo}",
-            space_answer=message,
         )
 
     async def on_event(self, event: channels.Event, state: dict) -> None:
         if event.type == channels.protocol.TURN_STARTED:
             await self._react(state)
-        elif event.type == channels.protocol.SPACE_SELECTION_REQUESTED:
-            spaces = event.data.get("spaces") or []
-            lines = ["This repository belongs to multiple spaces. Which should handle this?"]
-            lines.extend(f"{index}. {space['name']}" for index, space in enumerate(spaces, 1))
-            lines.append(f"Reply `@{self._bot_name} 1` (or another number).")
-            await self._comment(state, "\n\n".join(lines))
         elif event.type == channels.protocol.MESSAGE_COMPLETED:
             await self._comment(state, str(event.data.get("message", "")))
         elif event.type == channels.protocol.TURN_FAILED:

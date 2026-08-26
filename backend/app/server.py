@@ -28,11 +28,13 @@ import pydantic
 import websockets
 
 import ai
+import ai.ui.ai_sdk.outbound_stream
+import ai.ui.ai_sdk.ui_events
 import channels
 import models
 import store
 import vercel.functions
-from agent import devbox, dispatcher
+from agent import classifier, devbox, dispatcher
 from channels import github, slack
 from store import activity, chats, events, spaces, tasks, turns
 
@@ -60,73 +62,80 @@ class _StoreHub:
     """
 
     async def dispatch(self, channel: str, inbound: channels.Inbound) -> None:
-        found = await spaces.list_all()
-        if inbound.repo:
-            candidates = [space for space in found if inbound.repo in space.repos]
-            if not candidates:
-                candidates = [await spaces.default()]
-        else:
-            candidates = found or [await spaces.default()]
-        selected = candidates[0] if len(candidates) == 1 else None
+        found = await spaces.list_all() or [await spaces.default()]
         title = inbound.title or inbound.text.strip().splitlines()[0][:80]
         chat, created = await chats.claim(
             f"{channel}:{inbound.token}",
             channel,
-            selected.id if selected else None,
+            None,
             title,
             inbound.state,
-            [space.id for space in candidates] if selected is None else [],
         )
         if created:
             await events.append(
                 chat.id, "messages", ai.user_message(inbound.text).model_dump(mode="json")
             )
+            await _classify_chat(
+                chat.id,
+                inbound.text,
+                {
+                    "origin": channel,
+                    "author": _inbound_author(inbound),
+                    "repo": inbound.repo,
+                    "channel_state": inbound.state,
+                },
+                found,
+            )
+            chat = await chats.get(chat.id) or chat
         elif chat.space_id is None:
-            selected = _selected_space(inbound.space_answer, chat.pending_space_ids, found)
-            if selected is None:
-                await _request_space(chat.id, chat.pending_space_ids)
-                return
-            chat = await chats.assign_space(chat.id, selected.id) or chat
-        elif inbound.selection_only:
-            return
+            await _classify_chat(
+                chat.id,
+                inbound.text,
+                {
+                    "origin": channel,
+                    "author": _inbound_author(inbound),
+                    "repo": inbound.repo,
+                    "channel_state": inbound.state,
+                },
+                found,
+            )
+            chat = await chats.get(chat.id) or chat
         else:
             await events.append(
                 chat.id, "messages", ai.user_message(inbound.text).model_dump(mode="json")
             )
         log.info("inbound %s -> %s chat %s", channel, "new" if created else "existing", chat.id)
-        if chat.space_id is None:
-            await _request_space(chat.id, chat.pending_space_ids)
-            return
         await _run_inbound_turn(chat.id)
 
     async def dedupe(self, key: str) -> bool:
         return await chats.dedupe(key)
 
 
-def _selected_space(
-    answer: str | None, candidate_ids: list[str], found: list[models.Space]
-) -> models.Space | None:
-    if not answer:
-        return None
-    candidates = [space for space in found if space.id in candidate_ids]
-    cleaned = answer.strip()
-    if cleaned.isdigit() and 1 <= int(cleaned) <= len(candidates):
-        return candidates[int(cleaned) - 1]
-    lowered = cleaned.casefold()
-    matches = [space for space in candidates if space.id == cleaned or space.name.casefold() == lowered]
-    return matches[0] if len(matches) == 1 else None
+def _inbound_author(inbound: channels.Inbound) -> str:
+    return str(
+        inbound.state.get("user_id")
+        or inbound.state.get("sender")
+        or inbound.state.get("author")
+        or "unknown"
+    )
 
 
-async def _request_space(chat_id: str, candidate_ids: list[str]) -> None:
-    found = await spaces.list_all()
-    options = [space for space in found if space.id in candidate_ids]
+async def _classify_chat(
+    chat_id: str, prompt: str, metadata: dict, candidates: list[models.Space]
+) -> models.Space:
+    await _emit(chat_id, channels.event(channels.protocol.SPACE_ASSIGNING))
+    selected = await classifier.classify(prompt, metadata, candidates)
+    assigned = await chats.assign_space(chat_id, selected.id)
+    if assigned is None:
+        raise fastapi.HTTPException(404, "unknown chat")
     await _emit(
         chat_id,
         channels.event(
-            channels.protocol.SPACE_SELECTION_REQUESTED,
-            spaces=[{"id": space.id, "name": space.name, "color": space.color} for space in options],
+            channels.protocol.SPACE_ASSIGNED,
+            space={"id": selected.id, "name": selected.name, "color": selected.color},
         ),
     )
+    return selected
 
 
 bot = channels.App(_StoreHub())
@@ -265,9 +274,7 @@ async def create_chat(request: CreateChatRequest) -> models.Chat:
     found = await spaces.list_all()
     if not found:
         found = [await spaces.default()]
-    return await chats.create(
-        None, request.title, pending_space_ids=[space.id for space in found]
-    )
+    return await chats.create(None, request.title)
 
 
 class AssignChatSpaceRequest(pydantic.BaseModel):
@@ -278,16 +285,10 @@ class AssignChatSpaceRequest(pydantic.BaseModel):
 async def assign_chat_space(chat_id: str, request: AssignChatSpaceRequest) -> models.Chat:
     if await spaces.get(request.space_id) is None:
         raise fastapi.HTTPException(404, "unknown space")
-    current = await chats.get(chat_id)
-    if current is None:
+    if await chats.get(chat_id) is None:
         raise fastapi.HTTPException(404, "unknown chat")
-    if current.pending_space_ids and request.space_id not in current.pending_space_ids:
-        raise fastapi.HTTPException(400, "space is not a candidate")
     # TODO: add history for space changes
-    chat = await chats.assign_space(chat_id, request.space_id)
-    if current.pending_space_ids and await events.read(chat_id, "messages"):
-        _spawn(_run_inbound_turn(chat_id))
-    return chat
+    return await chats.assign_space(chat_id, request.space_id)
 
 
 @app.get("/api/chats/{chat_id}/messages")
@@ -351,6 +352,35 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                     ),
                 )
 
+            current = await chats.get(request.chat_id)
+            if current is None:
+                raise fastapi.HTTPException(404, "unknown chat")
+            if current.space_id is None:
+                first = next((message for message in stored if message.role == "user"), None)
+                if first is None:
+                    raise fastapi.HTTPException(409, "chat has no first prompt")
+                yield ai.ui.ai_sdk.outbound_stream.format_sse(
+                    ai.ui.ai_sdk.ui_events.UIDataEvent(
+                        data_type="space-assignment",
+                        data={"state": "assigning"},
+                    )
+                )
+                selected = await _classify_chat(
+                    request.chat_id,
+                    first.text,
+                    {"origin": "ui", "author": "current user"},
+                    await spaces.list_all() or [await spaces.default()],
+                )
+                yield ai.ui.ai_sdk.outbound_stream.format_sse(
+                    ai.ui.ai_sdk.ui_events.UIDataEvent(
+                        data_type="space-assignment",
+                        data={
+                            "state": "assigned",
+                            "space_id": selected.id,
+                            "space_name": selected.name,
+                        },
+                    )
+                )
             space = await _space_for_chat(request.chat_id)
             history = [ai.system_message(dispatcher.system_prompt(space)), *stored]
             record = await events.tail(request.chat_id, "worker") or {"id": request.chat_id}

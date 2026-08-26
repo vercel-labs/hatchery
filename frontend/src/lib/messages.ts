@@ -14,7 +14,14 @@ export type HatcheryTools = {
 
 export type ChatUIMessage = UIMessage<
   { origin?: "slack" },
-  { reload: unknown },
+  {
+    reload: unknown;
+    "space-assignment": {
+      state: "assigning" | "assigned";
+      space_id?: string;
+      space_name?: string;
+    };
+  },
   HatcheryTools
 >;
 

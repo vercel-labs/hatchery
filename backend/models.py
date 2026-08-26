@@ -31,7 +31,6 @@ class Space(pydantic.BaseModel):
 class Chat(pydantic.BaseModel):
     id: str  # "chat_<hex>"
     space_id: str | None = None
-    pending_space_ids: list[str] = []
     title: str
     trigger: str  # what spawned it: "slack:<token>", "cron", "ui", ...
     status: str = "queued"  # queued | running | done | failed
