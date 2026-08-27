@@ -914,6 +914,44 @@ async def test_manual_devbox_suggestion_uses_chat_space(monkeypatch):
     assert seen == [space]
 
 
+async def test_manual_terminal_create_requires_ready_owned_devbox():
+    space = await server.spaces.default()
+    chat = await chats.create(space.id, "task")
+    workspace = await server.devboxes.create(chat.id, "main", [])
+
+    async with client() as c:
+        not_ready = await c.post(
+            f"/api/chats/{chat.id}/devboxes/{workspace['id']}/terminals"
+        )
+        unknown = await c.post(
+            f"/api/chats/other/devboxes/{workspace['id']}/terminals"
+        )
+
+    assert not_ready.status_code == 409
+    assert unknown.status_code == 404
+
+
+async def test_manual_terminal_create_is_listed_on_devbox():
+    space = await server.spaces.default()
+    chat = await chats.create(space.id, "task")
+    workspace = await server.devboxes.create(chat.id, "main", [])
+    workspace["state"] = "ready"
+    workspace["box"] = {"id": "box_1", "url": "https://box.example"}
+    await server.devboxes.save(workspace)
+
+    async with client() as c:
+        created = await c.post(
+            f"/api/chats/{chat.id}/devboxes/{workspace['id']}/terminals"
+        )
+        listed = await c.get(f"/api/chats/{chat.id}/devboxes")
+
+    assert created.status_code == 201
+    assert created.json()["title"] == "bash 1"
+    assert listed.json()[0]["terminals"] == [
+        {key: value for key, value in created.json().items() if key != "chat_id"}
+    ]
+
+
 async def test_chat_devboxes_group_subagents_without_secrets():
     space = await server.spaces.default()
     chat = await chats.create(space.id, "task")
@@ -931,6 +969,7 @@ async def test_chat_devboxes_group_subagents_without_secrets():
     [listed] = response.json()
     assert listed["id"] == workspace["id"]
     assert listed["repos"] == ["a/b"]
+    assert listed["terminals"] == []
     assert listed["subagents"] == [
         {
             "id": launch["id"],

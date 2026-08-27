@@ -159,6 +159,17 @@ async def test_send_task_prompt_does_not_retry(monkeypatch):
     assert json.loads(seen[0].content) == {"prompt": "use the existing helper"}
 
 
+def test_tty_url_starts_manual_session_without_resume_parameters(monkeypatch):
+    monkeypatch.setattr(devbox, "token", lambda: "token")
+    url = devbox.tty_url("https://box.example", None, "12", "80", "24")
+    parsed = urllib.parse.urlsplit(url)
+    assert urllib.parse.parse_qs(parsed.query) == {
+        "token": ["token"],
+        "cols": ["80"],
+        "rows": ["24"],
+    }
+
+
 def test_tty_url_targets_real_devbox_session(monkeypatch):
     monkeypatch.setattr(devbox, "token", lambda: "token")
     url = devbox.tty_url("https://box.example", "session_1", "12", "80", "24")

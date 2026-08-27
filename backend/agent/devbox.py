@@ -35,12 +35,17 @@ def webhook_url() -> str | None:
     return None
 
 
-def tty_url(box_url: str, session_id: str, offset: str, cols: str, rows: str) -> str:
+def tty_url(
+    box_url: str,
+    session_id: str | None,
+    offset: str,
+    cols: str,
+    rows: str,
+) -> str:
     query = urllib.parse.urlencode(
         {
             "token": token(),
-            "sessionId": session_id,
-            "offset": offset,
+            **({"sessionId": session_id, "offset": offset} if session_id else {}),
             "cols": cols,
             "rows": rows,
         }

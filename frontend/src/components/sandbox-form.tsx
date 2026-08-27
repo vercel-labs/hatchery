@@ -45,7 +45,7 @@ export function SandboxForm({
   chatId: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onCreated: () => void;
+  onCreated: (devboxId: string) => void;
 }) {
   const [launch, setLaunch] = useState(emptyLaunch);
   const [suggesting, setSuggesting] = useState(true);
@@ -80,8 +80,9 @@ export function SandboxForm({
         const body = await response.json().catch(() => null);
         throw new Error(body?.detail?.[0]?.msg ?? body?.detail ?? "Could not create sandbox");
       }
+      const devbox: { id: string } = await response.json();
       onOpenChange(false);
-      onCreated();
+      onCreated(devbox.id);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not create sandbox");
     } finally {

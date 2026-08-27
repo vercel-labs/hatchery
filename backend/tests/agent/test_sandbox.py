@@ -46,6 +46,18 @@ async def test_suggest_uses_luna_and_space_description(monkeypatch):
     assert "Run the docs site" in seen["messages"][1].parts[0].text
 
 
+async def test_prepare_creates_default_manual_terminal(monkeypatch):
+    created = []
+
+    async def create_terminal(chat_id, devbox_id, title):
+        created.append((chat_id, devbox_id, title))
+
+    monkeypatch.setattr(sandbox.terminals, "create", create_terminal)
+    record = await sandbox.prepare("chat_1", sandbox.Launch(title="manual"))
+
+    assert created == [("chat_1", record["id"], "bash")]
+
+
 def test_launch_validates_devbox_api_parameters():
     launch = sandbox.Launch(
         title="  manual  ",

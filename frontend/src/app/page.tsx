@@ -808,6 +808,7 @@ function LiveChat({
   const [messageRevision, setMessageRevision] = useState(0);
   const [showTerminal, setShowTerminal] = useState(false);
   const [showSandboxForm, setShowSandboxForm] = useState(false);
+  const [preferredDevboxId, setPreferredDevboxId] = useState<string>();
 
   const loadDevboxes = useCallback(() => {
     fetch(`${apiBase()}/api/chats/${chat.id}/devboxes`)
@@ -899,17 +900,21 @@ function LiveChat({
         )}
         {showTerminal && devboxes.length > 0 && (
           <TerminalPane
+            key={`${chat.id}:${preferredDevboxId ?? ""}`}
             chatId={chat.id}
             devboxes={devboxes}
+            preferredDevboxId={preferredDevboxId}
             onClose={() => setShowTerminal(false)}
             onCreateSandbox={() => setShowSandboxForm(true)}
+            onChanged={loadDevboxes}
           />
         )}
         <SandboxForm
           chatId={chat.id}
           open={showSandboxForm}
           onOpenChange={setShowSandboxForm}
-          onCreated={() => {
+          onCreated={(devboxId) => {
+            setPreferredDevboxId(devboxId);
             setShowTerminal(true);
             loadDevboxes();
           }}

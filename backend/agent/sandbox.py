@@ -8,7 +8,7 @@ import pydantic
 
 import models
 from agent import devbox
-from store import devboxes, events, workspaces
+from store import devboxes, events, terminals, workspaces
 
 
 class Launch(pydantic.BaseModel):
@@ -95,6 +95,7 @@ async def prepare(chat_id: str, launch: Launch) -> dict[str, typing.Any]:
         git_sha=launch.git_sha,
     )
     await devboxes.save(record)
+    await terminals.create(chat_id, record["id"], "bash")
     await events.append(chat_id, "ui", {"type": "devbox.changed"})
     return record
 
