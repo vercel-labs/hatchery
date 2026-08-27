@@ -1,6 +1,6 @@
 import pytest
 
-from store import activity, events, subagents
+from store import activity, subagents
 
 
 async def test_store_setup_preserves_existing_local_data(local_store):
@@ -74,7 +74,10 @@ async def test_activity_status_is_bounded_and_cursor_based():
     launch = await subagents.create("chat_1", "devbox_1", "inspect the bug", "secret")
     launch["task_id"] = "task_1"
     launch["state"] = "running"
-    launch["result"] = {"summary": "secret until complete", "diffs": [{"patch": "huge"}]}
+    launch["result"] = {
+        "summary": "secret until complete",
+        "diffs": [{"patch": "huge"}],
+    }
     await subagents.save(launch)
     await activity.append(
         launch["id"],
@@ -94,7 +97,11 @@ async def test_activity_status_is_bounded_and_cursor_based():
 
     first = await activity.status("chat_1", launch["id"], limit=1)
     assert first["events"] == [
-        {"cursor": 0, "kind": "assistant_event", "summary": "Read: backend/app/server.py"}
+        {
+            "cursor": 0,
+            "kind": "assistant_event",
+            "summary": "Read: backend/app/server.py",
+        }
     ]
     assert first["cursor"] == 0
     assert first["has_more"] is True
@@ -113,7 +120,9 @@ async def test_activity_status_returns_compact_terminal_result():
     launch["result"] = {
         "summary": "done",
         "diffs": [{"patch": "large and model-hostile"}],
-        "prs": [{"url": "https://github.com/a/b/pull/1", "number": 1, "branch": "ignored"}],
+        "prs": [
+            {"url": "https://github.com/a/b/pull/1", "number": 1, "branch": "ignored"}
+        ],
     }
     await subagents.save(launch)
 
@@ -124,24 +133,22 @@ async def test_activity_status_returns_compact_terminal_result():
     }
 
 
-async def test_supervision_claim_is_serialized_and_generation_safe():
+async def test_completion_claim_is_serialized_and_generation_safe():
     launch = await subagents.create("chat_1", "devbox_1", "task", "secret")
-    periodic = await subagents.claim_supervision(launch["id"], False)
-    assert periodic is not None
-    assert await subagents.claim_supervision(launch["id"], False) is None
+    assert await subagents.claim_completion(launch["id"]) is None
 
-    launch = await subagents.get(launch["id"])
-    assert launch is not None
     launch["state"] = "complete"
     await subagents.save(launch)
-    assert await subagents.claim_supervision(launch["id"], True) is None
+    claimed = await subagents.claim_completion(launch["id"])
+    assert claimed is not None
+    assert await subagents.claim_completion(launch["id"]) is None
 
-    finished = await subagents.finish_supervision(
-        launch["id"], periodic["supervision_generation"], completion_delivered=True
+    finished = await subagents.finish_completion(
+        launch["id"], claimed["completion_generation"], completion_delivered=True
     )
     assert finished is not None
     assert finished["completion_delivered"] is True
-    assert "supervision_lease_until" not in finished
+    assert "completion_lease_until" not in finished
 
 
 async def test_activity_status_rejects_another_chats_launch():

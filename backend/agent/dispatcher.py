@@ -4,10 +4,9 @@ import secrets
 import typing
 
 import ai
-from vercel import workflow
 
 import models
-from agent import devbox, sandbox, supervisor
+from agent import devbox, sandbox
 from store import activity, chats, devboxes, events, subagents
 
 SYSTEM = """\
@@ -32,10 +31,13 @@ concrete."""
 def system_prompt(space: models.Space) -> str:
     description = space.about.strip() or "No description provided."
     repositories = "\n".join(f"- {repo}" for repo in space.repos) or "- None"
-    resources = "\n".join(
-        f"- {resource.title} ({resource.kind}): {resource.url}"
-        for resource in space.resources
-    ) or "- None"
+    resources = (
+        "\n".join(
+            f"- {resource.title} ({resource.kind}): {resource.url}"
+            for resource in space.resources
+        )
+        or "- None"
+    )
     return f"""{SYSTEM}
 
 You are working in this space:
@@ -198,10 +200,6 @@ def agent_for(
 
         if on_task_created is not None:
             on_task_created(dict(launch), created)
-        if devbox.webhook_url() is not None:
-            run = await workflow.start(supervisor.supervise, launch["id"])
-            launch["supervision_run_id"] = run.run_id
-            await subagents.save(launch)
 
         yield {
             "subagent_id": launch["id"],
@@ -234,7 +232,9 @@ def agent_for(
             if launch is None:
                 raise ValueError("no subagent can accept a message")
         else:
-            launch = next((item for item in launches if item["id"] == subagent_id), None)
+            launch = next(
+                (item for item in launches if item["id"] == subagent_id), None
+            )
             if launch is None:
                 raise ValueError("subagent does not belong to this chat")
             if launch.get("state") == "errored":
@@ -263,10 +263,6 @@ def agent_for(
                 dict(launch),
                 {**delivered, "resumed": True, "was_terminal": True},
             )
-        if was_terminal and devbox.webhook_url() is not None:
-            run = await workflow.start(supervisor.supervise, launch["id"])
-            launch["supervision_run_id"] = run.run_id
-            await subagents.save(launch)
 
         return {
             "subagent_id": launch["id"],
@@ -280,11 +276,41 @@ def agent_for(
         after: int | None = None,
         limit: int = 20,
     ) -> dict[str, typing.Any]:
-        """Check a subagent's state and recent activity.
+        """Check a subagent's authoritative state and recent activity.
 
         Omit subagent_id to inspect this chat's newest subagent. Pass cursor as
         after on a later check to receive only newer activity.
         """
+        launches = await subagents.list_for_chat(chat["id"])
+        if subagent_id is None:
+            launch = launches[-1] if launches else None
+        else:
+            launch = next(
+                (item for item in launches if item["id"] == subagent_id), None
+            )
+            if launch is None:
+                raise ValueError("subagent does not belong to this chat")
+        if (
+            launch is not None
+            and launch.get("task_id")
+            and launch.get("state") not in devbox.TERMINAL_STATES
+        ):
+            remote = await devbox.get_task(launch["task_id"])
+            remote_state = str(remote.get("state", ""))
+            if not remote_state:
+                raise RuntimeError("DevBox task response is missing state")
+            result = (
+                remote.get("result") if isinstance(remote.get("result"), dict) else None
+            )
+            _, changed, previous = await subagents.apply_state(
+                launch["id"], remote_state, result, reconcile=True
+            )
+            if changed:
+                await activity.append(
+                    launch["id"],
+                    "state_transition",
+                    {"from": previous, "to": remote_state, "source": "status"},
+                )
         return await activity.status(chat["id"], subagent_id, after=after, limit=limit)
 
     return ai.Agent(
