@@ -99,6 +99,7 @@ async def create_box(
                 params={"teamId": _team()},
                 headers={"Authorization": f"Bearer {token()}"},
                 json={
+                    "projectId": os.environ["VERCEL_PROJECT_ID"],
                     "name": name,
                     "setup": True,
                     "sandbox": {**({"ports": ports} if ports else {})},
@@ -114,8 +115,22 @@ async def create_box(
             )
             if r.status_code < 500 or attempt == 2:
                 box = _checked(r).json()
-                return {"id": box["id"], "url": box["url"]}
+                break
             await asyncio.sleep(2)
+
+        for _ in range(300):
+            r = await http.get(
+                f"{API}/v1/devbox/{box['id']}",
+                headers={"Authorization": f"Bearer {token()}"},
+            )
+            current = _checked(r).json()
+            if current.get("state") == "READY" and current.get("sandboxUrl"):
+                return {"id": box["id"], "url": current["sandboxUrl"]}
+            if current.get("state") in ("ERROR", "DELETED", "STOPPED"):
+                reason = current.get("statusDetails") or current.get("errorMessage") or current["state"]
+                raise RuntimeError(f"devbox setup failed: {reason}")
+            await asyncio.sleep(2)
+        raise RuntimeError("devbox setup did not become ready within 10 minutes")
 
 
 async def create_taskset(title: str) -> str:
