@@ -18,7 +18,7 @@ import remarkGfm from "remark-gfm";
 import { apiBase, type Chat, type Resource, type Space } from "@/lib/api";
 import type { ChatUIMessage } from "@/lib/messages";
 import { ChatView } from "@/components/chat";
-import { TerminalPane, type CoderTask } from "@/components/terminal-pane";
+import { TerminalPane, type DevboxWorkspace } from "@/components/terminal-pane";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
@@ -785,7 +785,7 @@ function EditableResource({
   );
 }
 
-// The chat pane, with the coder terminal splitting in on the right once the
+// The chat pane, with the devbox pane splitting in on the right once the
 // dispatcher launches work. Keyed by chat.id at the call site so useChat
 // remounts per chat. The stored transcript loads first: useChat only takes
 // initial messages at construction.
@@ -801,18 +801,18 @@ function LiveChat({
   const [initialMessages, setInitialMessages] = useState<
     ChatUIMessage[] | null
   >(null);
-  const [tasks, setTasks] = useState<CoderTask[]>([]);
+  const [devboxes, setDevboxes] = useState<DevboxWorkspace[]>([]);
   const [messageRevision, setMessageRevision] = useState(0);
   const [showTerminal, setShowTerminal] = useState(false);
 
-  const loadTasks = useCallback(() => {
-    fetch(`${apiBase()}/api/chats/${chat.id}/tasks`)
+  const loadDevboxes = useCallback(() => {
+    fetch(`${apiBase()}/api/chats/${chat.id}/devboxes`)
       .then((res) => (res.ok ? res.json() : []))
-      .then((found: CoderTask[]) => {
-        setTasks(found);
+      .then((found: DevboxWorkspace[]) => {
+        setDevboxes(found);
         if (found.length) setShowTerminal(true);
       })
-      .catch(() => setTasks([]));
+      .catch(() => setDevboxes([]));
   }, [chat.id]);
 
   useEffect(() => {
@@ -820,8 +820,8 @@ function LiveChat({
       .then((res) => (res.ok ? res.json() : []))
       .then(setInitialMessages)
       .catch(() => setInitialMessages([]));
-    loadTasks();
-  }, [chat.id, loadTasks]);
+    loadDevboxes();
+  }, [chat.id, loadDevboxes]);
 
   useEffect(() => {
     const source = new EventSource(
@@ -832,13 +832,13 @@ function LiveChat({
       if (event.type === "chat.changed" || event.type === "task.changed") {
         onChatChanged();
       }
-      if (event.type === "task.changed") loadTasks();
+      if (event.type === "task.changed" || event.type === "devbox.changed") loadDevboxes();
       if (event.type === "messages.changed") {
         setMessageRevision((revision) => revision + 1);
       }
     };
     return () => source.close();
-  }, [chat.id, loadTasks, onChatChanged]);
+  }, [chat.id, loadDevboxes, onChatChanged]);
 
   const onMessagesChange = useCallback(
     (messages: ChatUIMessage[]) => {
@@ -858,14 +858,14 @@ function LiveChat({
       const accepted = messages.some((message) =>
         message.parts.some(
           (part) =>
-            part.type === "tool-launch_coder" &&
+            part.type === "tool-create_subagent" &&
             part.state === "output-available" &&
             !part.preliminary,
         ),
       );
-      if (accepted) loadTasks();
+      if (accepted) loadDevboxes();
     },
-    [loadTasks, onSpaceAssigned],
+    [loadDevboxes, onSpaceAssigned],
   );
 
   if (initialMessages === null) return <div className="flex-1" />;
@@ -881,7 +881,7 @@ function LiveChat({
             onMessagesChange={onMessagesChange}
           />
         </div>
-        {tasks.length > 0 && !showTerminal && (
+        {devboxes.length > 0 && !showTerminal && (
           <Button
             variant="outline"
             size="sm"
@@ -892,10 +892,10 @@ function LiveChat({
             terminal
           </Button>
         )}
-        {showTerminal && tasks.length > 0 && (
+        {showTerminal && devboxes.length > 0 && (
           <TerminalPane
             chatId={chat.id}
-            tasks={tasks}
+            devboxes={devboxes}
             onClose={() => setShowTerminal(false)}
           />
         )}

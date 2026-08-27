@@ -1,4 +1,4 @@
-"""Cross-instance lock for provisioning one shared devbox per chat."""
+"""Cross-instance lock for provisioning devbox creation per chat."""
 
 import asyncio
 import contextlib

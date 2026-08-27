@@ -6,7 +6,7 @@ import pytest
 import ai
 import channels
 from app import server
-from store import activity, chats, events, tasks
+from store import activity, chats, events, subagents
 
 
 def client() -> httpx.AsyncClient:
@@ -248,10 +248,10 @@ async def test_chat_messages_hide_slack_envelope_and_mark_origin():
 
 def test_dedupe_tool_history_repairs_old_ui_duplicates():
     call = ai.messages.ToolCallPart(
-        tool_call_id="call_1", tool_name="launch_coder", tool_args='{"task":"x"}'
+        tool_call_id="call_1", tool_name="create_subagent", tool_args='{"task":"x"}'
     )
     result = ai.messages.ToolResultPart(
-        tool_call_id="call_1", tool_name="launch_coder", result="accepted"
+        tool_call_id="call_1", tool_name="create_subagent", result="accepted"
     )
     history = [
         ai.assistant_message(call),
@@ -608,9 +608,9 @@ async def test_devbox_completion_is_persisted_and_delivered_once(monkeypatch):
     try:
         space = await server.spaces.default()
         chat, _ = await chats.claim("fake:thread", "fake", space.id, "task", {"thread": "1"})
-        launch = await tasks.create(chat.id, "fix it", "secret")
+        launch = await subagents.create(chat.id, "devbox_1", "fix it", "secret")
         launch["task_id"] = "task_1"
-        await tasks.save(launch)
+        await subagents.save(launch)
         body = {
             "kind": "taskStateChange",
             "taskStateChange": {
@@ -639,7 +639,7 @@ async def test_devbox_completion_is_persisted_and_delivered_once(monkeypatch):
         assert delivered.type == channels.protocol.MESSAGE_COMPLETED
         assert delivered.data["message"] == "The coder fixed it."
         assert state == {"thread": "1"}
-        record = await tasks.get(launch["id"])
+        record = await subagents.get(launch["id"])
         assert record is not None
         assert record["completion_delivered"] is True
         transcript = await events.read(chat.id, "messages")
@@ -661,7 +661,7 @@ async def test_devbox_completion_is_persisted_and_delivered_once(monkeypatch):
         assert seen_wake is not None
         assert seen_wake.role == "user"
         assert launch["id"] in seen_wake.text
-        assert "Call check_coder" in seen_wake.text
+        assert "Call check_subagent" in seen_wake.text
         recorded = await activity.status(chat.id, launch["id"])
         assert recorded["events"] == [
             {"cursor": 0, "kind": "state_transition", "summary": "state changed to complete"}
@@ -704,9 +704,9 @@ async def test_devbox_completion_schedules_retry_without_duplicate_transcript(mo
     try:
         space = await server.spaces.default()
         chat, _ = await chats.claim("flaky:thread", "flaky", space.id, "task", {})
-        launch = await tasks.create(chat.id, "do it", "secret")
+        launch = await subagents.create(chat.id, "devbox_1", "do it", "secret")
         launch["task_id"] = "task_1"
-        await tasks.save(launch)
+        await subagents.save(launch)
         body = {
             "kind": "taskStateChange",
             "taskStateChange": {
@@ -783,10 +783,10 @@ async def test_supervision_history_ends_with_unpersisted_user_wake(monkeypatch):
 async def test_periodic_supervision_can_stay_silent(monkeypatch):
     space = await server.spaces.default()
     chat, _ = await chats.claim("fake:quiet", "fake", space.id, "task", {})
-    launch = await tasks.create(chat.id, "do it", "secret")
+    launch = await subagents.create(chat.id, "devbox_1", "do it", "secret")
     launch["task_id"] = "task_1"
     launch["state"] = "running"
-    await tasks.save(launch)
+    await subagents.save(launch)
     await activity.append(
         launch["id"],
         "assistant_event",
@@ -801,12 +801,45 @@ async def test_periodic_supervision_can_stay_silent(monkeypatch):
 
     monkeypatch.setattr(server, "_run_supervision_turn", quiet_turn)
     assert await server.supervise_task(launch["id"], "periodic") is False
-    saved = await tasks.get(launch["id"])
+    saved = await subagents.get(launch["id"])
     assert saved is not None
     assert saved["supervision_cursor"] == 0
     assert saved["completion_delivered"] is False
     assert await events.read(chat.id, "messages") == []
     assert "after=-1" in seen[0]
+
+
+async def test_local_resumed_task_waits_for_new_run(monkeypatch):
+    launch = {
+        "id": "subagent_1",
+        "chat_id": "chat_1",
+        "devbox_id": "devbox_1",
+        "task_id": "task_1",
+    }
+    rows = iter(
+        [
+            {"task_id": "task_1", "state": "complete"},
+            {"task_id": "task_1", "state": "running"},
+        ]
+    )
+    watched = []
+
+    async def get_task(task_id):
+        return next(rows)
+
+    async def watch(chat_id, record, created):
+        watched.append((chat_id, record, created))
+
+    async def sleep(_):
+        pass
+
+    monkeypatch.setattr(server.devbox, "get_task", get_task)
+    monkeypatch.setattr(server, "_watch_local_task", watch)
+    monkeypatch.setattr(server.asyncio, "sleep", sleep)
+
+    await server._watch_local_resumed_task("chat_1", launch)
+
+    assert watched == [("chat_1", launch, {"task_id": "task_1", "state": "running"})]
 
 
 async def test_spawn_keeps_background_task_alive():
@@ -834,20 +867,27 @@ def test_spawn_uses_wait_until_on_vercel(monkeypatch):
     coro.close()
 
 
-async def test_chat_tasks_lists_launches_without_secrets():
+async def test_chat_devboxes_group_subagents_without_secrets():
     space = await server.spaces.default()
     chat = await chats.create(space.id, "task")
-    launch = await tasks.create(chat.id, "inspect the bug", "secret")
+    workspace = await server.devboxes.create(chat.id, "main", ["a/b"])
+    workspace["state"] = "ready"
+    await server.devboxes.save(workspace)
+    launch = await subagents.create(chat.id, workspace["id"], "inspect the bug", "secret")
     launch["task_id"] = "task_1"
     launch["session_id"] = "session_1"
-    await tasks.save(launch)
+    await subagents.save(launch)
 
     async with client() as c:
-        response = await c.get(f"/api/chats/{chat.id}/tasks")
+        response = await c.get(f"/api/chats/{chat.id}/devboxes")
     assert response.status_code == 200
-    assert response.json() == [
+    [listed] = response.json()
+    assert listed["id"] == workspace["id"]
+    assert listed["repos"] == ["a/b"]
+    assert listed["subagents"] == [
         {
             "id": launch["id"],
+            "devbox_id": workspace["id"],
             "title": "inspect the bug",
             "task_id": "task_1",
             "session_id": "session_1",
@@ -855,9 +895,10 @@ async def test_chat_tasks_lists_launches_without_secrets():
             "created_at": launch["created_at"],
         }
     ]
+    assert "webhook_secret" not in listed["subagents"][0]
 
 
-async def test_tty_accepts_before_reporting_session_not_ready():
+async def test_task_tty_accepts_before_reporting_unknown_subagent():
     class FakeWebSocket:
         def __init__(self):
             self.accepted = False
@@ -871,16 +912,16 @@ async def test_tty_accepts_before_reporting_session_not_ready():
             self.closed = (code, reason)
 
     ws = FakeWebSocket()
-    await server.tty(ws, "chat_without_worker")
-    assert ws.closed == (4404, "no coder session for this chat")
+    await server.task_tty(ws, "chat_without_devbox", "subagent_missing")
+    assert ws.closed == (4404, "unknown subagent")
 
 
 async def test_devbox_assistant_event_is_stored_once():
     space = await server.spaces.default()
     chat = await chats.create(space.id, "task")
-    launch = await tasks.create(chat.id, "do it", "secret")
+    launch = await subagents.create(chat.id, "devbox_1", "do it", "secret")
     launch["task_id"] = "task_1"
-    await tasks.save(launch)
+    await subagents.save(launch)
     body = {
         "kind": "assistantEvent",
         "assistantEvent": {
@@ -908,7 +949,7 @@ async def test_devbox_assistant_event_is_stored_once():
 async def test_devbox_completion_claims_task_id_from_early_callback():
     space = await server.spaces.default()
     chat = await chats.create(space.id, "task")
-    launch = await tasks.create(chat.id, "do it", "secret")
+    launch = await subagents.create(chat.id, "devbox_1", "do it", "secret")
     body = {
         "kind": "taskStateChange",
         "taskStateChange": {"taskId": "task_early", "state": "running", "seq": 1},
@@ -918,7 +959,7 @@ async def test_devbox_completion_claims_task_id_from_early_callback():
             "/channels/v1/devbox", params={"launch_id": launch["id"], "secret": "secret"}, json=body
         )
     assert response.status_code == 200
-    record = await tasks.get(launch["id"])
+    record = await subagents.get(launch["id"])
     assert record is not None
     assert record["task_id"] == "task_early"
     assert record["state"] == "running"
@@ -928,12 +969,12 @@ async def test_concurrent_task_callbacks_keep_separate_state(monkeypatch):
     monkeypatch.setattr(server.vercel.functions, "wait_until", lambda coro: coro.close())
     space = await server.spaces.default()
     chat = await chats.create(space.id, "task")
-    first = await tasks.create(chat.id, "first", "one")
+    first = await subagents.create(chat.id, "devbox_1", "first", "one")
     first["task_id"] = "task_1"
-    await tasks.save(first)
-    second = await tasks.create(chat.id, "second", "two")
+    await subagents.save(first)
+    second = await subagents.create(chat.id, "devbox_1", "second", "two")
     second["task_id"] = "task_2"
-    await tasks.save(second)
+    await subagents.save(second)
 
     async with client() as c:
         response = await c.post(
@@ -945,8 +986,8 @@ async def test_concurrent_task_callbacks_keep_separate_state(monkeypatch):
             },
         )
     assert response.status_code == 200
-    saved_first = await tasks.get(first["id"])
-    saved_second = await tasks.get(second["id"])
+    saved_first = await subagents.get(first["id"])
+    saved_second = await subagents.get(second["id"])
     assert saved_first is not None and saved_first["state"] == "complete"
     assert saved_second is not None and saved_second["state"] == "creating"
 
@@ -954,9 +995,9 @@ async def test_concurrent_task_callbacks_keep_separate_state(monkeypatch):
 async def test_devbox_completion_rejects_wrong_secret():
     space = await server.spaces.default()
     chat = await chats.create(space.id, "task")
-    launch = await tasks.create(chat.id, "do it", "right")
+    launch = await subagents.create(chat.id, "devbox_1", "do it", "right")
     launch["task_id"] = "task_1"
-    await tasks.save(launch)
+    await subagents.save(launch)
     body = {
         "kind": "taskStateChange",
         "taskStateChange": {"taskId": "task_1", "state": "complete", "seq": 1},

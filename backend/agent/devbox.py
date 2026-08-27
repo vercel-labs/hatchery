@@ -152,6 +152,21 @@ async def create_task(
             await asyncio.sleep(3)
 
 
+async def send_task_prompt(task_id: str, prompt: str) -> dict:
+    """Deliver more input to an existing task without retrying.
+
+    The endpoint may wake a sleeping devbox and can take several minutes. A
+    failed request is not retried because accepted prompts are not idempotent.
+    """
+    async with httpx.AsyncClient(timeout=300) as http:
+        r = await http.post(
+            f"{API}/v1/tasks/{task_id}/prompt",
+            headers={"Authorization": f"Bearer {token()}"},
+            json={"prompt": prompt},
+        )
+        return _checked(r).json()
+
+
 async def get_task(task_id: str) -> dict:
     """The durable task row (state + result), box-independent.
 
@@ -175,7 +190,7 @@ async def watch(box_url: str, task_id: str, quiet_after: float = 45):
     stateTransition is the final frame, after which the socket closes.
 
     Yields None after `quiet_after` seconds without a frame so the caller
-    can emit a keepalive — an SSE that goes silent for minutes (coder deep
+    can emit a keepalive — an SSE that goes silent for minutes (subagent deep
     in a long step) gets severed by intermediate proxies.
     """
     url = box_url.replace("https://", "wss://") + f"/tasks/{task_id}/watch"

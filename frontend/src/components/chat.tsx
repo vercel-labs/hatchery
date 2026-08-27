@@ -84,7 +84,7 @@ export function ChatView({
             <EmptyHeader>
               <EmptyTitle>Talk to the dispatcher</EmptyTitle>
               <EmptyDescription>
-                Describe the work; it hands it to a coder you can watch.
+                Describe the work; it hands it to a subagent you can watch.
               </EmptyDescription>
             </EmptyHeader>
           </Empty>

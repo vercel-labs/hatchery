@@ -1,4 +1,4 @@
-"""Durable supervision schedule for coder tasks."""
+"""Durable supervision schedule for subagents."""
 
 from vercel import workflow
 

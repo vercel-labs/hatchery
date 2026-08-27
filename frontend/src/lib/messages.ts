@@ -4,10 +4,30 @@ import type { UIMessage } from "ai";
 // (InferUITools needs TypeScript tool definitions). Unknown tools still
 // render through the generic ToolPart fallback.
 export type HatcheryTools = {
-  launch_coder: {
-    input: { task?: string };
+  create_devbox: {
+    input: { repos?: string[]; title?: string };
     output:
-      | { launch_id: string; task_id: string; state: string }
+      | { devbox_id: string; title: string; repos: string[]; state: string }
+      | string;
+  };
+  list_devboxes: {
+    input: Record<string, never>;
+    output: Array<{
+      id: string;
+      title: string;
+      repos: string[];
+      state: string;
+    }>;
+  };
+  create_subagent: {
+    input: { devbox_id?: string; task?: string; model?: string };
+    output:
+      | {
+          subagent_id: string;
+          devbox_id: string;
+          task_id: string;
+          state: string;
+        }
       | string;
   };
 };

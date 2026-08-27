@@ -1,11 +1,4 @@
-"""The dispatcher: the durable-side agent the user talks to.
-
-It never codes inline. Its one tool hands work to the chat's devbox and
-streams the task's state changes back (pushed over the watch websocket, no
-polling), so the whole coding session happens inside a single tool call the
-UI renders live — with the real claude code TUI attached in the terminal
-pane next to it.
-"""
+"""The dispatcher: coordinates chat-owned devboxes and their subagents."""
 
 import secrets
 import typing
@@ -15,23 +8,25 @@ from vercel import workflow
 
 import models
 from agent import devbox, supervisor
-from store import activity, chats, events, tasks, workspaces
+from store import activity, chats, devboxes, events, subagents, workspaces
 
 SYSTEM = """\
 You are hatchery's dispatcher. You coordinate coding work; you never write
-code yourself. When the user wants something built, investigated, or fixed,
-compose a clear self-contained task and call launch_coder. If the space
-description has a "Recommended devbox setup" section, pass its shell commands
-verbatim as setup_script when they apply; otherwise omit setup_script. You may
-also compose a freeform setup script when the task needs tools not present in a
-fresh devbox. While it runs the user watches the coder's terminal live in the
-next pane, so don't narrate its steps. A deployed launch only means the task was
-accepted: reply only that
-work has started and stop. Use check_coder when the user asks about progress or
-you are woken because coder state changed. Its result is authoritative. Never
-launch another coder merely to check an existing one. If the coder fails, say
-so plainly and stop — never write the code yourself or invent what the output
-would have looked like. Be terse and concrete."""
+code yourself. Devboxes are durable sandboxes owned by this chat. Reuse an
+existing devbox whenever it has the needed repositories and context. Call
+list_devboxes before creating one unless the user explicitly asks for a fresh
+sandbox. If the space description has a "Recommended devbox setup" section,
+pass its shell commands verbatim as setup_script when they apply; otherwise
+omit setup_script. You may compose a freeform setup script when the sandbox
+needs other tools. Use create_devbox to create a sandbox, then create_subagent
+with its ID to start coding or investigation. A devbox can host many subagents.
+For a revision, follow-up, or answer to an existing subagent, use
+message_subagent instead of creating another one. While a subagent runs the user
+watches its terminal live, so don't narrate its steps. An accepted launch or
+message only means work has started: say so and stop. Use check_subagent for
+progress or when woken by state changes. Never create another subagent merely to
+check or continue one. If it fails, say so plainly and stop. Be terse and
+concrete."""
 
 
 def system_prompt(space: models.Space) -> str:
@@ -56,6 +51,7 @@ Available repositories:
 Attached resources:
 {resources}"""
 
+
 def model() -> ai.Model:
     return ai.get_model("openai/gpt-5.6-sol")
 
@@ -64,122 +60,234 @@ def agent_for(
     chat: dict,
     on_task_created: typing.Callable[[dict, dict], None] | None = None,
 ) -> ai.Agent:
-    """Build the dispatcher agent bound to one chat's worker state.
-
-    `chat` is the tail of the chat's (chat_id, "worker") stream. It owns the
-    shared box and taskset; each launch stores its own task and PTY session.
-    """
+    """Build the dispatcher tools scoped to one chat."""
 
     @ai.tool
-    async def launch_coder(
-        task: str,
+    async def create_devbox(
         repos: list[str] | None = None,
         setup_script: str | None = None,
-        model: str = devbox.DEFAULT_MODEL,
+        title: str = "devbox",
     ) -> ai.StreamingStatusTool[typing.Any]:
-        """Hand a coding task to this chat's devbox.
+        """Create a durable sandbox owned by this chat.
 
-        The task should be self-contained: what to build or do, and what
-        "done" looks like. Select only the owner/repo repositories the coder
-        needs. Omit repos for an empty sandbox. setup_script is freeform shell run
-        once, after cloning and before the coder starts; use it for required tools
-        and copy applicable recommended setup from the space description verbatim.
-        Override model with a Vercel AI Gateway model ID when needed. It returns as
-        soon as the task is accepted; completion arrives in a later turn.
+        Select only the owner/repo repositories needed in the sandbox. Omit
+        repos for an empty sandbox. setup_script is freeform shell run once,
+        after cloning and before any subagent starts. Copy applicable recommended
+        setup from the space description verbatim. Prefer reusing a suitable
+        listed devbox.
         """
         desired_repos = list(repos or [])
         desired_setup_script = setup_script.strip() if setup_script else None
         async with workspaces.provision(chat["id"]):
-            current = await events.tail(chat["id"], "worker") or chat
-            chat.update(current)
-            launches = await tasks.list_for_chat(chat["id"])
-            if any(launch.get("state") not in devbox.TERMINAL_STATES for launch in launches):
-                raise RuntimeError("a coder is already running for this chat")
-
+            record = await devboxes.create(chat["id"], title, desired_repos)
+            yield "creating devbox (cold boot, about a minute)…"
             try:
-                if not chat.get("set_id"):
-                    chat["set_id"] = await devbox.create_taskset(f"hatchery {chat['id']}")
-                    await events.append(chat["id"], "worker", dict(chat))
-                if (
-                    not chat.get("box")
-                    or chat.get("repos") != desired_repos
-                    or chat.get("setup_script") != desired_setup_script
-                ):
-                    yield "creating devbox (cold boot, about a minute)…"
-                    chat["box"] = await devbox.create_box(
-                        f"hatchery-{chat['id']}", desired_repos, desired_setup_script
-                    )
-                    chat["repos"] = desired_repos
-                    chat["setup_script"] = desired_setup_script
-                    chat["workspace_version"] = 1
-                await events.append(chat["id"], "worker", dict(chat))
+                record["set_id"] = await devbox.create_taskset(
+                    f"hatchery {chat['id']} / {record['title']}"
+                )
+                record["box"] = await devbox.create_box(
+                    f"hatchery-{chat['id']}-{record['id'][-6:]}",
+                    desired_repos,
+                    desired_setup_script,
+                )
+                record["setup_script"] = desired_setup_script
+                record["state"] = "ready"
             except Exception as error:
-                await chats.finish(chat["id"], "failed", str(error))
-                await events.append(chat["id"], "ui", {"type": "chat.changed"})
+                record["state"] = "errored"
+                record["error"] = str(error)
+                await devboxes.save(record)
+                await events.append(chat["id"], "ui", {"type": "devbox.changed"})
                 raise
+            await devboxes.save(record)
+            await events.append(chat["id"], "ui", {"type": "devbox.changed"})
+        yield {
+            "devbox_id": record["id"],
+            "title": record["title"],
+            "repos": record["repos"],
+            "state": record["state"],
+        }
 
-            yield "dispatching task…"
-            launch = await tasks.create(chat["id"], task, secrets.token_urlsafe(32))
-            launch["model"] = model
-            await tasks.save(launch)
-            await chats.finish(chat["id"], "running")
-            await events.append(chat["id"], "ui", {"type": "chat.changed"})
-            try:
-                created = await devbox.create_task(
-                    chat["box"]["id"],
-                    chat["set_id"],
-                    task,
-                    launch["webhook_secret"],
-                    launch["id"],
-                    model,
-                )
-            except Exception as error:
-                launch["state"] = "errored"
-                launch["result"] = {"error": str(error)}
-                await tasks.save(launch)
+    @ai.tool
+    async def list_devboxes() -> list[dict[str, typing.Any]]:
+        """List this chat's reusable devboxes, oldest first."""
+        return [
+            {
+                key: record.get(key)
+                for key in ("id", "title", "repos", "state", "error", "created_at")
+            }
+            for record in await devboxes.list_for_chat(chat["id"])
+        ]
+
+    @ai.tool
+    async def create_subagent(
+        devbox_id: str,
+        task: str,
+        model: str = devbox.DEFAULT_MODEL,
+    ) -> ai.StreamingStatusTool[typing.Any]:
+        """Start a coding subagent inside one of this chat's devboxes.
+
+        The task should be self-contained and say what done looks like. Multiple
+        subagents may share a devbox, but avoid concurrent edits unless intended.
+        """
+        workspace = await devboxes.get(devbox_id)
+        if workspace is None or workspace.get("chat_id") != chat["id"]:
+            raise ValueError("devbox does not belong to this chat")
+        if workspace.get("state") != "ready" or not workspace.get("box"):
+            raise RuntimeError("devbox is not ready")
+
+        yield "dispatching subagent…"
+        launch = await subagents.create(
+            chat["id"], workspace["id"], task, secrets.token_urlsafe(32)
+        )
+        launch["model"] = model
+        await subagents.save(launch)
+        await chats.finish(chat["id"], "running")
+        await events.append(chat["id"], "ui", {"type": "chat.changed"})
+        try:
+            created = await devbox.create_task(
+                workspace["box"]["id"],
+                workspace["set_id"],
+                task,
+                launch["webhook_secret"],
+                launch["id"],
+                model,
+            )
+        except Exception as error:
+            launch["state"] = "errored"
+            launch["result"] = {"error": str(error)}
+            await subagents.save(launch)
+            await activity.append(
+                launch["id"],
+                "state_transition",
+                {"from": "creating", "to": "errored", "error": str(error)},
+            )
+            siblings = await subagents.list_for_chat(chat["id"])
+            if not any(
+                sibling["id"] != launch["id"]
+                and sibling.get("state") not in devbox.TERMINAL_STATES
+                for sibling in siblings
+            ):
                 await chats.finish(chat["id"], "failed", str(error))
-                await events.append(chat["id"], "ui", {"type": "chat.changed"})
-                await activity.append(
-                    launch["id"],
-                    "state_transition",
-                    {"from": "creating", "to": "errored", "error": str(error)},
-                )
-                raise
-            launch = await tasks.finish_create(launch["id"], created)
             await events.append(
                 chat["id"],
                 "ui",
                 {
                     "type": "task.changed",
                     "launch_id": launch["id"],
-                    "state": launch["state"],
+                    "devbox_id": workspace["id"],
+                    "state": "errored",
                 },
             )
+            raise
+        launch = await subagents.finish_create(launch["id"], created)
+        await events.append(
+            chat["id"],
+            "ui",
+            {
+                "type": "task.changed",
+                "launch_id": launch["id"],
+                "devbox_id": workspace["id"],
+                "state": launch["state"],
+            },
+        )
 
         if on_task_created is not None:
             on_task_created(dict(launch), created)
         if devbox.webhook_url() is not None:
             run = await workflow.start(supervisor.supervise, launch["id"])
             launch["supervision_run_id"] = run.run_id
-            await tasks.save(launch)
+            await subagents.save(launch)
 
         yield {
-            "launch_id": launch["id"],
+            "subagent_id": launch["id"],
+            "devbox_id": workspace["id"],
             "task_id": created["task_id"],
             "state": created["state"],
         }
 
     @ai.tool
-    async def check_coder(
-        launch_id: str | None = None,
+    async def message_subagent(
+        message: str,
+        subagent_id: str | None = None,
+    ) -> dict[str, typing.Any]:
+        """Send a revision, follow-up, or answer to an existing subagent.
+
+        Omit subagent_id to message this chat's newest subagent that has not
+        errored. Completed subagents can be resumed. The same task, model,
+        devbox, and conversation are preserved.
+        """
+        launches = await subagents.list_for_chat(chat["id"])
+        if subagent_id is None:
+            launch = next(
+                (
+                    item
+                    for item in reversed(launches)
+                    if item.get("state") != "errored" and item.get("task_id")
+                ),
+                None,
+            )
+            if launch is None:
+                raise ValueError("no subagent can accept a message")
+        else:
+            launch = next((item for item in launches if item["id"] == subagent_id), None)
+            if launch is None:
+                raise ValueError("subagent does not belong to this chat")
+            if launch.get("state") == "errored":
+                raise RuntimeError("errored subagent cannot accept messages")
+            if not launch.get("task_id"):
+                raise RuntimeError("subagent task is not ready")
+
+        was_terminal = launch.get("state") in devbox.TERMINAL_STATES
+        delivered = await devbox.send_task_prompt(launch["task_id"], message)
+        launch = await subagents.resume(launch["id"])
+        await chats.finish(chat["id"], "running")
+        await events.append(chat["id"], "ui", {"type": "chat.changed"})
+        await events.append(
+            chat["id"],
+            "ui",
+            {
+                "type": "task.changed",
+                "launch_id": launch["id"],
+                "devbox_id": launch["devbox_id"],
+                "state": "running",
+            },
+        )
+
+        if was_terminal and on_task_created is not None:
+            on_task_created(
+                dict(launch),
+                {**delivered, "resumed": True, "was_terminal": True},
+            )
+        if was_terminal and devbox.webhook_url() is not None:
+            run = await workflow.start(supervisor.supervise, launch["id"])
+            launch["supervision_run_id"] = run.run_id
+            await subagents.save(launch)
+
+        return {
+            "subagent_id": launch["id"],
+            "task_id": launch["task_id"],
+            "state": "running",
+        }
+
+    @ai.tool
+    async def check_subagent(
+        subagent_id: str | None = None,
         after: int | None = None,
         limit: int = 20,
     ) -> dict[str, typing.Any]:
-        """Check a coder's current state and recent activity.
+        """Check a subagent's state and recent activity.
 
-        Omit launch_id to inspect this chat's newest coder. Pass the returned
-        cursor as after on a later check to receive only newer activity.
+        Omit subagent_id to inspect this chat's newest subagent. Pass cursor as
+        after on a later check to receive only newer activity.
         """
-        return await activity.status(chat["id"], launch_id, after=after, limit=limit)
+        return await activity.status(chat["id"], subagent_id, after=after, limit=limit)
 
-    return ai.Agent(tools=[launch_coder, check_coder])
+    return ai.Agent(
+        tools=[
+            create_devbox,
+            list_devboxes,
+            create_subagent,
+            message_subagent,
+            check_subagent,
+        ]
+    )

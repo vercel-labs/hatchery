@@ -6,8 +6,9 @@ streams whose tail wins. One stream per chat per concern:
 - (chat_id, "messages"): the transcript, one model message per event. The UI
   loads it on open, turns derive their history from it, channel inbound
   appends to it.
-- (chat_id, "worker"): snapshots of the chat's shared devbox record (box and
-  taskset ids). Individual launches and PTY sessions live in store.tasks.
+- (chat_id, "ui"): lightweight change notifications consumed by the UI.
+
+Devboxes and subagent launches have first-class stores.
 
 Postgres when DATABASE_URL is set, otherwise one jsonl file per stream under
 HATCHERY_DATA_DIR. The jsonl locks are threading.Locks on purpose: a workflow
