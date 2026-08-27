@@ -20,6 +20,7 @@ import hmac
 import html
 import json
 import logging
+import os
 import re
 
 import fastapi
@@ -44,6 +45,9 @@ _background: set[asyncio.Task] = set()
 
 
 def _spawn(coro) -> None:
+    if os.environ.get("VERCEL"):
+        vercel.functions.wait_until(coro)
+        return
     task = asyncio.create_task(coro)
     _background.add(task)
 

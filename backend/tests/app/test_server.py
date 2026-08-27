@@ -819,6 +819,21 @@ async def test_spawn_keeps_background_task_alive():
     await asyncio.wait_for(ran.wait(), 1)
 
 
+def test_spawn_uses_wait_until_on_vercel(monkeypatch):
+    pending = []
+    monkeypatch.setenv("VERCEL", "1")
+    monkeypatch.setattr(server.vercel.functions, "wait_until", pending.append)
+
+    async def work():
+        pass
+
+    coro = work()
+    server._spawn(coro)
+
+    assert pending == [coro]
+    coro.close()
+
+
 async def test_chat_tasks_lists_launches_without_secrets():
     space = await server.spaces.default()
     chat = await chats.create(space.id, "task")
