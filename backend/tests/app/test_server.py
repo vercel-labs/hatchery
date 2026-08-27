@@ -1,9 +1,9 @@
 import asyncio
 
+import ai
 import httpx
 import pytest
 
-import ai
 import channels
 from app import server
 from store import activity, chats, events, subagents, terminals
@@ -61,7 +61,10 @@ async def test_space_update():
     async with client() as c:
         response = await c.patch(
             "/api/spaces/spc_hatchery",
-            json={"name": "  Hatchery docs  ", "about": "# Overview\n\nEdited directly."},
+            json={
+                "name": "  Hatchery docs  ",
+                "about": "# Overview\n\nEdited directly.",
+            },
         )
         listed = (await c.get("/api/spaces")).json()
 
@@ -69,7 +72,9 @@ async def test_space_update():
     assert response.json()["name"] == "Hatchery docs"
     assert response.json()["about"] == "# Overview\n\nEdited directly."
     assert response.json()["repos"] == original.repos
-    assert response.json()["resources"] == [resource.model_dump() for resource in original.resources]
+    assert response.json()["resources"] == [
+        resource.model_dump() for resource in original.resources
+    ]
     assert response.json()["color"] == original.color
     assert response.json()["created_at"] == original.created_at
     assert listed[0] == response.json()
@@ -235,7 +240,9 @@ async def test_chat_messages_hide_slack_envelope_and_mark_origin():
         '<slack_message channel="C1" thread_ts="1.0" ts="1.1" sender="U1" team="T1">\n'
         "hello &lt;-&gt; slack\n</slack_message>"
     )
-    await events.append("chat_x", "messages", ai.user_message(text).model_dump(mode="json"))
+    await events.append(
+        "chat_x", "messages", ai.user_message(text).model_dump(mode="json")
+    )
 
     async with client() as c:
         [message] = (await c.get("/api/chats/chat_x/messages")).json()
@@ -290,9 +297,16 @@ async def test_hub_lands_inbound_in_one_chat(monkeypatch):
     hub = server.bot.hub
     await hub.dispatch(
         "slack",
-        channels.Inbound(token="C1:1.0", text="from slack", state={"channel_id": "C1"}, title="a thread"),
+        channels.Inbound(
+            token="C1:1.0",
+            text="from slack",
+            state={"channel_id": "C1"},
+            title="a thread",
+        ),
     )
-    await hub.dispatch("slack", channels.Inbound(token="C1:1.0", text="again", state={}))
+    await hub.dispatch(
+        "slack", channels.Inbound(token="C1:1.0", text="again", state={})
+    )
     [chat] = await chats.list_all()
     assert chat.trigger == "slack:C1:1.0"
     assert chat.title == "a thread"
@@ -506,7 +520,9 @@ async def test_first_ui_prompt_classifies_before_dispatcher(monkeypatch):
     assert (await chats.get(chat.id)).space_id == docs.id
     assert '"state": "assigning"' in response.text
     assert '"state": "assigned"' in response.text
-    assert response.text.index('"state": "assigned"') < response.text.index('"type":"finish"')
+    assert response.text.index('"state": "assigned"') < response.text.index(
+        '"type":"finish"'
+    )
     assert seen["history"][0].role == "system"
     assert seen["history"][1].text == "fix the docs"
 
@@ -547,7 +563,9 @@ async def test_ui_turn_is_mirrored_to_bound_channel(monkeypatch):
     monkeypatch.setattr(server.ai.ui.ai_sdk, "to_sse", fake_sse)
     try:
         space = await server.spaces.default()
-        chat, _ = await chats.claim("fake:thread", "fake", space.id, "thread", {"thread": "1"})
+        chat, _ = await chats.claim(
+            "fake:thread", "fake", space.id, "thread", {"thread": "1"}
+        )
         ui = ai.ui.ai_sdk.to_ui_messages([ai.user_message("continue in UI")])
         async with client() as c:
             response = await c.post(
@@ -564,10 +582,16 @@ async def test_ui_turn_is_mirrored_to_bound_channel(monkeypatch):
             channels.protocol.TURN_STARTED,
             channels.protocol.MESSAGE_COMPLETED,
         ]
-        assert channel.delivered[0][0].data == {"message": "continue in UI", "origin": "ui"}
+        assert channel.delivered[0][0].data == {
+            "message": "continue in UI",
+            "origin": "ui",
+        }
         assert channel.delivered[-1][0].data == {"message": "answer from AI"}
         assert all(state == {"thread": "1"} for _, state in channel.delivered)
-        stored = [ai.messages.Message.model_validate(data) for _, data in await events.read(chat.id, "messages")]
+        stored = [
+            ai.messages.Message.model_validate(data)
+            for _, data in await events.read(chat.id, "messages")
+        ]
         assert [(message.role, message.text) for message in stored] == [
             ("user", "continue in UI"),
             ("assistant", "answer from AI"),
@@ -595,19 +619,23 @@ async def test_devbox_completion_is_persisted_and_delivered_once(monkeypatch):
         nonlocal seen_wake
         seen_wake = wake
         await events.append(
-            chat_id, "messages", ai.assistant_message("The coder fixed it.").model_dump(mode="json")
+            chat_id,
+            "messages",
+            ai.assistant_message("The coder fixed it.").model_dump(mode="json"),
         )
-        return server.SupervisionOutcome(notify=True, message="The coder fixed it.")
+        return server.CompletionOutcome(notify=True, message="The coder fixed it.")
 
     pending = []
-    monkeypatch.setattr(server, "_run_supervision_turn", fake_turn)
+    monkeypatch.setattr(server, "_run_completion_turn", fake_turn)
     monkeypatch.setattr(server.vercel.functions, "wait_until", pending.append)
     channel = FakeChannel()
     previous = server.bot.channels.get("fake")
     server.bot.channels["fake"] = channel
     try:
         space = await server.spaces.default()
-        chat, _ = await chats.claim("fake:thread", "fake", space.id, "task", {"thread": "1"})
+        chat, _ = await chats.claim(
+            "fake:thread", "fake", space.id, "task", {"thread": "1"}
+        )
         launch = await subagents.create(chat.id, "devbox_1", "fix it", "secret")
         launch["task_id"] = "task_1"
         await subagents.save(launch)
@@ -625,10 +653,14 @@ async def test_devbox_completion_is_persisted_and_delivered_once(monkeypatch):
         }
         async with client() as c:
             first = await c.post(
-                "/channels/v1/devbox", params={"launch_id": launch["id"], "secret": "secret"}, json=body
+                "/channels/v1/devbox",
+                params={"launch_id": launch["id"], "secret": "secret"},
+                json=body,
             )
             duplicate = await c.post(
-                "/channels/v1/devbox", params={"launch_id": launch["id"], "secret": "secret"}, json=body
+                "/channels/v1/devbox",
+                params={"launch_id": launch["id"], "secret": "secret"},
+                json=body,
             )
         await pending[0]
         pending[1].close()
@@ -664,7 +696,11 @@ async def test_devbox_completion_is_persisted_and_delivered_once(monkeypatch):
         assert "Call check_subagent" in seen_wake.text
         recorded = await activity.status(chat.id, launch["id"])
         assert recorded["events"] == [
-            {"cursor": 0, "kind": "state_transition", "summary": "state changed to complete"}
+            {
+                "cursor": 0,
+                "kind": "state_transition",
+                "summary": "state changed to complete",
+            }
         ]
         saved = await chats.get(chat.id)
         assert saved is not None
@@ -677,7 +713,9 @@ async def test_devbox_completion_is_persisted_and_delivered_once(monkeypatch):
             server.bot.channels["fake"] = previous
 
 
-async def test_devbox_completion_schedules_retry_without_duplicate_transcript(monkeypatch):
+async def test_devbox_completion_schedules_retry_without_duplicate_transcript(
+    monkeypatch,
+):
     class FlakyChannel:
         name = "flaky"
 
@@ -693,10 +731,10 @@ async def test_devbox_completion_schedules_retry_without_duplicate_transcript(mo
         await events.append(
             chat_id, "messages", ai.assistant_message("done").model_dump(mode="json")
         )
-        return server.SupervisionOutcome(notify=True, message="done")
+        return server.CompletionOutcome(notify=True, message="done")
 
     pending = []
-    monkeypatch.setattr(server, "_run_supervision_turn", fake_turn)
+    monkeypatch.setattr(server, "_run_completion_turn", fake_turn)
     monkeypatch.setattr(server.vercel.functions, "wait_until", pending.append)
     channel = FlakyChannel()
     previous = server.bot.channels.get("flaky")
@@ -718,10 +756,14 @@ async def test_devbox_completion_schedules_retry_without_duplicate_transcript(mo
         }
         async with client() as c:
             failed = await c.post(
-                "/channels/v1/devbox", params={"launch_id": launch["id"], "secret": "secret"}, json=body
+                "/channels/v1/devbox",
+                params={"launch_id": launch["id"], "secret": "secret"},
+                json=body,
             )
             retried = await c.post(
-                "/channels/v1/devbox", params={"launch_id": launch["id"], "secret": "secret"}, json=body
+                "/channels/v1/devbox",
+                params={"launch_id": launch["id"], "secret": "secret"},
+                json=body,
             )
         assert failed.status_code == 200
         assert retried.status_code == 200
@@ -737,18 +779,22 @@ async def test_devbox_completion_schedules_retry_without_duplicate_transcript(mo
             server.bot.channels["flaky"] = previous
 
 
-async def test_supervision_history_ends_with_unpersisted_user_wake(monkeypatch):
+async def test_completion_history_ends_with_unpersisted_user_wake(monkeypatch):
     space = await server.spaces.default()
     chat = await chats.create(space.id, "task")
     await events.append(
-        chat.id, "messages", ai.assistant_message("Work started.").model_dump(mode="json")
+        chat.id,
+        "messages",
+        ai.assistant_message("Work started.").model_dump(mode="json"),
     )
     wake = ai.user_message("Check coder status.")
     seen = None
 
     class FakeRun:
-        output = server.SupervisionOutcome(notify=False)
-        messages = []
+        output = server.CompletionOutcome(notify=False)
+
+        def __init__(self):
+            self.messages = []
 
         async def __aenter__(self):
             return self
@@ -771,42 +817,13 @@ async def test_supervision_history_ends_with_unpersisted_user_wake(monkeypatch):
             return run
 
     monkeypatch.setattr(server.dispatcher, "agent_for", lambda record: FakeAgent())
-    outcome = await server._run_supervision_turn(chat.id, {"id": chat.id}, wake)
+    outcome = await server._run_completion_turn(chat.id, {"id": chat.id}, wake)
     assert outcome.notify is False
     assert seen is not None
     assert [message.role for message in seen[-2:]] == ["assistant", "user"]
     stored = await events.read(chat.id, "messages")
     assert len(stored) == 1
     assert ai.messages.Message.model_validate(stored[0][1]).text == "Work started."
-
-
-async def test_periodic_supervision_can_stay_silent(monkeypatch):
-    space = await server.spaces.default()
-    chat, _ = await chats.claim("fake:quiet", "fake", space.id, "task", {})
-    launch = await subagents.create(chat.id, "devbox_1", "do it", "secret")
-    launch["task_id"] = "task_1"
-    launch["state"] = "running"
-    await subagents.save(launch)
-    await activity.append(
-        launch["id"],
-        "assistant_event",
-        {"name": "assistant_message", "body": {"text": "Still inspecting"}},
-    )
-
-    seen = []
-
-    async def quiet_turn(chat_id, record, wake):
-        seen.append(wake.text)
-        return server.SupervisionOutcome(notify=False)
-
-    monkeypatch.setattr(server, "_run_supervision_turn", quiet_turn)
-    assert await server.supervise_task(launch["id"], "periodic") is False
-    saved = await subagents.get(launch["id"])
-    assert saved is not None
-    assert saved["supervision_cursor"] == 0
-    assert saved["completion_delivered"] is False
-    assert await events.read(chat.id, "messages") == []
-    assert "after=-1" in seen[0]
 
 
 async def test_local_resumed_task_waits_for_new_run(monkeypatch):
@@ -923,9 +940,7 @@ async def test_manual_terminal_create_requires_ready_owned_devbox():
         not_ready = await c.post(
             f"/api/chats/{chat.id}/devboxes/{workspace['id']}/terminals"
         )
-        unknown = await c.post(
-            f"/api/chats/other/devboxes/{workspace['id']}/terminals"
-        )
+        unknown = await c.post(f"/api/chats/other/devboxes/{workspace['id']}/terminals")
 
     assert not_ready.status_code == 409
     assert unknown.status_code == 404
@@ -1055,7 +1070,9 @@ async def test_chat_devboxes_group_subagents_without_secrets():
     workspace = await server.devboxes.create(chat.id, "main", ["a/b"])
     workspace["state"] = "ready"
     await server.devboxes.save(workspace)
-    launch = await subagents.create(chat.id, workspace["id"], "inspect the bug", "secret")
+    launch = await subagents.create(
+        chat.id, workspace["id"], "inspect the bug", "secret"
+    )
     launch["task_id"] = "task_1"
     launch["session_id"] = "session_1"
     await subagents.save(launch)
@@ -1110,15 +1127,22 @@ async def test_devbox_assistant_event_is_stored_once():
         "assistantEvent": {
             "taskId": "task_1",
             "ts": "2026-08-20T12:00:00.123456789Z",
-            "event": {"name": "assistant_message", "body": {"text": "Inspecting the webhook"}},
+            "event": {
+                "name": "assistant_message",
+                "body": {"text": "Inspecting the webhook"},
+            },
         },
     }
     async with client() as c:
         first = await c.post(
-            "/channels/v1/devbox", params={"launch_id": launch["id"], "secret": "secret"}, json=body
+            "/channels/v1/devbox",
+            params={"launch_id": launch["id"], "secret": "secret"},
+            json=body,
         )
         duplicate = await c.post(
-            "/channels/v1/devbox", params={"launch_id": launch["id"], "secret": "secret"}, json=body
+            "/channels/v1/devbox",
+            params={"launch_id": launch["id"], "secret": "secret"},
+            json=body,
         )
     assert first.status_code == 200
     assert duplicate.json() == {"ok": True, "duplicate": True}
@@ -1139,7 +1163,9 @@ async def test_devbox_completion_claims_task_id_from_early_callback():
     }
     async with client() as c:
         response = await c.post(
-            "/channels/v1/devbox", params={"launch_id": launch["id"], "secret": "secret"}, json=body
+            "/channels/v1/devbox",
+            params={"launch_id": launch["id"], "secret": "secret"},
+            json=body,
         )
     assert response.status_code == 200
     record = await subagents.get(launch["id"])
@@ -1149,7 +1175,9 @@ async def test_devbox_completion_claims_task_id_from_early_callback():
 
 
 async def test_concurrent_task_callbacks_keep_separate_state(monkeypatch):
-    monkeypatch.setattr(server.vercel.functions, "wait_until", lambda coro: coro.close())
+    monkeypatch.setattr(
+        server.vercel.functions, "wait_until", lambda coro: coro.close()
+    )
     space = await server.spaces.default()
     chat = await chats.create(space.id, "task")
     first = await subagents.create(chat.id, "devbox_1", "first", "one")
@@ -1187,6 +1215,8 @@ async def test_devbox_completion_rejects_wrong_secret():
     }
     async with client() as c:
         response = await c.post(
-            "/channels/v1/devbox", params={"launch_id": launch["id"], "secret": "wrong"}, json=body
+            "/channels/v1/devbox",
+            params={"launch_id": launch["id"], "secret": "wrong"},
+            json=body,
         )
     assert response.status_code == 401
