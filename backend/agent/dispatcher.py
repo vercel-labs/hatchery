@@ -20,9 +20,13 @@ from store import activity, chats, events, tasks, workspaces
 SYSTEM = """\
 You are hatchery's dispatcher. You coordinate coding work; you never write
 code yourself. When the user wants something built, investigated, or fixed,
-compose a clear self-contained task and call launch_coder. While it runs the
-user watches the coder's terminal live in the next pane, so don't narrate
-its steps. A deployed launch only means the task was accepted: reply only that
+compose a clear self-contained task and call launch_coder. If the space
+description has a "Recommended devbox setup" section, pass its shell commands
+verbatim as setup_script when they apply; otherwise omit setup_script. You may
+also compose a freeform setup script when the task needs tools not present in a
+fresh devbox. While it runs the user watches the coder's terminal live in the
+next pane, so don't narrate its steps. A deployed launch only means the task was
+accepted: reply only that
 work has started and stop. Use check_coder when the user asks about progress or
 you are woken because coder state changed. Its result is authoritative. Never
 launch another coder merely to check an existing one. If the coder fails, say
@@ -70,17 +74,21 @@ def agent_for(
     async def launch_coder(
         task: str,
         repos: list[str] | None = None,
+        setup_script: str | None = None,
         model: str = devbox.DEFAULT_MODEL,
     ) -> ai.StreamingStatusTool[typing.Any]:
         """Hand a coding task to this chat's devbox.
 
         The task should be self-contained: what to build or do, and what
         "done" looks like. Select only the owner/repo repositories the coder
-        needs. Omit repos for an empty sandbox. Override model with a Vercel AI
-        Gateway model ID when needed. It returns as soon as the task is accepted;
-        completion arrives in a later turn.
+        needs. Omit repos for an empty sandbox. setup_script is freeform shell run
+        once, after cloning and before the coder starts; use it for required tools
+        and copy applicable recommended setup from the space description verbatim.
+        Override model with a Vercel AI Gateway model ID when needed. It returns as
+        soon as the task is accepted; completion arrives in a later turn.
         """
         desired_repos = list(repos or [])
+        desired_setup_script = setup_script.strip() if setup_script else None
         async with workspaces.provision(chat["id"]):
             current = await events.tail(chat["id"], "worker") or chat
             chat.update(current)
@@ -92,12 +100,17 @@ def agent_for(
                 if not chat.get("set_id"):
                     chat["set_id"] = await devbox.create_taskset(f"hatchery {chat['id']}")
                     await events.append(chat["id"], "worker", dict(chat))
-                if not chat.get("box") or chat.get("repos") != desired_repos:
+                if (
+                    not chat.get("box")
+                    or chat.get("repos") != desired_repos
+                    or chat.get("setup_script") != desired_setup_script
+                ):
                     yield "creating devbox (cold boot, about a minute)…"
                     chat["box"] = await devbox.create_box(
-                        f"hatchery-{chat['id']}", desired_repos
+                        f"hatchery-{chat['id']}", desired_repos, desired_setup_script
                     )
                     chat["repos"] = desired_repos
+                    chat["setup_script"] = desired_setup_script
                     chat["workspace_version"] = 1
                 await events.append(chat["id"], "worker", dict(chat))
             except Exception as error:

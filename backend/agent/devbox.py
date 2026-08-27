@@ -66,8 +66,8 @@ def _team() -> str:
     return json.loads((_CLI / "config.json").read_text())["currentTeam"]
 
 
-async def create_box(name: str, repos: list[str]) -> dict:
-    """Boot a devbox, clone its repos, install devboxd, and block until READY.
+async def create_box(name: str, repos: list[str], setup_script: str | None = None) -> dict:
+    """Boot a devbox, clone its repos, run setup, and block until READY.
 
     One call (`setup: true` + a sandbox spec opts into the server-side flow).
     Cold boot is ~1 minute. Returns {"id", "url"} — url is the box's devboxd
@@ -88,6 +88,11 @@ async def create_box(name: str, repos: list[str]) -> dict:
                     "setup": True,
                     "sandbox": {},
                     "cloneRepos": repos,
+                    **(
+                        {"config": {"run": {"postCreateCommand": setup_script}}}
+                        if setup_script
+                        else {}
+                    ),
                 },
             )
             if r.status_code < 500 or attempt == 2:

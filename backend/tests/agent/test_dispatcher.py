@@ -63,8 +63,8 @@ async def test_launch_coder_clones_selected_repos_and_persists_workspace(monkeyp
     async def create_taskset(title):
         return "set_1"
 
-    async def create_box(name, repos):
-        seen["box"] = (name, repos)
+    async def create_box(name, repos, setup_script=None):
+        seen["box"] = (name, repos, setup_script)
         return {"id": "box_1", "url": "https://box.example"}
 
     async def create_task(box_id, set_id, prompt, webhook_secret, webhook_task_id, model):
@@ -83,11 +83,16 @@ async def test_launch_coder_clones_selected_repos_and_persists_workspace(monkeyp
         async for update in tool.fn(
             "answer questions",
             repos=["vercel/vercel-py"],
+            setup_script="  curl bash uv\nfoo bar  ",
             model="anthropic/claude-sonnet-4.6",
         )
     ]
 
-    assert seen["box"] == (f"hatchery-{chat.id}", ["vercel/vercel-py"])
+    assert seen["box"] == (
+        f"hatchery-{chat.id}",
+        ["vercel/vercel-py"],
+        "curl bash uv\nfoo bar",
+    )
     assert seen["task"] == (
         "box_1",
         "set_1",
@@ -98,6 +103,7 @@ async def test_launch_coder_clones_selected_repos_and_persists_workspace(monkeyp
     workspace = await events.tail(chat.id, "worker")
     assert workspace is not None
     assert workspace["repos"] == ["vercel/vercel-py"]
+    assert workspace["setup_script"] == "curl bash uv\nfoo bar"
     assert workspace["workspace_version"] == 1
     [launch] = await tasks.list_for_chat(chat.id)
     assert launch["model"] == "anthropic/claude-sonnet-4.6"
@@ -113,7 +119,7 @@ async def test_launch_coder_can_create_empty_workspace(monkeypatch):
     async def create_taskset(title):
         return "set_1"
 
-    async def create_box(name, repos):
+    async def create_box(name, repos, setup_script=None):
         created_boxes.append(repos)
         return {"id": "box_1", "url": "https://box.example"}
 
@@ -144,7 +150,7 @@ async def test_launch_coder_replaces_repo_less_workspace(monkeypatch):
     )
     created_boxes = []
 
-    async def create_box(name, repos):
+    async def create_box(name, repos, setup_script=None):
         created_boxes.append(repos)
         return {"id": "new", "url": "https://new"}
 
@@ -167,6 +173,50 @@ async def test_launch_coder_replaces_repo_less_workspace(monkeypatch):
     assert workspace is not None and workspace["box"]["id"] == "new"
 
 
+async def test_launch_coder_replaces_workspace_when_setup_changes(monkeypatch):
+    space = await spaces.default()
+    chat = await chats.create(space.id, "inspect")
+    await events.append(
+        chat.id,
+        "worker",
+        {
+            "id": chat.id,
+            "set_id": "set_1",
+            "box": {"id": "old", "url": "https://old"},
+            "repos": ["vercel/vercel-py"],
+            "setup_script": "old setup",
+        },
+    )
+    created_boxes = []
+
+    async def create_box(name, repos, setup_script=None):
+        created_boxes.append((repos, setup_script))
+        return {"id": "new", "url": "https://new"}
+
+    async def create_task(*args):
+        return {"task_id": "task_1", "session_id": "session_1", "state": "pending"}
+
+    monkeypatch.setattr(dispatcher.devbox, "create_box", create_box)
+    monkeypatch.setattr(dispatcher.devbox, "create_task", create_task)
+    monkeypatch.setattr(dispatcher.devbox, "webhook_url", lambda: None)
+
+    agent = dispatcher.agent_for({"id": chat.id})
+    tool = next(tool for tool in agent.tools if tool.name == "launch_coder")
+    [
+        update
+        async for update in tool.fn(
+            "inspect",
+            repos=["vercel/vercel-py"],
+            setup_script="new setup",
+        )
+    ]
+
+    assert created_boxes == [(["vercel/vercel-py"], "new setup")]
+    workspace = await events.tail(chat.id, "worker")
+    assert workspace is not None and workspace["box"]["id"] == "new"
+    assert workspace["setup_script"] == "new setup"
+
+
 async def test_launch_coder_rejects_concurrent_task(monkeypatch):
     space = await spaces.default()
     chat = await chats.create(space.id, "inspect")
@@ -187,7 +237,7 @@ async def test_provision_failure_marks_chat_failed_and_keeps_taskset(monkeypatch
     async def create_taskset(title):
         return "set_1"
 
-    async def create_box(name, repos):
+    async def create_box(name, repos, setup_script=None):
         raise RuntimeError("clone failed")
 
     monkeypatch.setattr(dispatcher.devbox, "create_taskset", create_taskset)
@@ -217,7 +267,7 @@ async def test_launch_failure_is_recorded(monkeypatch):
     async def create_taskset(title):
         return "set_1"
 
-    async def create_box(name, repos):
+    async def create_box(name, repos, setup_script=None):
         return {"id": "box_1", "url": "https://box.example"}
 
     async def create_task(*args):

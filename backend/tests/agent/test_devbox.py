@@ -48,6 +48,34 @@ async def test_create_box_sends_clone_repos(monkeypatch):
     }
 
 
+async def test_create_box_sends_setup_script_as_post_create_command(monkeypatch):
+    seen = {}
+
+    async def send(self, request, **kwargs):
+        seen["request"] = request
+        return httpx.Response(
+            200,
+            request=request,
+            json={"id": "box_1", "url": "https://box.example"},
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
+    monkeypatch.setattr(devbox, "token", lambda: "token")
+    monkeypatch.setattr(devbox, "_team", lambda: "team_1")
+
+    await devbox.create_box(
+        "hatchery-chat",
+        ["anbuzin/hatchery"],
+        "curl -LsSf https://astral.sh/uv/install.sh | sh\nfoo bar",
+    )
+
+    assert json.loads(seen["request"].content)["config"] == {
+        "run": {
+            "postCreateCommand": "curl -LsSf https://astral.sh/uv/install.sh | sh\nfoo bar"
+        }
+    }
+
+
 async def test_create_task_uses_fx(monkeypatch):
     seen = {}
 
