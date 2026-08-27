@@ -102,6 +102,7 @@ def agent_for(
                 await events.append(chat["id"], "worker", dict(chat))
             except Exception as error:
                 await chats.finish(chat["id"], "failed", str(error))
+                await events.append(chat["id"], "ui", {"type": "chat.changed"})
                 raise
 
             yield "dispatching task…"
@@ -109,6 +110,7 @@ def agent_for(
             launch["model"] = model
             await tasks.save(launch)
             await chats.finish(chat["id"], "running")
+            await events.append(chat["id"], "ui", {"type": "chat.changed"})
             try:
                 created = await devbox.create_task(
                     chat["box"]["id"],
@@ -123,6 +125,7 @@ def agent_for(
                 launch["result"] = {"error": str(error)}
                 await tasks.save(launch)
                 await chats.finish(chat["id"], "failed", str(error))
+                await events.append(chat["id"], "ui", {"type": "chat.changed"})
                 await activity.append(
                     launch["id"],
                     "state_transition",

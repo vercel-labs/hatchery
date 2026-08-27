@@ -58,6 +58,17 @@ async def test_assign_space_updates_chat():
     assert await chats.assign_space("chat_missing", destination.id) is None
 
 
+async def test_set_topic_updates_chat():
+    chat = await chats.create(None, "work")
+
+    named = await chats.set_topic(chat.id, "Improve chat names")
+
+    assert named is not None and named.topic == "Improve chat names"
+    loaded = await chats.get(chat.id)
+    assert loaded is not None and loaded.topic == "Improve chat names"
+    assert await chats.set_topic("chat_missing", "Missing") is None
+
+
 async def test_finish_updates_status_and_artifact():
     space = await spaces.default()
     chat = await chats.create(space.id, "work")

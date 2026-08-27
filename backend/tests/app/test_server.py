@@ -1,6 +1,7 @@
 import asyncio
 
 import httpx
+import pytest
 
 import ai
 import channels
@@ -11,6 +12,14 @@ from store import activity, chats, events, tasks
 def client() -> httpx.AsyncClient:
     transport = httpx.ASGITransport(app=server.app)
     return httpx.AsyncClient(transport=transport, base_url="http://test")
+
+
+@pytest.fixture(autouse=True)
+def generated_topic(monkeypatch):
+    async def generate(prompt):
+        return "Test request"
+
+    monkeypatch.setattr(server.topic, "generate", generate)
 
 
 async def test_spaces_seed_default():
@@ -162,6 +171,21 @@ async def test_chat_space_assignment_rejects_unknown_chat_space_and_null():
     assert missing_space.json() == {"detail": "unknown space"}
     assert null_space.status_code == 422
     assert (await chats.get(chat.id)).space_id == destination.id
+
+
+async def test_name_chat_generates_and_persists_topic(monkeypatch):
+    chat = await chats.create(None, "new chat")
+
+    async def generate(prompt):
+        assert prompt == "Improve chat names"
+        return "Sidebar chat names"
+
+    monkeypatch.setattr(server.topic, "generate", generate)
+    await server._name_chat(chat.id, "Improve chat names")
+
+    named = await chats.get(chat.id)
+    assert named is not None and named.topic == "Sidebar chat names"
+    assert await events.read(chat.id, "ui") == [(0, {"type": "chat.changed"})]
 
 
 async def test_chat_list_cleans_legacy_slack_title():
@@ -793,6 +817,21 @@ async def test_spawn_keeps_background_task_alive():
 
     server._spawn(work())
     await asyncio.wait_for(ran.wait(), 1)
+
+
+def test_spawn_uses_wait_until_on_vercel(monkeypatch):
+    pending = []
+    monkeypatch.setenv("VERCEL", "1")
+    monkeypatch.setattr(server.vercel.functions, "wait_until", pending.append)
+
+    async def work():
+        pass
+
+    coro = work()
+    server._spawn(coro)
+
+    assert pending == [coro]
+    coro.close()
 
 
 async def test_chat_tasks_lists_launches_without_secrets():

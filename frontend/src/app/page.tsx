@@ -78,6 +78,25 @@ function Dot({ color }: { color: string | undefined }) {
   );
 }
 
+function spaceStripeColor(spaceId: string | null) {
+  if (!spaceId) return "var(--muted-foreground)";
+  const hue = [...spaceId].reduce((value, char) => value * 31 + char.charCodeAt(0), 0);
+  return `hsl(${Math.abs(hue) % 360} 70% 50%)`;
+}
+
+function ChatOriginIcon({ trigger }: { trigger: string }) {
+  const path = trigger.startsWith("slack:")
+    ? "M3.427 10.079c0 .92-.743 1.663-1.663 1.663S.1 10.998.1 10.079c0-.92.743-1.663 1.663-1.663h1.663zm.831 0c0-.92.744-1.663 1.663-1.663.92 0 1.663.743 1.663 1.663v4.157c0 .92-.743 1.663-1.663 1.663s-1.663-.743-1.663-1.663zM5.921 3.402c-.92 0-1.663-.744-1.663-1.663 0-.92.744-1.663 1.663-1.663.92 0 1.663.743 1.663 1.663v1.663zm0 .844c.92 0 1.663.743 1.663 1.663s-.743 1.663-1.663 1.663h-4.17c-.92 0-1.663-.744-1.663-1.663 0-.92.743-1.663 1.663-1.663zM12.586 5.909c0-.92.743-1.663 1.663-1.663s1.663.743 1.663 1.663-.744 1.663-1.663 1.663h-1.663zm-.832 0c0 .92-.743 1.663-1.663 1.663s-1.663-.744-1.663-1.663v-4.17c0-.92.744-1.663 1.663-1.663.92 0 1.663.743 1.663 1.663zM10.091 12.573c.92 0 1.663.743 1.663 1.663s-.743 1.663-1.663 1.663-1.663-.743-1.663-1.663v-1.663zm0-.831c-.92 0-1.663-.744-1.663-1.663 0-.92.744-1.663 1.663-1.663h4.17c.92 0 1.663.743 1.663 1.663s-.743 1.663-1.663 1.663z"
+    : trigger.startsWith("github:")
+      ? "M8 0C3.58 0 0 3.579 0 7.997a7.99 7.99 0 0 0 5.47 7.588c.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.939-.82-1.129-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.949 0-.87.31-1.589.82-2.149-.08-.2-.36-1.02.08-2.12 0 0 .67-.209 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.039 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.068-1.87 3.748-3.65 3.948.29.25.54.73.54 1.48 0 1.07-.01 1.929-.01 2.199 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 7.997 7.996 7.996 0 0 0 8 0"
+      : "M7.157 0 2.333 9.408l-.56 1.092H7a.25.25 0 0 1 .25.25V16h1.593l4.824-9.408.56-1.092H9a.25.25 0 0 1-.25-.25V0zM7 9H4.227L7.25 3.106V5.25C7.25 6.216 8.034 7 9 7h2.773L8.75 12.894V10.75A1.75 1.75 0 0 0 7 9";
+  return (
+    <svg aria-hidden="true" viewBox="0 0 16 16" className="size-4 shrink-0">
+      <path fill="currentColor" fillRule="evenodd" d={path} clipRule="evenodd" />
+    </svg>
+  );
+}
+
 export default function Home() {
   const [spaces, setSpaces] = useState<Space[] | null>(null);
   const [chats, setChats] = useState<Chat[] | null>(null);
@@ -151,6 +170,15 @@ export default function Home() {
     if (selection?.kind === "space" && selection.id === space.id) setSelection(null);
     if (sortSpaceId === space.id) setSortSpaceId(null);
   };
+
+  const refreshChats = useCallback(() => {
+    fetch("/api/chats")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((found: Chat[] | null) => {
+        if (found) setChats(found);
+      })
+      .catch(() => {});
+  }, []);
 
   const createChat = async () => {
     const res = await fetch("/api/chats", {
@@ -277,14 +305,31 @@ export default function Home() {
                   : sortedChats.map((chat) => (
                       <SidebarMenuItem key={chat.id}>
                         <SidebarMenuButton
+                          className="relative pl-3"
                           isActive={selectedChat?.id === chat.id}
                           onClick={() =>
                             setSelection({ kind: "chat", id: chat.id })
                           }
-                          tooltip={chat.title}
+                          tooltip={chat.topic ?? chat.title}
                         >
-                          <Dot color={colorOf(chat.space_id)} />
-                          <span className="truncate">{chat.title}</span>
+                          <span
+                            className="absolute inset-y-1 left-0 w-0.5 rounded-full"
+                            style={{
+                              backgroundColor: spaceStripeColor(chat.space_id),
+                            }}
+                          />
+                          <span
+                            className={`size-2 shrink-0 rounded-full ${
+                              chat.status === "running"
+                                ? "bg-blue-500"
+                                : "bg-zinc-400"
+                            }`}
+                            title={chat.status === "running" ? "Running" : "Idle"}
+                          />
+                          <ChatOriginIcon trigger={chat.trigger} />
+                          <span className="truncate">
+                            {chat.topic ?? (chat.title === "new chat" ? "…" : chat.title)}
+                          </span>
                         </SidebarMenuButton>
                       </SidebarMenuItem>
                     ))}
@@ -336,6 +381,7 @@ export default function Home() {
           <LiveChat
             key={selectedChat.id}
             chat={selectedChat}
+            onChatChanged={refreshChats}
             onSpaceAssigned={(spaceId) =>
               setChats((current) => {
                 if (
@@ -745,9 +791,11 @@ function EditableResource({
 // initial messages at construction.
 function LiveChat({
   chat,
+  onChatChanged,
   onSpaceAssigned,
 }: {
   chat: Chat;
+  onChatChanged: () => void;
   onSpaceAssigned: (spaceId: string) => void;
 }) {
   const [initialMessages, setInitialMessages] = useState<
@@ -781,13 +829,16 @@ function LiveChat({
     );
     source.onmessage = (message) => {
       const event = JSON.parse(message.data) as { type?: string };
+      if (event.type === "chat.changed" || event.type === "task.changed") {
+        onChatChanged();
+      }
       if (event.type === "task.changed") loadTasks();
       if (event.type === "messages.changed") {
         setMessageRevision((revision) => revision + 1);
       }
     };
     return () => source.close();
-  }, [chat.id, loadTasks]);
+  }, [chat.id, loadTasks, onChatChanged]);
 
   const onMessagesChange = useCallback(
     (messages: ChatUIMessage[]) => {
