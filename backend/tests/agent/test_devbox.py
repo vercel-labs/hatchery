@@ -2,8 +2,14 @@ import json
 import urllib.parse
 
 import httpx
+import pytest
 
 from agent import devbox
+
+
+@pytest.fixture(autouse=True)
+def vercel_project(monkeypatch):
+    monkeypatch.setenv("VERCEL_PROJECT_ID", "prj_hatchery")
 
 
 def test_vercel_dev_does_not_register_public_webhook(monkeypatch):
@@ -24,12 +30,12 @@ async def test_create_box_sends_clone_repos(monkeypatch):
     seen = {}
 
     async def send(self, request, **kwargs):
-        seen["request"] = request
-        return httpx.Response(
-            200,
-            request=request,
-            json={"id": "box_1", "url": "https://box.example"},
-        )
+        if request.method == "POST":
+            seen["request"] = request
+            body = {"id": "box_1", "sandboxId": "sbx_1"}
+        else:
+            body = {"id": "box_1", "state": "READY", "sandboxUrl": "https://box.example"}
+        return httpx.Response(200, request=request, json=body)
 
     monkeypatch.setattr(httpx.AsyncClient, "send", send)
     monkeypatch.setattr(devbox, "token", lambda: "token")
@@ -41,6 +47,7 @@ async def test_create_box_sends_clone_repos(monkeypatch):
     assert box == {"id": "box_1", "url": "https://box.example"}
     assert request.url.params["teamId"] == "team_1"
     assert json.loads(request.content) == {
+        "projectId": "prj_hatchery",
         "name": "hatchery-chat",
         "setup": True,
         "sandbox": {},
@@ -52,12 +59,12 @@ async def test_create_box_sends_ports_and_main_repo_checkout(monkeypatch):
     seen = {}
 
     async def send(self, request, **kwargs):
-        seen["request"] = request
-        return httpx.Response(
-            200,
-            request=request,
-            json={"id": "box_1", "url": "https://box.example"},
-        )
+        if request.method == "POST":
+            seen["request"] = request
+            body = {"id": "box_1", "sandboxId": "sbx_1"}
+        else:
+            body = {"id": "box_1", "state": "READY", "sandboxUrl": "https://box.example"}
+        return httpx.Response(200, request=request, json=body)
 
     monkeypatch.setattr(httpx.AsyncClient, "send", send)
     monkeypatch.setattr(devbox, "token", lambda: "token")
@@ -72,6 +79,7 @@ async def test_create_box_sends_ports_and_main_repo_checkout(monkeypatch):
     )
 
     assert json.loads(seen["request"].content) == {
+        "projectId": "prj_hatchery",
         "name": "hatchery-chat",
         "setup": True,
         "sandbox": {"ports": [3000, 8000]},
@@ -85,12 +93,12 @@ async def test_create_box_sends_setup_script_as_post_create_command(monkeypatch)
     seen = {}
 
     async def send(self, request, **kwargs):
-        seen["request"] = request
-        return httpx.Response(
-            200,
-            request=request,
-            json={"id": "box_1", "url": "https://box.example"},
-        )
+        if request.method == "POST":
+            seen["request"] = request
+            body = {"id": "box_1", "sandboxId": "sbx_1"}
+        else:
+            body = {"id": "box_1", "state": "READY", "sandboxUrl": "https://box.example"}
+        return httpx.Response(200, request=request, json=body)
 
     monkeypatch.setattr(httpx.AsyncClient, "send", send)
     monkeypatch.setattr(devbox, "token", lambda: "token")
@@ -107,6 +115,30 @@ async def test_create_box_sends_setup_script_as_post_create_command(monkeypatch)
             "postCreateCommand": "curl -LsSf https://astral.sh/uv/install.sh | sh\nfoo bar"
         }
     }
+
+
+async def test_create_box_waits_for_ready_and_surfaces_setup_error(monkeypatch):
+    responses = iter(
+        [
+            {"id": "box_1", "sandboxId": "sbx_1"},
+            {"id": "box_1", "state": "STARTING", "statusDetails": "Starting the server"},
+            {"id": "box_1", "state": "ERROR", "statusDetails": "clone failed"},
+        ]
+    )
+
+    async def send(self, request, **kwargs):
+        return httpx.Response(200, request=request, json=next(responses))
+
+    async def no_sleep(delay):
+        assert delay == 2
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
+    monkeypatch.setattr(devbox, "token", lambda: "token")
+    monkeypatch.setattr(devbox, "_team", lambda: "team_1")
+    monkeypatch.setattr(devbox.asyncio, "sleep", no_sleep)
+
+    with pytest.raises(RuntimeError, match="devbox setup failed: clone failed"):
+        await devbox.create_box("hatchery-chat", ["anbuzin/hatchery"])
 
 
 async def test_create_task_uses_fx(monkeypatch):
