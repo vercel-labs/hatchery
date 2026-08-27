@@ -871,33 +871,35 @@ function LiveChat({
   if (initialMessages === null) return <div className="flex-1" />;
 
   return (
-    <div className="@container relative flex min-h-0 flex-1 flex-col @5xl:flex-row">
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col @5xl:basis-[28rem]">
-        <ChatView
-          chatId={chat.id}
-          initialMessages={initialMessages}
-          messageRevision={messageRevision}
-          onMessagesChange={onMessagesChange}
-        />
+    <div className="@container flex min-h-0 flex-1">
+      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col @4xl:flex-row">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col @4xl:min-w-[28rem]">
+          <ChatView
+            chatId={chat.id}
+            initialMessages={initialMessages}
+            messageRevision={messageRevision}
+            onMessagesChange={onMessagesChange}
+          />
+        </div>
+        {tasks.length > 0 && !showTerminal && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="absolute top-2 right-2 z-10"
+            onClick={() => setShowTerminal(true)}
+          >
+            <TerminalIcon className="size-4" />
+            terminal
+          </Button>
+        )}
+        {showTerminal && tasks.length > 0 && (
+          <TerminalPane
+            chatId={chat.id}
+            tasks={tasks}
+            onClose={() => setShowTerminal(false)}
+          />
+        )}
       </div>
-      {tasks.length > 0 && !showTerminal && (
-        <Button
-          variant="outline"
-          size="sm"
-          className="absolute top-2 right-2 z-10"
-          onClick={() => setShowTerminal(true)}
-        >
-          <TerminalIcon className="size-4" />
-          terminal
-        </Button>
-      )}
-      {showTerminal && tasks.length > 0 && (
-        <TerminalPane
-          chatId={chat.id}
-          tasks={tasks}
-          onClose={() => setShowTerminal(false)}
-        />
-      )}
     </div>
   );
 }

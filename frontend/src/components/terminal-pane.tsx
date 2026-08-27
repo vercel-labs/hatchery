@@ -151,7 +151,7 @@ export function TerminalPane({
     tasks.find((task) => task.id === selectedId) ?? tasks.at(-1);
 
   return (
-    <div className="flex h-2/5 min-w-0 flex-none flex-col border-t @5xl:h-auto @5xl:flex-1 @5xl:border-t-0 @5xl:border-l">
+    <div className="flex h-2/5 min-w-0 flex-none flex-col border-t @4xl:h-auto @4xl:min-w-[28rem] @4xl:flex-1 @4xl:border-t-0 @4xl:border-l">
       <div className="flex h-10 shrink-0 items-center gap-1 overflow-x-auto border-b px-2">
         {tasks.map((task, index) => (
           <Button
