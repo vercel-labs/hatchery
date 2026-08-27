@@ -48,6 +48,39 @@ async def test_create_box_sends_clone_repos(monkeypatch):
     }
 
 
+async def test_create_box_sends_ports_and_main_repo_checkout(monkeypatch):
+    seen = {}
+
+    async def send(self, request, **kwargs):
+        seen["request"] = request
+        return httpx.Response(
+            200,
+            request=request,
+            json={"id": "box_1", "url": "https://box.example"},
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
+    monkeypatch.setattr(devbox, "token", lambda: "token")
+    monkeypatch.setattr(devbox, "_team", lambda: "team_1")
+
+    await devbox.create_box(
+        "hatchery-chat",
+        ["anbuzin/hatchery", "vercel/vercel-py"],
+        ports=[3000, 8000],
+        branch="feature/api",
+        git_sha="abc123",
+    )
+
+    assert json.loads(seen["request"].content) == {
+        "name": "hatchery-chat",
+        "setup": True,
+        "sandbox": {"ports": [3000, 8000]},
+        "cloneRepos": ["anbuzin/hatchery", "vercel/vercel-py"],
+        "branch": "feature/api",
+        "gitSha": "abc123",
+    }
+
+
 async def test_create_box_sends_setup_script_as_post_create_command(monkeypatch):
     seen = {}
 
