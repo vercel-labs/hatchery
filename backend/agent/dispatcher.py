@@ -53,7 +53,7 @@ Attached resources:
 {resources}"""
 
 def model() -> ai.Model:
-    return ai.get_model("anthropic/claude-sonnet-4.6")
+    return ai.get_model("openai/gpt-5.6-sol")
 
 
 def agent_for(
