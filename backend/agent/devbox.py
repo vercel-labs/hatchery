@@ -175,7 +175,7 @@ async def watch(box_url: str, task_id: str, quiet_after: float = 45):
     stateTransition is the final frame, after which the socket closes.
 
     Yields None after `quiet_after` seconds without a frame so the caller
-    can emit a keepalive — an SSE that goes silent for minutes (coder deep
+    can emit a keepalive — an SSE that goes silent for minutes (subagent deep
     in a long step) gets severed by intermediate proxies.
     """
     url = box_url.replace("https://", "wss://") + f"/tasks/{task_id}/watch"

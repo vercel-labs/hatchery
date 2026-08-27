@@ -10,11 +10,22 @@ import { wsBase } from "@/lib/api";
 
 export type CoderTask = {
   id: string;
+  devbox_id: string;
   title: string;
   task_id?: string;
   session_id?: string;
   state: string;
   created_at: string;
+};
+
+export type DevboxWorkspace = {
+  id: string;
+  title: string;
+  repos: string[];
+  state: string;
+  error?: string;
+  created_at: string;
+  subagents: CoderTask[];
 };
 
 const b64encode = (s: string) =>
@@ -74,7 +85,7 @@ function TaskTerminal({ chatId, task }: { chatId: string; task: CoderTask }) {
       const connect = () => {
         if (disposed || exited) return;
         ws = new WebSocket(
-          `${wsBase()}/api/chats/${chatId}/tasks/${task.id}/tty?offset=${offset}&cols=${term.cols}&rows=${term.rows}`,
+          `${wsBase()}/api/chats/${chatId}/subagents/${task.id}/tty?offset=${offset}&cols=${term.cols}&rows=${term.rows}`,
         );
         ws.onmessage = (event) => {
           const frame = JSON.parse(event.data);
@@ -139,42 +150,78 @@ function TaskTerminal({ chatId, task }: { chatId: string; task: CoderTask }) {
 
 export function TerminalPane({
   chatId,
-  tasks,
+  devboxes,
   onClose,
 }: {
   chatId: string;
-  tasks: CoderTask[];
+  devboxes: DevboxWorkspace[];
   onClose: () => void;
 }) {
-  const [selectedId, setSelectedId] = useState(tasks.at(-1)?.id ?? "");
-  const active =
-    tasks.find((task) => task.id === selectedId) ?? tasks.at(-1);
+  const latest = devboxes.findLast((box) => box.subagents.length) ?? devboxes.at(-1);
+  const [selectedDevboxId, setSelectedDevboxId] = useState(latest?.id ?? "");
+  const [selectedTaskId, setSelectedTaskId] = useState(
+    latest?.subagents.at(-1)?.id ?? "",
+  );
+  const activeDevbox =
+    devboxes.find((box) => box.id === selectedDevboxId) ?? latest;
+  const activeTask =
+    activeDevbox?.subagents.find((task) => task.id === selectedTaskId) ??
+    activeDevbox?.subagents.at(-1);
+
+  const selectDevbox = (box: DevboxWorkspace) => {
+    setSelectedDevboxId(box.id);
+    setSelectedTaskId(box.subagents.at(-1)?.id ?? "");
+  };
 
   return (
     <div className="flex h-2/5 min-w-0 flex-none flex-col border-t @4xl:h-auto @4xl:min-w-[28rem] @4xl:flex-1 @4xl:border-t-0 @4xl:border-l">
       <div className="flex h-10 shrink-0 items-center gap-1 overflow-x-auto border-b px-2">
-        {tasks.map((task, index) => (
+        {devboxes.map((box, index) => (
           <Button
-            key={task.id}
-            variant={task.id === active?.id ? "secondary" : "ghost"}
+            key={box.id}
+            variant={box.id === activeDevbox?.id ? "secondary" : "ghost"}
             size="sm"
             className="max-w-40 shrink-0"
-            onClick={() => setSelectedId(task.id)}
+            onClick={() => selectDevbox(box)}
           >
-            <span className="truncate">{task.title || `coder ${index + 1}`}</span>
+            <span className="truncate">{box.title || `devbox ${index + 1}`}</span>
           </Button>
         ))}
         <Button
           variant="ghost"
           size="icon"
           className="ml-auto size-7 shrink-0"
-          aria-label="Close terminals"
+          aria-label="Close devboxes"
           onClick={onClose}
         >
           <XIcon className="size-4" />
         </Button>
       </div>
-      {active && <TaskTerminal key={active.id} chatId={chatId} task={active} />}
+      <div className="flex h-9 shrink-0 items-center gap-1 overflow-x-auto border-b px-2">
+        {activeDevbox?.subagents.map((task, index) => (
+          <Button
+            key={task.id}
+            variant={task.id === activeTask?.id ? "secondary" : "ghost"}
+            size="xs"
+            className="max-w-40 shrink-0"
+            onClick={() => setSelectedTaskId(task.id)}
+          >
+            <span className="truncate">{task.title || `subagent ${index + 1}`}</span>
+          </Button>
+        ))}
+        {!activeDevbox?.subagents.length && (
+          <span className="px-2 text-xs text-muted-foreground">
+            No subagents in this devbox
+          </span>
+        )}
+      </div>
+      {activeTask ? (
+        <TaskTerminal key={activeTask.id} chatId={chatId} task={activeTask} />
+      ) : (
+        <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-muted-foreground">
+          {activeDevbox?.error || "Devbox ready"}
+        </div>
+      )}
     </div>
   );
 }

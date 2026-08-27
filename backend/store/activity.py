@@ -1,8 +1,8 @@
-"""Append-only coder activity, one stream per launch."""
+"""Append-only subagent activity, one stream per subagent."""
 
 import typing
 
-from store import events, tasks
+from store import events, subagents
 
 
 async def append(
@@ -35,8 +35,8 @@ async def status(
     after: int | None = None,
     limit: int = 20,
 ) -> dict[str, typing.Any]:
-    """Return a bounded status view for one of the chat's coder launches."""
-    launches = await tasks.list_for_chat(chat_id)
+    """Return a bounded status view for one of the chat's subagents."""
+    launches = await subagents.list_for_chat(chat_id)
     if launch_id is None:
         if not launches:
             return {"state": "idle", "events": [], "cursor": None}
@@ -44,13 +44,13 @@ async def status(
     else:
         record = next((item for item in launches if item["id"] == launch_id), None)
         if record is None:
-            raise ValueError("coder task does not belong to this chat")
+            raise ValueError("subagent does not belong to this chat")
 
     start = 0 if after is None else after + 1
     found = await events.read(record["id"], "activity", start)
     bounded = found[: max(1, min(limit, 50))]
     return {
-        "launch_id": record["id"],
+        "subagent_id": record["id"],
         "task_id": record.get("task_id"),
         "title": record.get("title"),
         "state": record.get("state", "unknown"),
@@ -60,7 +60,7 @@ async def status(
             {
                 "cursor": index,
                 "kind": event.get("kind", "other"),
-                "summary": event.get("summary", "coder activity"),
+                "summary": event.get("summary", "subagent activity"),
             }
             for index, event in bounded
         ],
@@ -109,7 +109,7 @@ def _summary(kind: str, data: dict[str, typing.Any]) -> str:
     if name == "attention_required":
         return f"needs attention: {body.get('prompt') or 'input required'}"[:500]
     if name == "complete":
-        return str(body.get("summary") or "coder completed the task")[:500]
+        return str(body.get("summary") or "subagent completed the task")[:500]
     if name == "agent_error":
         return f"agent error: {body.get('message') or 'unknown error'}"[:500]
     return name.replace("_", " ")

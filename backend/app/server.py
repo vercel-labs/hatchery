@@ -5,11 +5,11 @@ Health check, channel webhooks, and the dispatcher chat:
 - /channels/v1/github  needs GITHUB_CONNECTOR + GITHUB_APP_SLUG
 - /channels/v1/devbox  authenticated task-state webhooks from devboxd
 - /api/chat            dispatcher agent turn, AI SDK UI message stream (SSE)
-- /api/chats/{id}/tty  websocket proxy to the chat's devbox pty (adds auth)
+- /api/chats/{id}/subagents/{id}/tty  websocket proxy to a subagent pty
 
 State lives in the store (postgres via DATABASE_URL, local files without):
-a chat's transcript is its (chat_id, "messages") stream, its shared devbox
-the (chat_id, "worker") tail, and coder launches are separate task rows.
+a chat's transcript is its (chat_id, "messages") stream; devboxes and their
+subagent launches are separate durable records owned by the chat.
 Slack/github inbound lands in its chat via
 _StoreHub (dedupe, claim binding, append); no turn runs on inbound yet.
 """
@@ -38,7 +38,7 @@ import store
 import vercel.functions
 from agent import classifier, devbox, dispatcher, topic
 from channels import github, slack
-from store import activity, chats, events, spaces, tasks, turns
+from store import activity, chats, devboxes, events, spaces, subagents, turns
 
 log = logging.getLogger("app")
 _background: set[asyncio.Task] = set()
@@ -434,8 +434,9 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                 )
             space = await _space_for_chat(request.chat_id)
             history = [ai.system_message(dispatcher.system_prompt(space)), *stored]
-            record = await events.tail(request.chat_id, "worker") or {"id": request.chat_id}
-            agent = dispatcher.agent_for(record, _task_observer(request.chat_id))
+            agent = dispatcher.agent_for(
+                {"id": request.chat_id}, _task_observer(request.chat_id)
+            )
             await _emit(request.chat_id, channels.event(channels.protocol.TURN_STARTED))
             try:
                 async with agent.run(dispatcher.model(), history) as result:
@@ -515,29 +516,53 @@ def _dedupe_tool_history(messages: list[ai.messages.Message]) -> list[ai.message
     return repaired
 
 
-@app.get("/api/chats/{chat_id}/tasks")
-async def chat_tasks(chat_id: str) -> list[dict]:
-    """Coder launches for the chat, oldest first for stable terminal tabs."""
+@app.get("/api/chats/{chat_id}/devboxes")
+async def chat_devboxes(chat_id: str) -> list[dict]:
+    """Chat-owned devboxes with their subagents, oldest first."""
+    launches = await subagents.list_for_chat(chat_id)
     return [
         {
-            key: record.get(key)
-            for key in ("id", "title", "task_id", "session_id", "state", "created_at")
+            **{
+                key: record.get(key)
+                for key in ("id", "title", "repos", "state", "error", "created_at")
+            },
+            "subagents": [
+                {
+                    key: launch.get(key)
+                    for key in (
+                        "id",
+                        "devbox_id",
+                        "title",
+                        "task_id",
+                        "session_id",
+                        "state",
+                        "created_at",
+                    )
+                }
+                for launch in launches
+                if launch.get("devbox_id") == record["id"]
+            ],
         }
-        for record in await tasks.list_for_chat(chat_id)
+        for record in await devboxes.list_for_chat(chat_id)
     ]
 
 
-@app.websocket("/api/chats/{chat_id}/tasks/{launch_id}/tty")
+@app.websocket("/api/chats/{chat_id}/subagents/{launch_id}/tty")
 async def task_tty(ws: fastapi.WebSocket, chat_id: str, launch_id: str) -> None:
-    """Bridge the browser to one task's durable devbox PTY session."""
-    workspace = await events.tail(chat_id, "worker") or {}
-    launch = await tasks.get(launch_id)
+    """Bridge the browser to one subagent's durable devbox PTY session."""
+    launch = await subagents.get(launch_id)
     await ws.accept()
     if launch is None or launch.get("chat_id") != chat_id:
-        await ws.close(code=4404, reason="unknown coder task")
+        await ws.close(code=4404, reason="unknown subagent")
         return
-    if not workspace.get("box") or not launch.get("session_id"):
-        await ws.close(code=4404, reason="coder session not on the box yet")
+    workspace = await devboxes.get(str(launch.get("devbox_id", "")))
+    if (
+        workspace is None
+        or workspace.get("chat_id") != chat_id
+        or not workspace.get("box")
+        or not launch.get("session_id")
+    ):
+        await ws.close(code=4404, reason="subagent session not on the devbox yet")
         return
     q = ws.query_params
     url = devbox.tty_url(
@@ -570,7 +595,7 @@ async def task_tty(ws: fastapi.WebSocket, chat_id: str, launch_id: str) -> None:
     except (fastapi.WebSocketDisconnect, websockets.ConnectionClosed):
         pass
     except (OSError, websockets.InvalidHandshake):
-        await ws.close(code=4404, reason="coder session not on the box yet")
+        await ws.close(code=4404, reason="subagent session not on the devbox yet")
     finally:
         try:
             await ws.close()
@@ -578,20 +603,9 @@ async def task_tty(ws: fastapi.WebSocket, chat_id: str, launch_id: str) -> None:
             pass
 
 
-@app.websocket("/api/chats/{chat_id}/tty")
-async def tty(ws: fastapi.WebSocket, chat_id: str) -> None:
-    """Compatibility route: attach to the chat's newest coder task."""
-    launches = await tasks.list_for_chat(chat_id)
-    if not launches:
-        await ws.accept()
-        await ws.close(code=4404, reason="no coder session for this chat")
-        return
-    await task_tty(ws, chat_id, launches[-1]["id"])
-
-
 @app.post("/channels/v1/devbox")
 async def devbox_webhook(body: dict, launch_id: str = "", secret: str = "") -> dict:
-    """Persist one task event without disturbing sibling tasks."""
+    """Persist one task event without disturbing sibling subagents."""
     kind = str(body.get("kind", ""))
     payload = body.get(kind)
     if kind not in ("taskStateChange", "assistantEvent") or not isinstance(payload, dict):
@@ -600,7 +614,7 @@ async def devbox_webhook(body: dict, launch_id: str = "", secret: str = "") -> d
     if not task_id:
         raise fastapi.HTTPException(400, "missing task id")
 
-    record = await tasks.get(launch_id) if launch_id else None
+    record = await subagents.get(launch_id) if launch_id else None
     if record is None:
         raise fastapi.HTTPException(404, "unknown task")
     expected = str(record.get("webhook_secret", ""))
@@ -640,7 +654,7 @@ async def devbox_webhook(body: dict, launch_id: str = "", secret: str = "") -> d
     await activity.append(
         record["id"], "state_transition", {"state": state, "result": result, "seq": seq}
     )
-    await tasks.save(record)
+    await subagents.save(record)
     if state not in devbox.TERMINAL_STATES:
         return {"ok": True}
 
@@ -662,7 +676,9 @@ async def _supervise_local(launch_id: str) -> None:
 
 async def _watch_local_task(chat_id: str, record: dict, created: dict) -> None:
     """Observe local work after the chat response, then use the same finisher."""
-    workspace = await events.tail(chat_id, "worker") or {}
+    workspace = await devboxes.get(record["devbox_id"])
+    if workspace is None or workspace.get("chat_id") != chat_id:
+        raise RuntimeError("subagent devbox is missing")
     for attempt in (1, 2, 3):
         state = str(created.get("state", "pending"))
         summary = ""
@@ -688,7 +704,7 @@ async def _watch_local_task(chat_id: str, record: dict, created: dict) -> None:
         if "executable file not found" not in str(result.get("error", "")) or attempt == 3:
             record["state"] = state
             record["result"] = result
-            await tasks.save(record)
+            await subagents.save(record)
             await supervise_task(record["id"], "terminal")
             return
         await asyncio.sleep(20)
@@ -701,30 +717,30 @@ async def _watch_local_task(chat_id: str, record: dict, created: dict) -> None:
             )
         except Exception as error:
             record["state"] = "errored"
-            record["result"] = {"error": f"coder retry failed: {error}"}
+            record["result"] = {"error": f"subagent retry failed: {error}"}
             await activity.append(
                 record["id"],
                 "state_transition",
                 {"from": state, "to": "errored", "error": str(error)},
             )
-            await tasks.save(record)
+            await subagents.save(record)
             await supervise_task(record["id"], "terminal")
             return
         record["task_id"] = created["task_id"]
         record["session_id"] = created["session_id"]
         record["state"] = created["state"]
-        await tasks.save(record)
+        await subagents.save(record)
 
 
 async def supervise_task(launch_id: str, reason: str) -> bool:
     """Run one serialized status check. Return true when the task is terminal."""
-    current = await tasks.get(launch_id)
+    current = await subagents.get(launch_id)
     if current is None:
         return True
     terminal = current.get("state") in devbox.TERMINAL_STATES
-    record = await tasks.claim_supervision(launch_id, terminal or reason == "terminal")
+    record = await subagents.claim_supervision(launch_id, terminal or reason == "terminal")
     if record is None:
-        latest = await tasks.get(launch_id)
+        latest = await subagents.get(launch_id)
         return latest is None or latest.get("state") in devbox.TERMINAL_STATES
 
     generation = int(record["supervision_generation"])
@@ -735,18 +751,18 @@ async def supervise_task(launch_id: str, reason: str) -> bool:
         if cached:
             outcome = SupervisionOutcome(notify=True, message=cached)
         else:
-            workspace = await events.tail(chat_id, "worker") or {"id": chat_id}
             wake = ai.user_message(
-                f"Supervise coder {launch_id}. Call check_coder with launch_id={launch_id!r} "
-                f"and after={cursor}. This is a {reason} check. Do not launch another coder. "
+                f"Supervise subagent {launch_id}. Call check_subagent with "
+                f"subagent_id={launch_id!r} and after={cursor}. This is a {reason} check. "
+                "Do not launch another subagent. "
                 "Return JSON with notify and message. For periodic checks, notify only for a meaningful "
                 "milestone, attention request, failure, or completion. Terminal checks must notify."
             )
-            outcome = await _run_supervision_turn(chat_id, workspace, wake)
+            outcome = await _run_supervision_turn(chat_id, {"id": chat_id}, wake)
             if terminal and outcome.message:
                 record["completion_message"] = outcome.message
-                await tasks.save(record)
-        latest = await tasks.get(launch_id) or record
+                await subagents.save(record)
+        latest = await subagents.get(launch_id) or record
         if int(latest.get("supervision_generation") or 0) != generation:
             return latest.get("state") in devbox.TERMINAL_STATES
         terminal = latest.get("state") in devbox.TERMINAL_STATES
@@ -761,9 +777,9 @@ async def supervise_task(launch_id: str, reason: str) -> bool:
             result = latest.get("result") or {}
             artifact = next(
                 (str(pr["url"]) for pr in result.get("prs") or [] if isinstance(pr, dict) and pr.get("url")),
-                outcome.message or "coder completed",
+                outcome.message or "subagent completed",
             )
-            siblings = await tasks.list_for_chat(chat_id)
+            siblings = await subagents.list_for_chat(chat_id)
             active = any(
                 sibling["id"] != launch_id and sibling.get("state") not in devbox.TERMINAL_STATES
                 for sibling in siblings
@@ -783,10 +799,10 @@ async def supervise_task(launch_id: str, reason: str) -> bool:
         )
         if outcome.notify and outcome.message:
             await events.append(chat_id, "ui", {"type": "messages.changed"})
-        await tasks.finish_supervision(launch_id, generation, **updates)
+        await subagents.finish_supervision(launch_id, generation, **updates)
         return terminal
     except Exception:
-        await tasks.finish_supervision(launch_id, generation)
+        await subagents.finish_supervision(launch_id, generation)
         raise
 
 
@@ -814,8 +830,7 @@ async def _run_inbound_turn(chat_id: str) -> None:
     async with turns.run(chat_id):
         await _emit(chat_id, channels.event(channels.protocol.TURN_STARTED))
         try:
-            record = await events.tail(chat_id, "worker") or {"id": chat_id}
-            message = await _run_dispatcher_turn(chat_id, record)
+            message = await _run_dispatcher_turn(chat_id, {"id": chat_id})
             await _deliver(chat_id, message)
         except Exception as error:
             log.exception("inbound dispatcher turn failed: %s", chat_id)
@@ -866,7 +881,7 @@ async def _run_dispatcher_turn(
             await events.append(chat_id, "messages", message.model_dump(mode="json"))
     return next(
         (message.text for message in reversed(added) if message.role == "assistant" and message.text),
-        "coder completion recorded",
+        "subagent completion recorded",
     )
 
 
