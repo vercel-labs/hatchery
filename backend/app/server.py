@@ -480,7 +480,10 @@ async def _space_for_chat(chat_id: str) -> models.Space:
 def _task_observer(chat_id: str):
     def observe(launch: dict, created: dict) -> None:
         if devbox.webhook_url() is None:
-            _spawn(_watch_local_task(chat_id, launch, created))
+            if created.get("was_terminal"):
+                _spawn(_watch_local_resumed_task(chat_id, launch))
+            else:
+                _spawn(_watch_local_task(chat_id, launch, created))
             _spawn(_supervise_local(launch["id"]))
 
     return observe
@@ -672,6 +675,17 @@ async def _supervise_local(launch_id: str) -> None:
         await asyncio.sleep(300)
         if await supervise_task(launch_id, "periodic"):
             return
+
+
+async def _watch_local_resumed_task(chat_id: str, record: dict) -> None:
+    """Wait for a resumed task to leave its old terminal state, then watch it."""
+    for _ in range(60):
+        row = await devbox.get_task(record["task_id"])
+        if row.get("state") not in devbox.TERMINAL_STATES:
+            await _watch_local_task(chat_id, record, row)
+            return
+        await asyncio.sleep(1)
+    raise RuntimeError("resumed subagent did not start")
 
 
 async def _watch_local_task(chat_id: str, record: dict, created: dict) -> None:

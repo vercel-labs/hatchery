@@ -20,11 +20,13 @@ pass its shell commands verbatim as setup_script when they apply; otherwise
 omit setup_script. You may compose a freeform setup script when the sandbox
 needs other tools. Use create_devbox to create a sandbox, then create_subagent
 with its ID to start coding or investigation. A devbox can host many subagents.
-While a subagent runs the user watches its terminal live, so don't narrate its
-steps. A deployed launch only means the task was accepted: reply only that work
-has started and stop. Use check_subagent for progress or when woken by state
-changes. Never create another subagent merely to check one. If it fails, say so
-plainly and stop. Be terse and concrete."""
+For a revision, follow-up, or answer to an existing subagent, use
+message_subagent instead of creating another one. While a subagent runs the user
+watches its terminal live, so don't narrate its steps. An accepted launch or
+message only means work has started: say so and stop. Use check_subagent for
+progress or when woken by state changes. Never create another subagent merely to
+check or continue one. If it fails, say so plainly and stop. Be terse and
+concrete."""
 
 
 def system_prompt(space: models.Space) -> str:
@@ -204,6 +206,70 @@ def agent_for(
         }
 
     @ai.tool
+    async def message_subagent(
+        message: str,
+        subagent_id: str | None = None,
+    ) -> dict[str, typing.Any]:
+        """Send a revision, follow-up, or answer to an existing subagent.
+
+        Omit subagent_id to message this chat's newest subagent that has not
+        errored. Completed subagents can be resumed. The same task, model,
+        devbox, and conversation are preserved.
+        """
+        launches = await subagents.list_for_chat(chat["id"])
+        if subagent_id is None:
+            launch = next(
+                (
+                    item
+                    for item in reversed(launches)
+                    if item.get("state") != "errored" and item.get("task_id")
+                ),
+                None,
+            )
+            if launch is None:
+                raise ValueError("no subagent can accept a message")
+        else:
+            launch = next((item for item in launches if item["id"] == subagent_id), None)
+            if launch is None:
+                raise ValueError("subagent does not belong to this chat")
+            if launch.get("state") == "errored":
+                raise RuntimeError("errored subagent cannot accept messages")
+            if not launch.get("task_id"):
+                raise RuntimeError("subagent task is not ready")
+
+        was_terminal = launch.get("state") in devbox.TERMINAL_STATES
+        delivered = await devbox.send_task_prompt(launch["task_id"], message)
+        launch = await subagents.resume(launch["id"])
+        await chats.finish(chat["id"], "running")
+        await events.append(chat["id"], "ui", {"type": "chat.changed"})
+        await events.append(
+            chat["id"],
+            "ui",
+            {
+                "type": "task.changed",
+                "launch_id": launch["id"],
+                "devbox_id": launch["devbox_id"],
+                "state": "running",
+            },
+        )
+
+        if was_terminal and on_task_created is not None:
+            on_task_created(
+                dict(launch),
+                {**delivered, "resumed": True, "was_terminal": True},
+            )
+        if was_terminal and devbox.webhook_url() is not None:
+            run = await workflow.start(supervisor.supervise, launch["id"])
+            launch["supervision_run_id"] = run.run_id
+            await subagents.save(launch)
+
+        return {
+            "subagent_id": launch["id"],
+            "task_id": launch["task_id"],
+            "state": "running",
+        }
+
+    @ai.tool
     async def check_subagent(
         subagent_id: str | None = None,
         after: int | None = None,
@@ -217,5 +283,11 @@ def agent_for(
         return await activity.status(chat["id"], subagent_id, after=after, limit=limit)
 
     return ai.Agent(
-        tools=[create_devbox, list_devboxes, create_subagent, check_subagent]
+        tools=[
+            create_devbox,
+            list_devboxes,
+            create_subagent,
+            message_subagent,
+            check_subagent,
+        ]
     )

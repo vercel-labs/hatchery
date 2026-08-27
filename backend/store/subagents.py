@@ -144,6 +144,42 @@ async def get(task_id: str) -> dict | None:
         return json.loads(path.read_text()) if path.exists() else None
 
 
+async def resume(task_id: str) -> dict:
+    """Reset completion state after more input was delivered to the same task."""
+    if store.use_postgres():
+        from store import db
+
+        pool = await db.pool()
+        async with pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT data FROM hatchery_subagents WHERE id = $1 FOR UPDATE", task_id
+            )
+            if row is None:
+                raise KeyError(task_id)
+            record = _data(row["data"])
+            record["state"] = "running"
+            record["completion_delivered"] = False
+            for key in ("result", "completion_message", "supervision_lease_until"):
+                record.pop(key, None)
+            await conn.execute(
+                "UPDATE hatchery_subagents SET data = $2::jsonb WHERE id = $1",
+                task_id,
+                json.dumps(record, separators=(",", ":")),
+            )
+            return record
+    path = _path(task_id)
+    with _lock:
+        if not path.exists():
+            raise KeyError(task_id)
+        record = json.loads(path.read_text())
+        record["state"] = "running"
+        record["completion_delivered"] = False
+        for key in ("result", "completion_message", "supervision_lease_until"):
+            record.pop(key, None)
+        path.write_text(json.dumps(record, separators=(",", ":")))
+        return record
+
+
 async def claim_supervision(task_id: str, terminal: bool) -> dict | None:
     """Atomically claim one dispatcher check, with an expiring crash-safe lease."""
     if store.use_postgres():

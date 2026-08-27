@@ -809,6 +809,39 @@ async def test_periodic_supervision_can_stay_silent(monkeypatch):
     assert "after=-1" in seen[0]
 
 
+async def test_local_resumed_task_waits_for_new_run(monkeypatch):
+    launch = {
+        "id": "subagent_1",
+        "chat_id": "chat_1",
+        "devbox_id": "devbox_1",
+        "task_id": "task_1",
+    }
+    rows = iter(
+        [
+            {"task_id": "task_1", "state": "complete"},
+            {"task_id": "task_1", "state": "running"},
+        ]
+    )
+    watched = []
+
+    async def get_task(task_id):
+        return next(rows)
+
+    async def watch(chat_id, record, created):
+        watched.append((chat_id, record, created))
+
+    async def sleep(_):
+        pass
+
+    monkeypatch.setattr(server.devbox, "get_task", get_task)
+    monkeypatch.setattr(server, "_watch_local_task", watch)
+    monkeypatch.setattr(server.asyncio, "sleep", sleep)
+
+    await server._watch_local_resumed_task("chat_1", launch)
+
+    assert watched == [("chat_1", launch, {"task_id": "task_1", "state": "running"})]
+
+
 async def test_spawn_keeps_background_task_alive():
     ran = asyncio.Event()
 

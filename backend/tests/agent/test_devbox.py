@@ -103,6 +103,29 @@ async def test_create_task_uses_fx(monkeypatch):
     }
 
 
+async def test_send_task_prompt_does_not_retry(monkeypatch):
+    seen = []
+
+    async def send(self, request, **kwargs):
+        seen.append(request)
+        return httpx.Response(
+            200,
+            request=request,
+            json={"task_id": "task_1", "state": "complete"},
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
+    monkeypatch.setattr(devbox, "token", lambda: "token")
+
+    result = await devbox.send_task_prompt("task_1", "use the existing helper")
+
+    assert result == {"task_id": "task_1", "state": "complete"}
+    assert len(seen) == 1
+    assert seen[0].method == "POST"
+    assert seen[0].url.path == "/v1/tasks/task_1/prompt"
+    assert json.loads(seen[0].content) == {"prompt": "use the existing helper"}
+
+
 def test_tty_url_targets_real_devbox_session(monkeypatch):
     monkeypatch.setattr(devbox, "token", lambda: "token")
     url = devbox.tty_url("https://box.example", "session_1", "12", "80", "24")

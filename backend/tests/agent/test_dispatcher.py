@@ -169,6 +169,84 @@ async def test_multiple_subagents_can_share_devbox(monkeypatch):
     assert {launch["devbox_id"] for launch in launches} == {workspace["id"]}
 
 
+async def test_message_subagent_resumes_existing_task(monkeypatch):
+    older = await subagents.create("chat_1", "devbox_1", "older", "secret")
+    older.update({"task_id": "task_1", "state": "running"})
+    await subagents.save(older)
+    launch = await subagents.create("chat_1", "devbox_1", "fix it", "secret")
+    launch.update(
+        {
+            "task_id": "task_2",
+            "state": "complete",
+            "result": {"summary": "first result"},
+            "completion_delivered": True,
+            "completion_message": "done",
+        }
+    )
+    await subagents.save(launch)
+    seen = []
+
+    async def send_task_prompt(task_id, prompt):
+        seen.append((task_id, prompt))
+        return {"task_id": task_id, "state": "complete"}
+
+    monkeypatch.setattr(dispatcher.devbox, "send_task_prompt", send_task_prompt)
+    monkeypatch.setattr(dispatcher.devbox, "webhook_url", lambda: None)
+
+    agent = dispatcher.agent_for({"id": "chat_1"})
+    tool = next(tool for tool in agent.tools if tool.name == "message_subagent")
+    result = await tool.fn("use the existing helper")
+
+    saved = await subagents.get(launch["id"])
+    assert seen == [("task_2", "use the existing helper")]
+    assert result == {"subagent_id": launch["id"], "task_id": "task_2", "state": "running"}
+    assert saved is not None
+    assert saved["state"] == "running"
+    assert saved["completion_delivered"] is False
+    assert "result" not in saved
+    assert "completion_message" not in saved
+    assert len(await subagents.list_for_chat("chat_1")) == 2
+
+
+async def test_message_subagent_observer_marks_completed_resume(monkeypatch):
+    launch = await subagents.create("chat_1", "devbox_1", "fix it", "secret")
+    launch.update({"task_id": "task_1", "state": "complete"})
+    await subagents.save(launch)
+    observed = []
+
+    async def send_task_prompt(task_id, prompt):
+        return {"task_id": task_id, "state": "complete"}
+
+    monkeypatch.setattr(dispatcher.devbox, "send_task_prompt", send_task_prompt)
+    monkeypatch.setattr(dispatcher.devbox, "webhook_url", lambda: None)
+    agent = dispatcher.agent_for({"id": "chat_1"}, lambda record, sent: observed.append(sent))
+    tool = next(tool for tool in agent.tools if tool.name == "message_subagent")
+
+    await tool.fn("continue")
+
+    assert observed == [
+        {"task_id": "task_1", "state": "complete", "resumed": True, "was_terminal": True}
+    ]
+
+
+async def test_message_subagent_rejects_wrong_chat_and_errored_task(monkeypatch):
+    foreign = await subagents.create("chat_2", "devbox_2", "foreign", "secret")
+    foreign.update({"task_id": "task_foreign", "state": "running"})
+    await subagents.save(foreign)
+    failed = await subagents.create("chat_1", "devbox_1", "failed", "secret")
+    failed.update({"task_id": "task_failed", "state": "errored"})
+    await subagents.save(failed)
+
+    agent = dispatcher.agent_for({"id": "chat_1"})
+    tool = next(tool for tool in agent.tools if tool.name == "message_subagent")
+    with pytest.raises(ValueError, match="does not belong"):
+        await tool.fn("continue", foreign["id"])
+    with pytest.raises(RuntimeError, match="errored"):
+        await tool.fn("continue", failed["id"])
+    with pytest.raises(ValueError, match="no subagent"):
+        await tool.fn("continue")
+
+
 async def test_check_subagent_reads_chat_activity():
     launch = await subagents.create("chat_1", "devbox_1", "fix it", "secret")
     launch["state"] = "running"

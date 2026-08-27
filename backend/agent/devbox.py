@@ -152,6 +152,21 @@ async def create_task(
             await asyncio.sleep(3)
 
 
+async def send_task_prompt(task_id: str, prompt: str) -> dict:
+    """Deliver more input to an existing task without retrying.
+
+    The endpoint may wake a sleeping devbox and can take several minutes. A
+    failed request is not retried because accepted prompts are not idempotent.
+    """
+    async with httpx.AsyncClient(timeout=300) as http:
+        r = await http.post(
+            f"{API}/v1/tasks/{task_id}/prompt",
+            headers={"Authorization": f"Bearer {token()}"},
+            json={"prompt": prompt},
+        )
+        return _checked(r).json()
+
+
 async def get_task(task_id: str) -> dict:
     """The durable task row (state + result), box-independent.
 
