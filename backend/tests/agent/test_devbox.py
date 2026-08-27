@@ -136,6 +136,59 @@ async def test_create_task_uses_fx(monkeypatch):
     }
 
 
+async def test_delete_task_and_box_use_control_plane_endpoints(monkeypatch):
+    seen = []
+
+    async def send(self, request, **kwargs):
+        seen.append(request)
+        return httpx.Response(200, request=request, json={"deleted": True})
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
+    monkeypatch.setattr(devbox, "token", lambda: "token")
+
+    await devbox.delete_task("task_1")
+    await devbox.delete_box("box_1")
+
+    assert [(request.method, request.url.path) for request in seen] == [
+        ("DELETE", "/v1/tasks/task_1"),
+        ("DELETE", "/v1/devbox/box_1"),
+    ]
+    assert all(request.headers["authorization"] == "Bearer token" for request in seen)
+
+
+async def test_send_tty_input_attaches_and_writes(monkeypatch):
+    sent = []
+
+    class Socket:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def recv(self):
+            return json.dumps({"type": "handshake", "body": {"sessionId": "session_1"}})
+
+        async def send(self, frame):
+            sent.append(json.loads(frame))
+
+    async def no_sleep(delay):
+        assert delay == 0.75
+
+    monkeypatch.setattr(devbox.websockets, "connect", lambda *args, **kwargs: Socket())
+    monkeypatch.setattr(devbox, "token", lambda: "token")
+    monkeypatch.setattr(devbox.asyncio, "sleep", no_sleep)
+
+    await devbox.send_tty_input(
+        "https://box.example", "session_1", b"\x03", b"exit\r"
+    )
+
+    assert sent == [
+        {"type": "tty-input", "body": {"data": "Aw=="}},
+        {"type": "tty-input", "body": {"data": "ZXhpdA0="}},
+    ]
+
+
 async def test_send_task_prompt_does_not_retry(monkeypatch):
     seen = []
 

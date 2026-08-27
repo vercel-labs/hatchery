@@ -615,6 +615,57 @@ async def create_manual_terminal(chat_id: str, devbox_id: str) -> dict:
     return terminal
 
 
+@app.delete("/api/chats/{chat_id}/terminals/{terminal_id}", status_code=204)
+async def delete_manual_terminal(chat_id: str, terminal_id: str) -> None:
+    terminal = await terminals.get(terminal_id)
+    if terminal is None or terminal.get("chat_id") != chat_id:
+        raise fastapi.HTTPException(404, "unknown terminal")
+    workspace = await devboxes.get(str(terminal.get("devbox_id", "")))
+    if workspace is None or workspace.get("chat_id") != chat_id:
+        raise fastapi.HTTPException(404, "unknown devbox")
+    if terminal.get("session_id") and workspace.get("box"):
+        await devbox.send_tty_input(
+            workspace["box"]["url"], terminal["session_id"], b"\x03", b"exit\r"
+        )
+    await terminals.delete(terminal_id)
+    await events.append(chat_id, "ui", {"type": "devbox.changed"})
+
+
+@app.delete("/api/chats/{chat_id}/subagents/{launch_id}", status_code=204)
+async def delete_subagent(chat_id: str, launch_id: str) -> None:
+    launch = await subagents.get(launch_id)
+    if launch is None or launch.get("chat_id") != chat_id:
+        raise fastapi.HTTPException(404, "unknown subagent")
+    workspace = await devboxes.get(str(launch.get("devbox_id", "")))
+    if workspace is None or workspace.get("chat_id") != chat_id:
+        raise fastapi.HTTPException(404, "unknown devbox")
+    if (
+        launch.get("state") not in devbox.TERMINAL_STATES
+        and launch.get("session_id")
+        and workspace.get("box")
+    ):
+        await devbox.send_tty_input(workspace["box"]["url"], launch["session_id"], b"\x03")
+    if launch.get("task_id"):
+        await devbox.delete_task(launch["task_id"])
+    await subagents.delete(launch_id)
+    await events.append(chat_id, "ui", {"type": "devbox.changed"})
+
+
+@app.delete("/api/chats/{chat_id}/devboxes/{devbox_id}", status_code=204)
+async def delete_chat_devbox(chat_id: str, devbox_id: str) -> None:
+    workspace = await devboxes.get(devbox_id)
+    if workspace is None or workspace.get("chat_id") != chat_id:
+        raise fastapi.HTTPException(404, "unknown devbox")
+    if workspace.get("state") == "creating":
+        raise fastapi.HTTPException(409, "devbox is still being created")
+    if workspace.get("box"):
+        await devbox.delete_box(workspace["box"]["id"])
+    await terminals.delete_for_devbox(devbox_id)
+    await subagents.delete_for_devbox(devbox_id)
+    await devboxes.delete(devbox_id)
+    await events.append(chat_id, "ui", {"type": "devbox.changed"})
+
+
 async def _bridge_tty(
     ws: fastapi.WebSocket,
     workspace: dict,

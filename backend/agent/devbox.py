@@ -10,6 +10,7 @@ auth.json so `vc login` is all the setup there is.
 """
 
 import asyncio
+import base64
 import json
 import os
 import pathlib
@@ -181,6 +182,51 @@ async def send_task_prompt(task_id: str, prompt: str) -> dict:
             json={"prompt": prompt},
         )
         return _checked(r).json()
+
+
+async def delete_task(task_id: str) -> None:
+    async with httpx.AsyncClient(timeout=30) as http:
+        r = await http.delete(
+            f"{API}/v1/tasks/{task_id}", headers={"Authorization": f"Bearer {token()}"}
+        )
+        _checked(r)
+
+
+async def delete_box(box_id: str) -> None:
+    async with httpx.AsyncClient(timeout=30) as http:
+        r = await http.delete(
+            f"{API}/v1/devbox/{box_id}", headers={"Authorization": f"Bearer {token()}"}
+        )
+        _checked(r)
+
+
+async def send_tty_input(
+    box_url: str,
+    session_id: str,
+    data: bytes,
+    followup: bytes | None = None,
+) -> None:
+    url = tty_url(box_url, session_id, "0", "80", "24")
+    async with websockets.connect(url, max_size=None) as ws:
+        while True:
+            frame = json.loads(await ws.recv())
+            if frame.get("type") == "handshake":
+                break
+
+        async def send(value: bytes) -> None:
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "tty-input",
+                        "body": {"data": base64.b64encode(value).decode()},
+                    }
+                )
+            )
+
+        await send(data)
+        if followup is not None:
+            await asyncio.sleep(0.75)
+            await send(followup)
 
 
 async def get_task(task_id: str) -> dict:

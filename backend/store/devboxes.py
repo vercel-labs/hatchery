@@ -78,6 +78,22 @@ async def get(devbox_id: str) -> dict | None:
         return json.loads(path.read_text()) if path.exists() else None
 
 
+async def delete(devbox_id: str) -> bool:
+    if store.use_postgres():
+        from store import db
+
+        result = await (await db.pool()).execute(
+            "DELETE FROM hatchery_devboxes WHERE id = $1", devbox_id
+        )
+        return result != "DELETE 0"
+    path = _path(devbox_id)
+    with _lock:
+        if not path.exists():
+            return False
+        path.unlink()
+        return True
+
+
 async def list_for_chat(chat_id: str) -> list[dict]:
     if store.use_postgres():
         from store import db

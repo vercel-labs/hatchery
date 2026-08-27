@@ -6,7 +6,7 @@ import pytest
 import ai
 import channels
 from app import server
-from store import activity, chats, events, subagents
+from store import activity, chats, events, subagents, terminals
 
 
 def client() -> httpx.AsyncClient:
@@ -950,6 +950,103 @@ async def test_manual_terminal_create_is_listed_on_devbox():
     assert listed.json()[0]["terminals"] == [
         {key: value for key, value in created.json().items() if key != "chat_id"}
     ]
+
+
+async def test_manual_terminal_delete_stops_session_and_removes_record(monkeypatch):
+    space = await server.spaces.default()
+    chat = await chats.create(space.id, "task")
+    workspace = await server.devboxes.create(chat.id, "main", [])
+    workspace["state"] = "ready"
+    workspace["box"] = {"id": "box_1", "url": "https://box.example"}
+    await server.devboxes.save(workspace)
+    terminal = await terminals.create(chat.id, workspace["id"], "bash")
+    terminal["session_id"] = "session_1"
+    await terminals.save(terminal)
+    sent = []
+
+    async def send_tty_input(url, session_id, data, followup=None):
+        sent.append((url, session_id, data, followup))
+
+    monkeypatch.setattr(server.devbox, "send_tty_input", send_tty_input)
+
+    async with client() as c:
+        response = await c.delete(f"/api/chats/{chat.id}/terminals/{terminal['id']}")
+
+    assert response.status_code == 204
+    assert sent == [
+        ("https://box.example", "session_1", b"\x03", b"exit\r"),
+    ]
+    assert await terminals.get(terminal["id"]) is None
+
+
+async def test_subagent_delete_interrupts_running_task_and_removes_records(monkeypatch):
+    space = await server.spaces.default()
+    chat = await chats.create(space.id, "task")
+    workspace = await server.devboxes.create(chat.id, "main", [])
+    workspace["state"] = "ready"
+    workspace["box"] = {"id": "box_1", "url": "https://box.example"}
+    await server.devboxes.save(workspace)
+    launch = await subagents.create(chat.id, workspace["id"], "work", "secret")
+    launch.update(task_id="task_1", session_id="session_1", state="running")
+    await subagents.save(launch)
+    sent = []
+    deleted = []
+
+    async def send_tty_input(url, session_id, data):
+        sent.append((url, session_id, data))
+
+    async def delete_task(task_id):
+        deleted.append(task_id)
+
+    monkeypatch.setattr(server.devbox, "send_tty_input", send_tty_input)
+    monkeypatch.setattr(server.devbox, "delete_task", delete_task)
+
+    async with client() as c:
+        response = await c.delete(f"/api/chats/{chat.id}/subagents/{launch['id']}")
+
+    assert response.status_code == 204
+    assert sent == [("https://box.example", "session_1", b"\x03")]
+    assert deleted == ["task_1"]
+    assert await subagents.get(launch["id"]) is None
+
+
+async def test_devbox_delete_stops_box_and_cascades_local_records(monkeypatch):
+    space = await server.spaces.default()
+    chat = await chats.create(space.id, "task")
+    workspace = await server.devboxes.create(chat.id, "main", [])
+    workspace["state"] = "ready"
+    workspace["box"] = {"id": "box_1", "url": "https://box.example"}
+    await server.devboxes.save(workspace)
+    terminal = await terminals.create(chat.id, workspace["id"], "bash")
+    launch = await subagents.create(chat.id, workspace["id"], "work", "secret")
+    deleted = []
+
+    async def delete_box(box_id):
+        deleted.append(box_id)
+
+    monkeypatch.setattr(server.devbox, "delete_box", delete_box)
+
+    async with client() as c:
+        response = await c.delete(f"/api/chats/{chat.id}/devboxes/{workspace['id']}")
+
+    assert response.status_code == 204
+    assert deleted == ["box_1"]
+    assert await server.devboxes.get(workspace["id"]) is None
+    assert await terminals.get(terminal["id"]) is None
+    assert await subagents.get(launch["id"]) is None
+
+
+async def test_devbox_delete_rejects_creating_box():
+    space = await server.spaces.default()
+    chat = await chats.create(space.id, "task")
+    workspace = await server.devboxes.create(chat.id, "main", [])
+
+    async with client() as c:
+        response = await c.delete(f"/api/chats/{chat.id}/devboxes/{workspace['id']}")
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "devbox is still being created"}
+    assert await server.devboxes.get(workspace["id"]) is not None
 
 
 async def test_chat_devboxes_group_subagents_without_secrets():

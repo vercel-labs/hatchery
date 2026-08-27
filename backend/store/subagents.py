@@ -120,6 +120,45 @@ async def get(task_id: str) -> dict | None:
         return json.loads(path.read_text()) if path.exists() else None
 
 
+async def delete(task_id: str) -> bool:
+    if store.use_postgres():
+        from store import db
+
+        result = await (await db.pool()).execute(
+            "DELETE FROM hatchery_subagents WHERE id = $1", task_id
+        )
+        return result != "DELETE 0"
+    path = _path(task_id)
+    with _lock:
+        if not path.exists():
+            return False
+        path.unlink()
+        return True
+
+
+async def delete_for_devbox(devbox_id: str) -> None:
+    for record in await list_for_devbox(devbox_id):
+        await delete(record["id"])
+
+
+async def list_for_devbox(devbox_id: str) -> list[dict]:
+    if store.use_postgres():
+        from store import db
+
+        rows = await (await db.pool()).fetch(
+            "SELECT data FROM hatchery_subagents WHERE data->>'devbox_id' = $1 ORDER BY created_at",
+            devbox_id,
+        )
+        return [_data(row["data"]) for row in rows]
+    with _lock:
+        found = []
+        for path in (store.data_dir() / "subagents").glob("*.json"):
+            record = json.loads(path.read_text())
+            if record.get("devbox_id") == devbox_id:
+                found.append(record)
+        return sorted(found, key=lambda record: record.get("created_at", ""))
+
+
 async def resume(task_id: str) -> dict:
     """Reset completion state after more input was delivered to the same task."""
     if store.use_postgres():

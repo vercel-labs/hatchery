@@ -85,6 +85,55 @@ async def get(terminal_id: str) -> dict | None:
         return json.loads(path.read_text()) if path.exists() else None
 
 
+async def delete(terminal_id: str) -> bool:
+    await ensure_ready()
+    if store.use_postgres():
+        from store import db
+
+        result = await (await db.pool()).execute(
+            "DELETE FROM hatchery_terminals WHERE id = $1", terminal_id
+        )
+        return result != "DELETE 0"
+    path = _path(terminal_id)
+    with _lock:
+        if not path.exists():
+            return False
+        path.unlink()
+        return True
+
+
+async def delete_for_devbox(devbox_id: str) -> None:
+    await ensure_ready()
+    if store.use_postgres():
+        from store import db
+
+        await (await db.pool()).execute(
+            "DELETE FROM hatchery_terminals WHERE devbox_id = $1", devbox_id
+        )
+        return
+    for record in await list_for_devbox(devbox_id):
+        await delete(record["id"])
+
+
+async def list_for_devbox(devbox_id: str) -> list[dict]:
+    await ensure_ready()
+    if store.use_postgres():
+        from store import db
+
+        rows = await (await db.pool()).fetch(
+            "SELECT data FROM hatchery_terminals WHERE devbox_id = $1 ORDER BY created_at",
+            devbox_id,
+        )
+        return [_data(row["data"]) for row in rows]
+    with _lock:
+        found = []
+        for path in (store.data_dir() / "terminals").glob("*.json"):
+            record = json.loads(path.read_text())
+            if record.get("devbox_id") == devbox_id:
+                found.append(record)
+        return sorted(found, key=lambda record: record.get("created_at", ""))
+
+
 async def list_for_chat(chat_id: str) -> list[dict]:
     await ensure_ready()
     if store.use_postgres():

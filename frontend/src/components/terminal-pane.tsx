@@ -196,6 +196,7 @@ export function TerminalPane({
   const [selectedDevboxId, setSelectedDevboxId] = useState(latest?.id ?? "");
   const [selectedTabId, setSelectedTabId] = useState(tabs(latest).at(-1)?.id ?? "");
   const [creating, setCreating] = useState(false);
+  const [deletingId, setDeletingId] = useState("");
   const activeDevbox =
     devboxes.find((box) => box.id === selectedDevboxId) ?? latest;
   const activeTabs = tabs(activeDevbox);
@@ -224,19 +225,69 @@ export function TerminalPane({
     }
   };
 
+  const deleteTab = async (tab: TerminalTab) => {
+    const label = tab.kind === "subagent" ? "Stop and delete this subagent?" : "Close this terminal?";
+    if (!window.confirm(label)) return;
+    setDeletingId(tab.id);
+    try {
+      const collection = tab.kind === "subagent" ? "subagents" : "terminals";
+      const response = await fetch(
+        `${apiBase()}/api/chats/${chatId}/${collection}/${tab.id}`,
+        { method: "DELETE" },
+      );
+      if (!response.ok) return;
+      const remaining = activeTabs.filter((candidate) => candidate.id !== tab.id);
+      setSelectedTabId(remaining.at(-1)?.id ?? "");
+      onChanged();
+    } finally {
+      setDeletingId("");
+    }
+  };
+
+  const deleteDevbox = async (box: DevboxWorkspace) => {
+    if (!window.confirm(`Delete ${box.title || "this sandbox"} and stop everything in it?`)) return;
+    setDeletingId(box.id);
+    try {
+      const response = await fetch(
+        `${apiBase()}/api/chats/${chatId}/devboxes/${box.id}`,
+        { method: "DELETE" },
+      );
+      if (!response.ok) return;
+      const remaining = devboxes.filter((candidate) => candidate.id !== box.id);
+      const next = remaining.at(-1);
+      setSelectedDevboxId(next?.id ?? "");
+      setSelectedTabId(tabs(next).at(-1)?.id ?? "");
+      onChanged();
+      if (!remaining.length) onClose();
+    } finally {
+      setDeletingId("");
+    }
+  };
+
   return (
     <div className="flex h-2/5 min-w-0 flex-none flex-col border-t @4xl:h-auto @4xl:min-w-[28rem] @4xl:flex-1 @4xl:border-t-0 @4xl:border-l">
       <div className="flex h-10 shrink-0 items-center gap-1 overflow-x-auto border-b px-2">
         {devboxes.map((box, index) => (
-          <Button
-            key={box.id}
-            variant={box.id === activeDevbox?.id ? "secondary" : "ghost"}
-            size="sm"
-            className="max-w-40 shrink-0"
-            onClick={() => selectDevbox(box)}
-          >
-            <span className="truncate">{box.title || `devbox ${index + 1}`}</span>
-          </Button>
+          <div key={box.id} className="flex shrink-0 items-center">
+            <Button
+              variant={box.id === activeDevbox?.id ? "secondary" : "ghost"}
+              size="sm"
+              className="max-w-40 rounded-r-none"
+              onClick={() => selectDevbox(box)}
+            >
+              <span className="truncate">{box.title || `devbox ${index + 1}`}</span>
+            </Button>
+            <Button
+              variant={box.id === activeDevbox?.id ? "secondary" : "ghost"}
+              size="icon-sm"
+              className="rounded-l-none"
+              aria-label={`Delete ${box.title || `devbox ${index + 1}`}`}
+              disabled={deletingId === box.id || box.state === "creating"}
+              onClick={() => void deleteDevbox(box)}
+            >
+              <XIcon />
+            </Button>
+          </div>
         ))}
         <Button
           variant="ghost"
@@ -259,17 +310,28 @@ export function TerminalPane({
       </div>
       <div className="flex h-9 shrink-0 items-center gap-1 overflow-x-auto border-b px-2">
         {activeTabs.map((tab, index) => (
-          <Button
-            key={tab.id}
-            variant={tab.id === activeTab?.id ? "secondary" : "ghost"}
-            size="xs"
-            className="max-w-40 shrink-0"
-            onClick={() => setSelectedTabId(tab.id)}
-          >
-            <span className="truncate">
-              {tab.title || `${tab.kind === "manual" ? "bash" : "subagent"} ${index + 1}`}
-            </span>
-          </Button>
+          <div key={tab.id} className="flex shrink-0 items-center">
+            <Button
+              variant={tab.id === activeTab?.id ? "secondary" : "ghost"}
+              size="xs"
+              className="max-w-40 rounded-r-none"
+              onClick={() => setSelectedTabId(tab.id)}
+            >
+              <span className="truncate">
+                {tab.title || `${tab.kind === "manual" ? "bash" : "subagent"} ${index + 1}`}
+              </span>
+            </Button>
+            <Button
+              variant={tab.id === activeTab?.id ? "secondary" : "ghost"}
+              size="icon-xs"
+              className="rounded-l-none"
+              aria-label={`Close ${tab.title || tab.kind}`}
+              disabled={deletingId === tab.id}
+              onClick={() => void deleteTab(tab)}
+            >
+              <XIcon />
+            </Button>
+          </div>
         ))}
         <Button
           variant="ghost"
