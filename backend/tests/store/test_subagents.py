@@ -3,27 +3,27 @@ import pytest
 from store import activity, events, subagents
 
 
-async def test_legacy_local_records_are_removed_once(local_store):
+async def test_store_setup_preserves_existing_local_data(local_store):
     task_dir = local_store / "tasks"
     event_dir = local_store / "events"
     task_dir.mkdir(parents=True)
     event_dir.mkdir(parents=True)
-    (task_dir / "launch_old.json").write_text("{}")
-    (event_dir / "chat_1.messages.jsonl").write_text('{"old":true}\n')
-    (event_dir / "chat_1.worker.jsonl").write_text('{"old":true}\n')
-    (event_dir / "launch_old.activity.jsonl").write_text('{"old":true}\n')
+    task = task_dir / "launch_old.json"
+    messages = event_dir / "chat_1.messages.jsonl"
+    worker = event_dir / "chat_1.worker.jsonl"
+    activity = event_dir / "launch_old.activity.jsonl"
+    task.write_text("{}")
+    messages.write_text('{"old":true}\n')
+    worker.write_text('{"old":true}\n')
+    activity.write_text('{"old":true}\n')
 
     await subagents.ensure_ready()
 
-    assert not task_dir.exists()
-    assert not (event_dir / "chat_1.messages.jsonl").exists()
-    assert not (event_dir / "chat_1.worker.jsonl").exists()
-    assert not (event_dir / "launch_old.activity.jsonl").exists()
+    assert task.exists()
+    assert messages.exists()
+    assert worker.exists()
+    assert activity.exists()
     assert (local_store / "subagents").is_dir()
-
-    await events.append("chat_1", "messages", {"new": True})
-    await subagents.ensure_ready()
-    assert await events.read("chat_1", "messages") == [(0, {"new": True})]
 
 
 async def test_tasks_are_independent_and_ordered_per_chat():

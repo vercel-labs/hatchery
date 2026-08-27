@@ -9,16 +9,6 @@ import uuid
 import store
 
 _SCHEMA = """\
-DO $$
-BEGIN
-    IF to_regclass('hatchery_tasks') IS NOT NULL THEN
-        DELETE FROM hatchery_events
-        WHERE ns IN ('messages', 'worker') OR (ns = 'activity' AND stream_id LIKE 'launch_%');
-        DELETE FROM hatchery_streams
-        WHERE ns IN ('messages', 'worker') OR (ns = 'activity' AND stream_id LIKE 'launch_%');
-        DROP TABLE hatchery_tasks;
-    END IF;
-END $$;
 CREATE TABLE IF NOT EXISTS hatchery_subagents (
     id         TEXT PRIMARY KEY,
     chat_id    TEXT NOT NULL,
@@ -41,20 +31,6 @@ async def ensure_ready() -> None:
             await (await db.pool()).execute(_SCHEMA)
             _schema_ready = True
     else:
-        legacy = store.data_dir() / "tasks"
-        if legacy.exists():
-            for path in legacy.glob("*.json"):
-                path.unlink()
-            legacy.rmdir()
-            event_dir = store.data_dir() / "events"
-            if event_dir.exists():
-                for pattern in (
-                    "*.messages.jsonl",
-                    "*.worker.jsonl",
-                    "launch_*.activity.jsonl",
-                ):
-                    for path in event_dir.glob(pattern):
-                        path.unlink()
         (store.data_dir() / "subagents").mkdir(parents=True, exist_ok=True)
 
 
