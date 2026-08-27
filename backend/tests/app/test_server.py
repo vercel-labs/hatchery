@@ -867,6 +867,53 @@ def test_spawn_uses_wait_until_on_vercel(monkeypatch):
     coro.close()
 
 
+async def test_manual_devbox_create_returns_before_background_provision(monkeypatch):
+    space = await server.spaces.default()
+    chat = await chats.create(space.id, "task")
+    spawned = []
+    monkeypatch.setattr(server, "_spawn", spawned.append)
+
+    async with client() as c:
+        response = await c.post(
+            f"/api/chats/{chat.id}/devboxes",
+            json={
+                "title": "manual",
+                "repos": ["vercel/vercel-py"],
+                "setup_script": "uv sync",
+                "ports": [8000],
+            },
+        )
+
+    assert response.status_code == 202
+    assert response.json()["state"] == "creating"
+    [record] = await server.devboxes.list_for_chat(chat.id)
+    assert record["setup_script"] == "uv sync"
+    assert record["ports"] == [8000]
+    assert len(spawned) == 1
+    spawned[0].close()
+
+
+async def test_manual_devbox_suggestion_uses_chat_space(monkeypatch):
+    space = await server.spaces.create("docs")
+    space.about = "Build documentation."
+    space.repos = ["acme/docs"]
+    await server.spaces.save(space)
+    chat = await chats.create(space.id, "task")
+    seen = []
+
+    async def suggest(selected):
+        seen.append(selected)
+        return server.sandbox.Launch(title="docs", repos=selected.repos)
+
+    monkeypatch.setattr(server.sandbox, "suggest", suggest)
+    async with client() as c:
+        response = await c.get(f"/api/chats/{chat.id}/devboxes/suggestion")
+
+    assert response.status_code == 200
+    assert response.json()["repos"] == ["acme/docs"]
+    assert seen == [space]
+
+
 async def test_chat_devboxes_group_subagents_without_secrets():
     space = await server.spaces.default()
     chat = await chats.create(space.id, "task")

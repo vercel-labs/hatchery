@@ -2,7 +2,7 @@
 
 import "@xterm/xterm/css/xterm.css";
 
-import { XIcon } from "lucide-react";
+import { PlusIcon, XIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -152,10 +152,12 @@ export function TerminalPane({
   chatId,
   devboxes,
   onClose,
+  onCreateSandbox,
 }: {
   chatId: string;
   devboxes: DevboxWorkspace[];
   onClose: () => void;
+  onCreateSandbox: () => void;
 }) {
   const latest = devboxes.findLast((box) => box.subagents.length) ?? devboxes.at(-1);
   const [selectedDevboxId, setSelectedDevboxId] = useState(latest?.id ?? "");
@@ -187,6 +189,15 @@ export function TerminalPane({
             <span className="truncate">{box.title || `devbox ${index + 1}`}</span>
           </Button>
         ))}
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-7 shrink-0"
+          aria-label="Create sandbox"
+          onClick={onCreateSandbox}
+        >
+          <PlusIcon className="size-4" />
+        </Button>
         <Button
           variant="ghost"
           size="icon"

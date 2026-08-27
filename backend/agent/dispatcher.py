@@ -7,8 +7,8 @@ import ai
 from vercel import workflow
 
 import models
-from agent import devbox, supervisor
-from store import activity, chats, devboxes, events, subagents, workspaces
+from agent import devbox, sandbox, supervisor
+from store import activity, chats, devboxes, events, subagents
 
 SYSTEM = """\
 You are hatchery's dispatcher. You coordinate coding work; you never write
@@ -81,53 +81,17 @@ def agent_for(
         recommended setup from the space description verbatim. Prefer reusing a
         suitable listed devbox.
         """
-        desired_repos = list(repos or [])
-        desired_setup_script = setup_script.strip() if setup_script else None
-        desired_ports = list(ports or [])
-        desired_branch = branch.strip() if branch else None
-        desired_git_sha = git_sha.strip() if git_sha else None
-        if len(desired_ports) > 4 or any(
-            port < 1 or port > 65535 for port in desired_ports
-        ):
-            raise ValueError("ports must contain up to four values between 1 and 65535")
-        if (desired_branch or desired_git_sha) and not desired_repos:
-            raise ValueError("branch and git_sha require a main repo")
-        async with workspaces.provision(chat["id"]):
-            record = await devboxes.create(chat["id"], title, desired_repos)
-            record.update(
-                setup_script=desired_setup_script,
-                ports=desired_ports,
-                branch=desired_branch,
-                git_sha=desired_git_sha,
-            )
-            yield "creating devbox (cold boot, about a minute)…"
-            try:
-                record["set_id"] = await devbox.create_taskset(
-                    f"hatchery {chat['id']} / {record['title']}"
-                )
-                record["box"] = await devbox.create_box(
-                    f"hatchery-{chat['id']}-{record['id'][-6:]}",
-                    desired_repos,
-                    setup_script=desired_setup_script,
-                    ports=desired_ports,
-                    branch=desired_branch,
-                    git_sha=desired_git_sha,
-                )
-                record.update(
-                    setup_script=desired_setup_script,
-                    ports=desired_ports,
-                    branch=desired_branch,
-                    git_sha=desired_git_sha,
-                    state="ready",
-                )
-            except Exception as error:
-                record["state"] = "errored"
-                record["error"] = str(error)
-                await devboxes.save(record)
-                await events.append(chat["id"], "ui", {"type": "devbox.changed"})
-                raise
-            await devboxes.save(record)
-            await events.append(chat["id"], "ui", {"type": "devbox.changed"})
+        launch = sandbox.Launch(
+            repos=list(repos or []),
+            setup_script=setup_script,
+            ports=list(ports or []),
+            branch=branch,
+            git_sha=git_sha,
+            title=title,
+        )
+        record = await sandbox.prepare(chat["id"], launch)
+        yield "creating devbox (cold boot, about a minute)…"
+        await sandbox.provision(record)
         yield {
             "devbox_id": record["id"],
             "title": record["title"],

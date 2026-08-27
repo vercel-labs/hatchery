@@ -36,7 +36,7 @@ import channels
 import models
 import store
 import vercel.functions
-from agent import classifier, devbox, dispatcher, topic
+from agent import classifier, devbox, dispatcher, sandbox, topic
 from channels import github, slack
 from store import activity, chats, devboxes, events, spaces, subagents, turns
 
@@ -279,6 +279,7 @@ async def list_chats() -> list[models.Chat]:
 
 class CreateChatRequest(pydantic.BaseModel):
     title: str = "new chat"
+    space_id: str | None = None
 
 
 @app.post("/api/chats")
@@ -286,7 +287,9 @@ async def create_chat(request: CreateChatRequest) -> models.Chat:
     found = await spaces.list_all()
     if not found:
         found = [await spaces.default()]
-    return await chats.create(None, request.title)
+    if request.space_id is not None and not any(space.id == request.space_id for space in found):
+        raise fastapi.HTTPException(404, "unknown space")
+    return await chats.create(request.space_id, request.title)
 
 
 class AssignChatSpaceRequest(pydantic.BaseModel):
@@ -519,6 +522,27 @@ def _dedupe_tool_history(messages: list[ai.messages.Message]) -> list[ai.message
     return repaired
 
 
+@app.get("/api/chats/{chat_id}/devboxes/suggestion")
+async def suggest_chat_devbox(chat_id: str) -> sandbox.Launch:
+    chat = await chats.get(chat_id)
+    if chat is None:
+        raise fastapi.HTTPException(404, "unknown chat")
+    space = await spaces.get(chat.space_id) if chat.space_id else None
+    if space is None:
+        found = await spaces.list_all()
+        space = found[0] if found else await spaces.default()
+    return await sandbox.suggest(space)
+
+
+@app.post("/api/chats/{chat_id}/devboxes", status_code=202)
+async def create_chat_devbox(chat_id: str, request: sandbox.Launch) -> dict:
+    if await chats.get(chat_id) is None:
+        raise fastapi.HTTPException(404, "unknown chat")
+    record = await sandbox.prepare(chat_id, request)
+    _spawn(sandbox.provision(record))
+    return {key: record.get(key) for key in ("id", "title", "repos", "state", "created_at")}
+
+
 @app.get("/api/chats/{chat_id}/devboxes")
 async def chat_devboxes(chat_id: str) -> list[dict]:
     """Chat-owned devboxes with their subagents, oldest first."""
@@ -527,7 +551,18 @@ async def chat_devboxes(chat_id: str) -> list[dict]:
         {
             **{
                 key: record.get(key)
-                for key in ("id", "title", "repos", "state", "error", "created_at")
+                for key in (
+                    "id",
+                    "title",
+                    "repos",
+                    "setup_script",
+                    "ports",
+                    "branch",
+                    "git_sha",
+                    "state",
+                    "error",
+                    "created_at",
+                )
             },
             "subagents": [
                 {

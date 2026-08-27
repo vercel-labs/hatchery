@@ -18,6 +18,7 @@ import remarkGfm from "remark-gfm";
 import { apiBase, type Chat, type Resource, type Space } from "@/lib/api";
 import type { ChatUIMessage } from "@/lib/messages";
 import { ChatView } from "@/components/chat";
+import { SandboxForm } from "@/components/sandbox-form";
 import { TerminalPane, type DevboxWorkspace } from "@/components/terminal-pane";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -184,7 +185,9 @@ export default function Home() {
     const res = await fetch("/api/chats", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
+      body: JSON.stringify({
+        space_id: selectedSpace?.id ?? sortSpaceId ?? spaces?.[0]?.id,
+      }),
     });
     if (!res.ok) return;
     const chat: Chat = await res.json();
@@ -804,6 +807,7 @@ function LiveChat({
   const [devboxes, setDevboxes] = useState<DevboxWorkspace[]>([]);
   const [messageRevision, setMessageRevision] = useState(0);
   const [showTerminal, setShowTerminal] = useState(false);
+  const [showSandboxForm, setShowSandboxForm] = useState(false);
 
   const loadDevboxes = useCallback(() => {
     fetch(`${apiBase()}/api/chats/${chat.id}/devboxes`)
@@ -879,6 +883,7 @@ function LiveChat({
             initialMessages={initialMessages}
             messageRevision={messageRevision}
             onMessagesChange={onMessagesChange}
+            onCreateSandbox={() => setShowSandboxForm(true)}
           />
         </div>
         {devboxes.length > 0 && !showTerminal && (
@@ -897,8 +902,18 @@ function LiveChat({
             chatId={chat.id}
             devboxes={devboxes}
             onClose={() => setShowTerminal(false)}
+            onCreateSandbox={() => setShowSandboxForm(true)}
           />
         )}
+        <SandboxForm
+          chatId={chat.id}
+          open={showSandboxForm}
+          onOpenChange={setShowSandboxForm}
+          onCreated={() => {
+            setShowTerminal(true);
+            loadDevboxes();
+          }}
+        />
       </div>
     </div>
   );

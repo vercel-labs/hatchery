@@ -1,9 +1,11 @@
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
 import { useEffect, useMemo } from "react";
+import { PlusIcon } from "lucide-react";
 
 import { ChatMessage } from "@/components/chat-message";
 import { PromptForm } from "@/components/prompt-form";
+import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   Empty,
@@ -30,11 +32,13 @@ export function ChatView({
   initialMessages,
   messageRevision,
   onMessagesChange,
+  onCreateSandbox,
 }: {
   chatId: string;
   initialMessages: ChatUIMessage[];
   messageRevision: number;
   onMessagesChange?: (messages: ChatUIMessage[]) => void;
+  onCreateSandbox: () => void;
 }) {
   const transport = useMemo(
     () =>
@@ -87,6 +91,10 @@ export function ChatView({
                 Describe the work; it hands it to a subagent you can watch.
               </EmptyDescription>
             </EmptyHeader>
+            <Button variant="outline" onClick={onCreateSandbox}>
+              <PlusIcon />
+              Create sandbox manually
+            </Button>
           </Empty>
         </div>
       ) : (
