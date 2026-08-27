@@ -20,7 +20,12 @@ async def generate(prompt: str) -> str:
         ai.get_model("openai/gpt-5.6-luna"),
         [ai.system_message(SYSTEM), ai.user_message(prompt)],
         output_type=Topic,
-        params=ai.InferenceRequestParams(output=ai.OutputParams(max_tokens=24)),
+        params=ai.InferenceRequestParams(
+            sampling={
+                ai.TemperatureSamplerParams: ai.TemperatureSamplerParams(temperature=0)
+            },
+            output=ai.OutputParams(max_tokens=10 * 10),
+        ),
     ) as result:
         async for _ in result:
             pass
