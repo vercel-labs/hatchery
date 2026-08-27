@@ -66,10 +66,19 @@ def _team() -> str:
     return json.loads((_CLI / "config.json").read_text())["currentTeam"]
 
 
-async def create_box(name: str, repos: list[str], setup_script: str | None = None) -> dict:
+async def create_box(
+    name: str,
+    repos: list[str],
+    setup_script: str | None = None,
+    ports: list[int] | None = None,
+    branch: str | None = None,
+    git_sha: str | None = None,
+) -> dict:
     """Boot a devbox, clone its repos, run setup, and block until READY.
 
-    One call (`setup: true` + a sandbox spec opts into the server-side flow).
+    branch and git_sha pin the first (primary) repo; additional repos use their
+    default branches. One call (`setup: true` + a sandbox spec) opts into the
+    server-side flow.
     Cold boot is ~1 minute. Returns {"id", "url"} — url is the box's devboxd
     origin, used for the watch and tty websockets.
 
@@ -86,8 +95,10 @@ async def create_box(name: str, repos: list[str], setup_script: str | None = Non
                 json={
                     "name": name,
                     "setup": True,
-                    "sandbox": {},
+                    "sandbox": {**({"ports": ports} if ports else {})},
                     "cloneRepos": repos,
+                    **({"branch": branch} if branch else {}),
+                    **({"gitSha": git_sha} if git_sha else {}),
                     **(
                         {"config": {"run": {"postCreateCommand": setup_script}}}
                         if setup_script

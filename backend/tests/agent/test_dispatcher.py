@@ -32,8 +32,10 @@ async def test_create_devbox_persists_chat_owned_box(monkeypatch):
         seen["taskset"] = title
         return "set_1"
 
-    async def create_box(name, repos, setup_script=None):
-        seen["box"] = (name, repos, setup_script)
+    async def create_box(
+        name, repos, setup_script=None, ports=None, branch=None, git_sha=None
+    ):
+        seen["box"] = (name, repos, setup_script, ports, branch, git_sha)
         return {"id": "box_1", "url": "https://box.example"}
 
     monkeypatch.setattr(dispatcher.devbox, "create_taskset", create_taskset)
@@ -44,7 +46,12 @@ async def test_create_devbox_persists_chat_owned_box(monkeypatch):
     updates = [
         update
         async for update in tool.fn(
-            repos=["vercel/vercel-py"], setup_script="  uv sync  ", title="main workspace"
+            repos=["vercel/vercel-py"],
+            setup_script="  uv sync  ",
+            ports=[3000, 8000],
+            branch="  feature/api  ",
+            git_sha="  abc123  ",
+            title="main workspace",
         )
     ]
 
@@ -54,8 +61,18 @@ async def test_create_devbox_persists_chat_owned_box(monkeypatch):
     assert workspace["box"] == {"id": "box_1", "url": "https://box.example"}
     assert workspace["set_id"] == "set_1"
     assert updates[-1]["devbox_id"] == workspace["id"]
-    assert seen["box"][1:] == (["vercel/vercel-py"], "uv sync")
+    assert seen["box"][1:] == (
+        ["vercel/vercel-py"],
+        "uv sync",
+        [3000, 8000],
+        "feature/api",
+        "abc123",
+    )
     assert workspace["setup_script"] == "uv sync"
+    assert workspace["ports"] == [3000, 8000]
+    assert workspace["branch"] == "feature/api"
+    assert workspace["git_sha"] == "abc123"
+    assert updates[-1]["ports"] == [3000, 8000]
 
 
 async def test_list_devboxes_only_returns_current_chat():
@@ -72,6 +89,9 @@ async def test_list_devboxes_only_returns_current_chat():
             "id": first["id"],
             "title": "main",
             "repos": ["a/b"],
+            "ports": None,
+            "branch": None,
+            "git_sha": None,
             "state": "ready",
             "error": None,
             "created_at": first["created_at"],

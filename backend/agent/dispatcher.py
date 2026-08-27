@@ -66,20 +66,40 @@ def agent_for(
     async def create_devbox(
         repos: list[str] | None = None,
         setup_script: str | None = None,
+        ports: list[int] | None = None,
+        branch: str | None = None,
+        git_sha: str | None = None,
         title: str = "devbox",
     ) -> ai.StreamingStatusTool[typing.Any]:
         """Create a durable sandbox owned by this chat.
 
         Select only the owner/repo repositories needed in the sandbox. Omit
-        repos for an empty sandbox. setup_script is freeform shell run once,
-        after cloning and before any subagent starts. Copy applicable recommended
-        setup from the space description verbatim. Prefer reusing a suitable
-        listed devbox.
+        repos for an empty sandbox. The first repo is the main repo: branch and
+        git_sha check out that repo only; additional repos use their defaults.
+        ports exposes up to four TCP ports. setup_script is freeform shell run
+        once, after cloning and before any subagent starts. Copy applicable
+        recommended setup from the space description verbatim. Prefer reusing a
+        suitable listed devbox.
         """
         desired_repos = list(repos or [])
         desired_setup_script = setup_script.strip() if setup_script else None
+        desired_ports = list(ports or [])
+        desired_branch = branch.strip() if branch else None
+        desired_git_sha = git_sha.strip() if git_sha else None
+        if len(desired_ports) > 4 or any(
+            port < 1 or port > 65535 for port in desired_ports
+        ):
+            raise ValueError("ports must contain up to four values between 1 and 65535")
+        if (desired_branch or desired_git_sha) and not desired_repos:
+            raise ValueError("branch and git_sha require a main repo")
         async with workspaces.provision(chat["id"]):
             record = await devboxes.create(chat["id"], title, desired_repos)
+            record.update(
+                setup_script=desired_setup_script,
+                ports=desired_ports,
+                branch=desired_branch,
+                git_sha=desired_git_sha,
+            )
             yield "creating devbox (cold boot, about a minute)…"
             try:
                 record["set_id"] = await devbox.create_taskset(
@@ -88,10 +108,18 @@ def agent_for(
                 record["box"] = await devbox.create_box(
                     f"hatchery-{chat['id']}-{record['id'][-6:]}",
                     desired_repos,
-                    desired_setup_script,
+                    setup_script=desired_setup_script,
+                    ports=desired_ports,
+                    branch=desired_branch,
+                    git_sha=desired_git_sha,
                 )
-                record["setup_script"] = desired_setup_script
-                record["state"] = "ready"
+                record.update(
+                    setup_script=desired_setup_script,
+                    ports=desired_ports,
+                    branch=desired_branch,
+                    git_sha=desired_git_sha,
+                    state="ready",
+                )
             except Exception as error:
                 record["state"] = "errored"
                 record["error"] = str(error)
@@ -104,6 +132,9 @@ def agent_for(
             "devbox_id": record["id"],
             "title": record["title"],
             "repos": record["repos"],
+            "ports": record["ports"],
+            "branch": record["branch"],
+            "git_sha": record["git_sha"],
             "state": record["state"],
         }
 
@@ -113,7 +144,17 @@ def agent_for(
         return [
             {
                 key: record.get(key)
-                for key in ("id", "title", "repos", "state", "error", "created_at")
+                for key in (
+                    "id",
+                    "title",
+                    "repos",
+                    "ports",
+                    "branch",
+                    "git_sha",
+                    "state",
+                    "error",
+                    "created_at",
+                )
             }
             for record in await devboxes.list_for_chat(chat["id"])
         ]
