@@ -43,6 +43,19 @@ async def test_tasks_are_independent_and_ordered_per_chat():
     assert listed[1]["state"] == "creating"
 
 
+async def test_subagents_can_be_deleted_individually_or_by_devbox():
+    first = await subagents.create("chat_1", "devbox_1", "first", "one")
+    second = await subagents.create("chat_1", "devbox_1", "second", "two")
+    other = await subagents.create("chat_1", "devbox_2", "other", "three")
+
+    assert await subagents.delete(first["id"]) is True
+    assert await subagents.delete(first["id"]) is False
+    await subagents.delete_for_devbox("devbox_1")
+
+    assert await subagents.get(second["id"]) is None
+    assert await subagents.get(other["id"]) == other
+
+
 async def test_finish_create_keeps_state_from_early_webhook():
     launch = await subagents.create("chat_1", "devbox_1", "task", "secret")
     launch["task_id"] = "task_1"

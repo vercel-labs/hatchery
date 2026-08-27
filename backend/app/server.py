@@ -36,9 +36,9 @@ import channels
 import models
 import store
 import vercel.functions
-from agent import classifier, devbox, dispatcher, topic
+from agent import classifier, devbox, dispatcher, sandbox, topic
 from channels import github, slack
-from store import activity, chats, devboxes, events, spaces, subagents, turns
+from store import activity, chats, devboxes, events, spaces, subagents, terminals, turns
 
 log = logging.getLogger("app")
 _background: set[asyncio.Task] = set()
@@ -279,6 +279,7 @@ async def list_chats() -> list[models.Chat]:
 
 class CreateChatRequest(pydantic.BaseModel):
     title: str = "new chat"
+    space_id: str | None = None
 
 
 @app.post("/api/chats")
@@ -286,7 +287,9 @@ async def create_chat(request: CreateChatRequest) -> models.Chat:
     found = await spaces.list_all()
     if not found:
         found = [await spaces.default()]
-    return await chats.create(None, request.title)
+    if request.space_id is not None and not any(space.id == request.space_id for space in found):
+        raise fastapi.HTTPException(404, "unknown space")
+    return await chats.create(request.space_id, request.title)
 
 
 class AssignChatSpaceRequest(pydantic.BaseModel):
@@ -519,15 +522,48 @@ def _dedupe_tool_history(messages: list[ai.messages.Message]) -> list[ai.message
     return repaired
 
 
+@app.get("/api/chats/{chat_id}/devboxes/suggestion")
+async def suggest_chat_devbox(chat_id: str) -> sandbox.Launch:
+    chat = await chats.get(chat_id)
+    if chat is None:
+        raise fastapi.HTTPException(404, "unknown chat")
+    space = await spaces.get(chat.space_id) if chat.space_id else None
+    if space is None:
+        found = await spaces.list_all()
+        space = found[0] if found else await spaces.default()
+    return await sandbox.suggest(space)
+
+
+@app.post("/api/chats/{chat_id}/devboxes", status_code=202)
+async def create_chat_devbox(chat_id: str, request: sandbox.Launch) -> dict:
+    if await chats.get(chat_id) is None:
+        raise fastapi.HTTPException(404, "unknown chat")
+    record = await sandbox.prepare(chat_id, request)
+    _spawn(sandbox.provision(record))
+    return {key: record.get(key) for key in ("id", "title", "repos", "state", "created_at")}
+
+
 @app.get("/api/chats/{chat_id}/devboxes")
 async def chat_devboxes(chat_id: str) -> list[dict]:
-    """Chat-owned devboxes with their subagents, oldest first."""
+    """Chat-owned devboxes with their subagents and terminals, oldest first."""
     launches = await subagents.list_for_chat(chat_id)
+    manual_terminals = await terminals.list_for_chat(chat_id)
     return [
         {
             **{
                 key: record.get(key)
-                for key in ("id", "title", "repos", "state", "error", "created_at")
+                for key in (
+                    "id",
+                    "title",
+                    "repos",
+                    "setup_script",
+                    "ports",
+                    "branch",
+                    "git_sha",
+                    "state",
+                    "error",
+                    "created_at",
+                )
             },
             "subagents": [
                 {
@@ -545,9 +581,139 @@ async def chat_devboxes(chat_id: str) -> list[dict]:
                 for launch in launches
                 if launch.get("devbox_id") == record["id"]
             ],
+            "terminals": [
+                {
+                    key: terminal.get(key)
+                    for key in (
+                        "id",
+                        "devbox_id",
+                        "title",
+                        "session_id",
+                        "state",
+                        "created_at",
+                    )
+                }
+                for terminal in manual_terminals
+                if terminal.get("devbox_id") == record["id"]
+            ],
         }
         for record in await devboxes.list_for_chat(chat_id)
     ]
+
+
+@app.post("/api/chats/{chat_id}/devboxes/{devbox_id}/terminals", status_code=201)
+async def create_manual_terminal(chat_id: str, devbox_id: str) -> dict:
+    workspace = await devboxes.get(devbox_id)
+    if workspace is None or workspace.get("chat_id") != chat_id:
+        raise fastapi.HTTPException(404, "unknown devbox")
+    if not workspace.get("box"):
+        raise fastapi.HTTPException(409, "devbox is not ready")
+    found = await terminals.list_for_chat(chat_id)
+    number = sum(terminal.get("devbox_id") == devbox_id for terminal in found) + 1
+    terminal = await terminals.create(chat_id, devbox_id, f"bash {number}")
+    await events.append(chat_id, "ui", {"type": "devbox.changed"})
+    return terminal
+
+
+@app.delete("/api/chats/{chat_id}/terminals/{terminal_id}", status_code=204)
+async def delete_manual_terminal(chat_id: str, terminal_id: str) -> None:
+    terminal = await terminals.get(terminal_id)
+    if terminal is None or terminal.get("chat_id") != chat_id:
+        raise fastapi.HTTPException(404, "unknown terminal")
+    workspace = await devboxes.get(str(terminal.get("devbox_id", "")))
+    if workspace is None or workspace.get("chat_id") != chat_id:
+        raise fastapi.HTTPException(404, "unknown devbox")
+    if terminal.get("session_id") and workspace.get("box"):
+        await devbox.send_tty_input(
+            workspace["box"]["url"], terminal["session_id"], b"\x03", b"exit\r"
+        )
+    await terminals.delete(terminal_id)
+    await events.append(chat_id, "ui", {"type": "devbox.changed"})
+
+
+@app.delete("/api/chats/{chat_id}/subagents/{launch_id}", status_code=204)
+async def delete_subagent(chat_id: str, launch_id: str) -> None:
+    launch = await subagents.get(launch_id)
+    if launch is None or launch.get("chat_id") != chat_id:
+        raise fastapi.HTTPException(404, "unknown subagent")
+    workspace = await devboxes.get(str(launch.get("devbox_id", "")))
+    if workspace is None or workspace.get("chat_id") != chat_id:
+        raise fastapi.HTTPException(404, "unknown devbox")
+    if (
+        launch.get("state") not in devbox.TERMINAL_STATES
+        and launch.get("session_id")
+        and workspace.get("box")
+    ):
+        await devbox.send_tty_input(workspace["box"]["url"], launch["session_id"], b"\x03")
+    if launch.get("task_id"):
+        await devbox.delete_task(launch["task_id"])
+    await subagents.delete(launch_id)
+    await events.append(chat_id, "ui", {"type": "devbox.changed"})
+
+
+@app.delete("/api/chats/{chat_id}/devboxes/{devbox_id}", status_code=204)
+async def delete_chat_devbox(chat_id: str, devbox_id: str) -> None:
+    workspace = await devboxes.get(devbox_id)
+    if workspace is None or workspace.get("chat_id") != chat_id:
+        raise fastapi.HTTPException(404, "unknown devbox")
+    if workspace.get("state") == "creating":
+        raise fastapi.HTTPException(409, "devbox is still being created")
+    if workspace.get("box"):
+        await devbox.delete_box(workspace["box"]["id"])
+    await terminals.delete_for_devbox(devbox_id)
+    await subagents.delete_for_devbox(devbox_id)
+    await devboxes.delete(devbox_id)
+    await events.append(chat_id, "ui", {"type": "devbox.changed"})
+
+
+async def _bridge_tty(
+    ws: fastapi.WebSocket,
+    workspace: dict,
+    session_id: str | None,
+    on_handshake=None,
+) -> None:
+    q = ws.query_params
+    url = devbox.tty_url(
+        workspace["box"]["url"],
+        session_id,
+        q.get("offset", "0"),
+        q.get("cols", "80"),
+        q.get("rows", "24"),
+    )
+    try:
+        # no max_size: the box may replay many MB of scrollback in one frame.
+        async with websockets.connect(url, max_size=None) as box:
+
+            async def down():
+                async for frame in box:
+                    text = frame if isinstance(frame, str) else frame.decode()
+                    if on_handshake:
+                        payload = json.loads(text)
+                        if payload.get("type") == "handshake":
+                            await on_handshake(payload["body"]["sessionId"])
+                    await ws.send_text(text)
+
+            async def up():
+                while True:
+                    await box.send(await ws.receive_text())
+
+            done, pending = await asyncio.wait(
+                [asyncio.ensure_future(down()), asyncio.ensure_future(up())],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for pending_task in pending:
+                pending_task.cancel()
+            for done_task in done:
+                done_task.exception()
+    except (fastapi.WebSocketDisconnect, websockets.ConnectionClosed):
+        pass
+    except (OSError, websockets.InvalidHandshake):
+        await ws.close(code=4404, reason="terminal session not on the devbox yet")
+    finally:
+        try:
+            await ws.close()
+        except RuntimeError:
+            pass
 
 
 @app.websocket("/api/chats/{chat_id}/subagents/{launch_id}/tty")
@@ -567,43 +733,30 @@ async def task_tty(ws: fastapi.WebSocket, chat_id: str, launch_id: str) -> None:
     ):
         await ws.close(code=4404, reason="subagent session not on the devbox yet")
         return
-    q = ws.query_params
-    url = devbox.tty_url(
-        workspace["box"]["url"],
-        launch["session_id"],
-        q.get("offset", "0"),
-        q.get("cols", "80"),
-        q.get("rows", "24"),
-    )
-    try:
-        # no max_size: the box may replay many MB of scrollback in one frame.
-        async with websockets.connect(url, max_size=None) as box:
+    await _bridge_tty(ws, workspace, launch["session_id"])
 
-            async def down():
-                async for frame in box:
-                    await ws.send_text(frame if isinstance(frame, str) else frame.decode())
 
-            async def up():
-                while True:
-                    await box.send(await ws.receive_text())
+@app.websocket("/api/chats/{chat_id}/terminals/{terminal_id}/tty")
+async def manual_tty(ws: fastapi.WebSocket, chat_id: str, terminal_id: str) -> None:
+    """Bridge the browser to a manual durable bash session."""
+    terminal = await terminals.get(terminal_id)
+    await ws.accept()
+    if terminal is None or terminal.get("chat_id") != chat_id:
+        await ws.close(code=4404, reason="unknown terminal")
+        return
+    workspace = await devboxes.get(str(terminal.get("devbox_id", "")))
+    if workspace is None or workspace.get("chat_id") != chat_id or not workspace.get("box"):
+        await ws.close(code=4404, reason="terminal session not on the devbox yet")
+        return
 
-            done, pending = await asyncio.wait(
-                [asyncio.ensure_future(down()), asyncio.ensure_future(up())],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for pending_task in pending:
-                pending_task.cancel()
-            for done_task in done:
-                done_task.exception()
-    except (fastapi.WebSocketDisconnect, websockets.ConnectionClosed):
-        pass
-    except (OSError, websockets.InvalidHandshake):
-        await ws.close(code=4404, reason="subagent session not on the devbox yet")
-    finally:
-        try:
-            await ws.close()
-        except RuntimeError:
-            pass
+    async def remember(session_id: str) -> None:
+        if terminal.get("session_id") == session_id:
+            return
+        terminal["session_id"] = session_id
+        terminal["state"] = "running"
+        await terminals.save(terminal)
+
+    await _bridge_tty(ws, workspace, terminal.get("session_id"), remember)
 
 
 @app.post("/channels/v1/devbox")

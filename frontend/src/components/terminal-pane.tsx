@@ -2,17 +2,26 @@
 
 import "@xterm/xterm/css/xterm.css";
 
-import { XIcon } from "lucide-react";
+import { PlusIcon, XIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
-import { wsBase } from "@/lib/api";
+import { apiBase, wsBase } from "@/lib/api";
 
 export type CoderTask = {
   id: string;
   devbox_id: string;
   title: string;
   task_id?: string;
+  session_id?: string;
+  state: string;
+  created_at: string;
+};
+
+export type ManualTerminal = {
+  id: string;
+  devbox_id: string;
+  title: string;
   session_id?: string;
   state: string;
   created_at: string;
@@ -26,12 +35,25 @@ export type DevboxWorkspace = {
   error?: string;
   created_at: string;
   subagents: CoderTask[];
+  terminals: ManualTerminal[];
 };
+
+type TerminalTab =
+  | (CoderTask & { kind: "subagent" })
+  | (ManualTerminal & { kind: "manual" });
 
 const b64encode = (s: string) =>
   btoa(String.fromCharCode(...new TextEncoder().encode(s)));
 
-function TaskTerminal({ chatId, task }: { chatId: string; task: CoderTask }) {
+function tabs(box: DevboxWorkspace | undefined): TerminalTab[] {
+  if (!box) return [];
+  return [
+    ...box.subagents.map((task) => ({ ...task, kind: "subagent" as const })),
+    ...box.terminals.map((terminal) => ({ ...terminal, kind: "manual" as const })),
+  ].sort((left, right) => left.created_at.localeCompare(right.created_at));
+}
+
+function TaskTerminal({ chatId, tab }: { chatId: string; tab: TerminalTab }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<"connecting" | "live" | "exited">(
     "connecting",
@@ -84,8 +106,12 @@ function TaskTerminal({ chatId, task }: { chatId: string; task: CoderTask }) {
 
       const connect = () => {
         if (disposed || exited) return;
+        const path =
+          tab.kind === "manual"
+            ? `terminals/${tab.id}`
+            : `subagents/${tab.id}`;
         ws = new WebSocket(
-          `${wsBase()}/api/chats/${chatId}/subagents/${task.id}/tty?offset=${offset}&cols=${term.cols}&rows=${term.rows}`,
+          `${wsBase()}/api/chats/${chatId}/${path}/tty?offset=${offset}&cols=${term.cols}&rows=${term.rows}`,
         );
         ws.onmessage = (event) => {
           const frame = JSON.parse(event.data);
@@ -125,7 +151,7 @@ function TaskTerminal({ chatId, task }: { chatId: string; task: CoderTask }) {
       ws?.close();
       void cleanup.then((dispose) => dispose?.());
     };
-  }, [chatId, task.id]);
+  }, [chatId, tab.id, tab.kind]);
 
   return (
     <>
@@ -140,7 +166,7 @@ function TaskTerminal({ chatId, task }: { chatId: string; task: CoderTask }) {
           }
         />
         <span className="truncate text-xs text-muted-foreground">
-          {task.title} — {status}
+          {tab.title} — {status}
         </span>
       </div>
       <div ref={hostRef} className="min-h-0 flex-1 bg-[#0a0a0a] p-2" />
@@ -151,42 +177,127 @@ function TaskTerminal({ chatId, task }: { chatId: string; task: CoderTask }) {
 export function TerminalPane({
   chatId,
   devboxes,
+  preferredDevboxId,
   onClose,
+  onCreateSandbox,
+  onChanged,
 }: {
   chatId: string;
   devboxes: DevboxWorkspace[];
+  preferredDevboxId?: string;
   onClose: () => void;
+  onCreateSandbox: () => void;
+  onChanged: () => void;
 }) {
-  const latest = devboxes.findLast((box) => box.subagents.length) ?? devboxes.at(-1);
+  const latest =
+    devboxes.find((box) => box.id === preferredDevboxId) ??
+    devboxes.findLast((box) => tabs(box).length) ??
+    devboxes.at(-1);
   const [selectedDevboxId, setSelectedDevboxId] = useState(latest?.id ?? "");
-  const [selectedTaskId, setSelectedTaskId] = useState(
-    latest?.subagents.at(-1)?.id ?? "",
-  );
+  const [selectedTabId, setSelectedTabId] = useState(tabs(latest).at(-1)?.id ?? "");
+  const [creating, setCreating] = useState(false);
+  const [deletingId, setDeletingId] = useState("");
   const activeDevbox =
     devboxes.find((box) => box.id === selectedDevboxId) ?? latest;
-  const activeTask =
-    activeDevbox?.subagents.find((task) => task.id === selectedTaskId) ??
-    activeDevbox?.subagents.at(-1);
+  const activeTabs = tabs(activeDevbox);
+  const activeTab =
+    activeTabs.find((tab) => tab.id === selectedTabId) ?? activeTabs.at(-1);
 
   const selectDevbox = (box: DevboxWorkspace) => {
     setSelectedDevboxId(box.id);
-    setSelectedTaskId(box.subagents.at(-1)?.id ?? "");
+    setSelectedTabId(tabs(box).at(-1)?.id ?? "");
+  };
+
+  const createTerminal = async () => {
+    if (!activeDevbox) return;
+    setCreating(true);
+    try {
+      const response = await fetch(
+        `${apiBase()}/api/chats/${chatId}/devboxes/${activeDevbox.id}/terminals`,
+        { method: "POST" },
+      );
+      if (!response.ok) return;
+      const terminal: ManualTerminal = await response.json();
+      setSelectedTabId(terminal.id);
+      onChanged();
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const deleteTab = async (tab: TerminalTab) => {
+    const label = tab.kind === "subagent" ? "Stop and delete this subagent?" : "Close this terminal?";
+    if (!window.confirm(label)) return;
+    setDeletingId(tab.id);
+    try {
+      const collection = tab.kind === "subagent" ? "subagents" : "terminals";
+      const response = await fetch(
+        `${apiBase()}/api/chats/${chatId}/${collection}/${tab.id}`,
+        { method: "DELETE" },
+      );
+      if (!response.ok) return;
+      const remaining = activeTabs.filter((candidate) => candidate.id !== tab.id);
+      setSelectedTabId(remaining.at(-1)?.id ?? "");
+      onChanged();
+    } finally {
+      setDeletingId("");
+    }
+  };
+
+  const deleteDevbox = async (box: DevboxWorkspace) => {
+    if (!window.confirm(`Delete ${box.title || "this sandbox"} and stop everything in it?`)) return;
+    setDeletingId(box.id);
+    try {
+      const response = await fetch(
+        `${apiBase()}/api/chats/${chatId}/devboxes/${box.id}`,
+        { method: "DELETE" },
+      );
+      if (!response.ok) return;
+      const remaining = devboxes.filter((candidate) => candidate.id !== box.id);
+      const next = remaining.at(-1);
+      setSelectedDevboxId(next?.id ?? "");
+      setSelectedTabId(tabs(next).at(-1)?.id ?? "");
+      onChanged();
+      if (!remaining.length) onClose();
+    } finally {
+      setDeletingId("");
+    }
   };
 
   return (
     <div className="flex h-2/5 min-w-0 flex-none flex-col border-t @4xl:h-auto @4xl:min-w-[28rem] @4xl:flex-1 @4xl:border-t-0 @4xl:border-l">
       <div className="flex h-10 shrink-0 items-center gap-1 overflow-x-auto border-b px-2">
         {devboxes.map((box, index) => (
-          <Button
-            key={box.id}
-            variant={box.id === activeDevbox?.id ? "secondary" : "ghost"}
-            size="sm"
-            className="max-w-40 shrink-0"
-            onClick={() => selectDevbox(box)}
-          >
-            <span className="truncate">{box.title || `devbox ${index + 1}`}</span>
-          </Button>
+          <div key={box.id} className="flex shrink-0 items-center">
+            <Button
+              variant={box.id === activeDevbox?.id ? "secondary" : "ghost"}
+              size="sm"
+              className="max-w-40 rounded-r-none"
+              onClick={() => selectDevbox(box)}
+            >
+              <span className="truncate">{box.title || `devbox ${index + 1}`}</span>
+            </Button>
+            <Button
+              variant={box.id === activeDevbox?.id ? "secondary" : "ghost"}
+              size="icon-sm"
+              className="rounded-l-none"
+              aria-label={`Delete ${box.title || `devbox ${index + 1}`}`}
+              disabled={deletingId === box.id || box.state === "creating"}
+              onClick={() => void deleteDevbox(box)}
+            >
+              <XIcon />
+            </Button>
+          </div>
         ))}
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-7 shrink-0"
+          aria-label="Create sandbox"
+          onClick={onCreateSandbox}
+        >
+          <PlusIcon />
+        </Button>
         <Button
           variant="ghost"
           size="icon"
@@ -194,29 +305,47 @@ export function TerminalPane({
           aria-label="Close devboxes"
           onClick={onClose}
         >
-          <XIcon className="size-4" />
+          <XIcon />
         </Button>
       </div>
       <div className="flex h-9 shrink-0 items-center gap-1 overflow-x-auto border-b px-2">
-        {activeDevbox?.subagents.map((task, index) => (
-          <Button
-            key={task.id}
-            variant={task.id === activeTask?.id ? "secondary" : "ghost"}
-            size="xs"
-            className="max-w-40 shrink-0"
-            onClick={() => setSelectedTaskId(task.id)}
-          >
-            <span className="truncate">{task.title || `subagent ${index + 1}`}</span>
-          </Button>
+        {activeTabs.map((tab, index) => (
+          <div key={tab.id} className="flex shrink-0 items-center">
+            <Button
+              variant={tab.id === activeTab?.id ? "secondary" : "ghost"}
+              size="xs"
+              className="max-w-40 rounded-r-none"
+              onClick={() => setSelectedTabId(tab.id)}
+            >
+              <span className="truncate">
+                {tab.title || `${tab.kind === "manual" ? "bash" : "subagent"} ${index + 1}`}
+              </span>
+            </Button>
+            <Button
+              variant={tab.id === activeTab?.id ? "secondary" : "ghost"}
+              size="icon-xs"
+              className="rounded-l-none"
+              aria-label={`Close ${tab.title || tab.kind}`}
+              disabled={deletingId === tab.id}
+              onClick={() => void deleteTab(tab)}
+            >
+              <XIcon />
+            </Button>
+          </div>
         ))}
-        {!activeDevbox?.subagents.length && (
-          <span className="px-2 text-xs text-muted-foreground">
-            No subagents in this devbox
-          </span>
-        )}
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          className="shrink-0"
+          aria-label="New bash terminal"
+          disabled={creating || activeDevbox?.state !== "ready"}
+          onClick={createTerminal}
+        >
+          <PlusIcon />
+        </Button>
       </div>
-      {activeTask ? (
-        <TaskTerminal key={activeTask.id} chatId={chatId} task={activeTask} />
+      {activeTab ? (
+        <TaskTerminal key={activeTab.id} chatId={chatId} tab={activeTab} />
       ) : (
         <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-muted-foreground">
           {activeDevbox?.error || "Devbox ready"}
