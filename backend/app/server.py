@@ -365,8 +365,10 @@ class ChatRequest(pydantic.BaseModel):
 
 
 class CompletionOutcome(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="forbid")
+
     notify: bool
-    message: str | None = None
+    message: str | None
 
 
 @app.post("/api/chat")

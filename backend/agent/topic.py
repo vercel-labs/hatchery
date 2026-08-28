@@ -11,6 +11,8 @@ sentence. Return only the requested structured output."""
 
 
 class Topic(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="forbid")
+
     topic: str
 
 

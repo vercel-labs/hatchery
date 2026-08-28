@@ -1,6 +1,13 @@
 from agent import topic
 
 
+def test_topic_has_strict_gateway_schema():
+    schema = topic.Topic.model_json_schema()
+
+    assert schema["additionalProperties"] is False
+    assert set(schema["required"]) == set(schema["properties"])
+
+
 async def test_generate_allows_structured_output(monkeypatch):
     seen = {}
 

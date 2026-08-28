@@ -2,6 +2,13 @@ import models
 from agent import sandbox
 
 
+def test_launch_has_strict_gateway_schema():
+    schema = sandbox.Launch.model_json_schema()
+
+    assert schema["additionalProperties"] is False
+    assert set(schema["required"]) == set(schema["properties"])
+
+
 async def test_suggest_uses_luna_and_space_description(monkeypatch):
     seen = {}
 

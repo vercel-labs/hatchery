@@ -681,7 +681,7 @@ async def test_devbox_attention_wakes_dispatcher_and_exposes_question(monkeypatc
     async def fake_turn(chat_id, record, wake):
         nonlocal seen
         seen = (chat_id, wake)
-        return server.CompletionOutcome(notify=False)
+        return server.CompletionOutcome(notify=False, message=None)
 
     pending = []
     monkeypatch.setattr(server, "_run_completion_turn", fake_turn)
@@ -783,6 +783,13 @@ async def test_devbox_completion_schedules_retry_without_duplicate_transcript(mo
             server.bot.channels["flaky"] = previous
 
 
+def test_completion_outcome_has_strict_gateway_schema():
+    schema = server.CompletionOutcome.model_json_schema()
+
+    assert schema["additionalProperties"] is False
+    assert set(schema["required"]) == set(schema["properties"])
+
+
 async def test_completion_history_ends_with_unpersisted_user_wake(monkeypatch):
     space = await server.spaces.default()
     chat = await chats.create(space.id, "task")
@@ -793,7 +800,7 @@ async def test_completion_history_ends_with_unpersisted_user_wake(monkeypatch):
     seen = None
 
     class FakeRun:
-        output = server.CompletionOutcome(notify=False)
+        output = server.CompletionOutcome(notify=False, message=None)
         messages = []
 
         async def __aenter__(self):
