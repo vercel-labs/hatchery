@@ -781,25 +781,20 @@ async def devbox_webhook(body: dict, launch_id: str = "", secret: str = "") -> d
 
     seq = int(payload.get("seq") or 0)
     state = str(payload.get("state", ""))
-    current_seq = int(record.get("webhook_seq") or 0)
-    if seq < current_seq or (
-        seq == current_seq
-        and (state not in devbox.ACTIONABLE_STATES or record.get("completion_delivered"))
-    ):
-        return {"ok": True, "duplicate": True}
-    if seq == current_seq:
-        _spawn(complete_task(record["id"]))
-        return {"ok": True}
-
-    result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
-    record["webhook_seq"] = seq
-    record["state"] = state
-    if result:
-        record["result"] = result
-    await activity.append(
-        record["id"], "state_transition", {"state": state, "result": result, "seq": seq}
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else None
+    record, changed, previous = await subagents.apply_state(
+        record["id"], state, result, seq=seq, remote_task_id=task_id
     )
-    await subagents.save(record)
+    if not changed:
+        if state in devbox.ACTIONABLE_STATES and not record.get("completion_delivered"):
+            _spawn(complete_task(record["id"]))
+            return {"ok": True}
+        return {"ok": True, "duplicate": True}
+    await activity.append(
+        record["id"],
+        "state_transition",
+        {"from": previous, "to": state, "result": result or {}, "seq": seq},
+    )
     if state not in devbox.ACTIONABLE_STATES:
         return {"ok": True}
 

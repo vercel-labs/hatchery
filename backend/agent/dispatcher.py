@@ -258,11 +258,37 @@ def agent_for(chat: dict) -> ai.Agent:
         after: int | None = None,
         limit: int = 20,
     ) -> dict[str, typing.Any]:
-        """Check a subagent's state and recent activity.
+        """Check a subagent's authoritative state and recent activity.
 
         Omit subagent_id to inspect this chat's newest subagent. Pass cursor as
         after on a later check to receive only newer activity.
         """
+        launches = await subagents.list_for_chat(chat["id"])
+        if subagent_id is None:
+            launch = launches[-1] if launches else None
+        else:
+            launch = next((item for item in launches if item["id"] == subagent_id), None)
+            if launch is None:
+                raise ValueError("subagent does not belong to this chat")
+        if (
+            launch is not None
+            and launch.get("task_id")
+            and launch.get("state") not in devbox.TERMINAL_STATES
+        ):
+            remote = await devbox.get_task(launch["task_id"])
+            remote_state = str(remote.get("state", ""))
+            if not remote_state:
+                raise RuntimeError("DevBox task response is missing state")
+            result = remote.get("result") if isinstance(remote.get("result"), dict) else None
+            _, changed, previous = await subagents.apply_state(
+                launch["id"], remote_state, result, reconcile=True
+            )
+            if changed:
+                await activity.append(
+                    launch["id"],
+                    "state_transition",
+                    {"from": previous, "to": remote_state, "source": "status"},
+                )
         return await activity.status(chat["id"], subagent_id, after=after, limit=limit)
 
     return ai.Agent(
