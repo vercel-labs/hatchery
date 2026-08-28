@@ -149,6 +149,10 @@ class Runtime:
 
 
 class TTYSession:
+    @staticmethod
+    def new_id() -> str:
+        return f"tty_{uuid.uuid4().hex}"
+
     def __init__(
         self,
         session_id: str,
@@ -164,6 +168,10 @@ class TTYSession:
         self.output = bytearray()
         self.base_offset = 0
         self.exit_code: int | None = None
+        self.running = True
+        self.last_output_at: str | None = None
+        self.cols = cols
+        self.rows = rows
         self.condition = threading.Condition()
         pid, fd = pty.fork()
         if pid == 0:
@@ -184,6 +192,7 @@ class TTYSession:
                 break
             with self.condition:
                 self.output.extend(data)
+                self.last_output_at = _now()
                 if len(self.output) > REPLAY_LIMIT:
                     drop = len(self.output) - REPLAY_LIMIT
                     del self.output[:drop]
@@ -192,6 +201,7 @@ class TTYSession:
         _, status = os.waitpid(self.pid, 0)
         with self.condition:
             self.exit_code = os.waitstatus_to_exitcode(status)
+            self.running = False
             self.condition.notify_all()
         try:
             os.close(self.fd)
@@ -201,13 +211,20 @@ class TTYSession:
     def read(self, offset: int, timeout: float = 25) -> tuple[int, bytes, int | None]:
         deadline = time.monotonic() + timeout
         with self.condition:
-            offset = max(offset, self.base_offset)
+            if offset < self.base_offset:
+                raise ValueError(
+                    f"offset {offset} is outside replay window starting at {self.base_offset}"
+                )
             while offset >= self.base_offset + len(self.output) and self.exit_code is None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
                 self.condition.wait(remaining)
-            start = max(0, offset - self.base_offset)
+                if offset < self.base_offset:
+                    raise ValueError(
+                        f"offset {offset} is outside replay window starting at {self.base_offset}"
+                    )
+            start = offset - self.base_offset
             return offset, bytes(self.output[start:]), self.exit_code
 
     def wait(self) -> int:
@@ -221,6 +238,24 @@ class TTYSession:
 
     def resize(self, cols: int, rows: int) -> None:
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+        with self.condition:
+            self.cols = cols
+            self.rows = rows
+
+    def geometry(self) -> tuple[int, int]:
+        with self.condition:
+            return self.cols, self.rows
+
+    def snapshot(self) -> dict:
+        with self.condition:
+            return {
+                "id": self.id,
+                "running": self.running,
+                "exit_code": self.exit_code,
+                "cols": self.cols,
+                "rows": self.rows,
+                "last_output_at": self.last_output_at,
+            }
 
     def send_signal(self, name: str) -> None:
         sent = {"interrupt": signal.SIGINT, "terminate": signal.SIGTERM, "kill": signal.SIGKILL}[name]
@@ -234,6 +269,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
     sessions: dict[str, TTYSession] = {}
     sessions_lock = threading.Lock()
     workspace = "/vercel/sandbox"
+
+    @classmethod
+    def list_sessions(cls) -> list[dict]:
+        with cls.sessions_lock:
+            sessions = list(cls.sessions.values())
+        return [session.snapshot() for session in sessions]
 
     def _authorized(self) -> bool:
         token = os.environ.get("HATCHERY_DAEMON_TOKEN")
@@ -259,6 +300,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if self.path == "/health":
             self._send_json({"ok": True, "version": VERSION})
+            return
+        if self.path == "/tty":
+            self._send_json({"sessions": self.list_sessions()})
             return
         self.send_error(404)
 
