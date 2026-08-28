@@ -711,12 +711,15 @@ async def task_tty(ws: fastapi.WebSocket, chat_id: str, launch_id: str) -> None:
         await ws.close(code=4404, reason="unknown subagent")
         return
     workspace = await devboxes.get(str(launch.get("devbox_id", "")))
-    if (
-        workspace is None
-        or workspace.get("chat_id") != chat_id
-        or not workspace.get("box")
-        or not launch.get("session_id")
-    ):
+    if workspace is None or workspace.get("chat_id") != chat_id or not workspace.get("box"):
+        await ws.close(code=4404, reason="subagent session not on the devbox yet")
+        return
+    if not launch.get("session_id") and launch.get("task_id"):
+        task = await devbox.get_task(launch["task_id"])
+        if task.get("session_id"):
+            launch["session_id"] = task["session_id"]
+            await subagents.save(launch)
+    if not launch.get("session_id"):
         await ws.close(code=4404, reason="subagent session not on the devbox yet")
         return
     await _bridge_tty(ws, workspace, launch["session_id"])

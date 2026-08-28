@@ -1035,6 +1035,40 @@ async def test_task_tty_accepts_before_reporting_unknown_subagent():
     assert ws.closed == (4404, "unknown subagent")
 
 
+async def test_task_tty_recovers_session_id_from_control_plane(monkeypatch):
+    chat = await chats.create(None, "task")
+    workspace = await server.devboxes.create(chat.id, "main", ["a/b"])
+    workspace["state"] = "ready"
+    workspace["box"] = {"id": "box_1", "url": "https://box.example"}
+    await server.devboxes.save(workspace)
+    launch = await subagents.create(chat.id, workspace["id"], "inspect", "secret")
+    launch["task_id"] = "task_1"
+    await subagents.save(launch)
+    bridged = []
+
+    async def get_task(task_id):
+        assert task_id == "task_1"
+        return {"task_id": task_id, "session_id": "session_1", "state": "running"}
+
+    async def bridge(ws, found_workspace, session_id):
+        bridged.append((found_workspace["id"], session_id))
+
+    class FakeWebSocket:
+        async def accept(self):
+            pass
+
+        async def close(self, code=1000, reason=None):
+            raise AssertionError((code, reason))
+
+    monkeypatch.setattr(server.devbox, "get_task", get_task)
+    monkeypatch.setattr(server, "_bridge_tty", bridge)
+
+    await server.task_tty(FakeWebSocket(), chat.id, launch["id"])
+
+    assert bridged == [(workspace["id"], "session_1")]
+    assert (await subagents.get(launch["id"]))["session_id"] == "session_1"
+
+
 async def test_devbox_assistant_event_is_stored_once():
     space = await server.spaces.default()
     chat = await chats.create(space.id, "task")

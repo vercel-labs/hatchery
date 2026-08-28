@@ -169,6 +169,30 @@ async def test_create_task_uses_fx(monkeypatch):
     }
 
 
+async def test_get_task_uses_control_plane_endpoint(monkeypatch):
+    seen = {}
+
+    async def send(self, request, **kwargs):
+        seen["request"] = request
+        return httpx.Response(
+            200,
+            request=request,
+            json={"task_id": "task_1", "session_id": "session_1", "state": "running"},
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
+    monkeypatch.setattr(devbox, "token", lambda: "token")
+
+    task = await devbox.get_task("task_1")
+
+    assert task["session_id"] == "session_1"
+    assert (seen["request"].method, seen["request"].url.path) == (
+        "GET",
+        "/v1/tasks/task_1",
+    )
+    assert seen["request"].headers["authorization"] == "Bearer token"
+
+
 async def test_delete_task_and_box_use_control_plane_endpoints(monkeypatch):
     seen = []
 

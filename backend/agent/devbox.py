@@ -172,6 +172,15 @@ async def create_task(
             await asyncio.sleep(3)
 
 
+async def get_task(task_id: str) -> dict:
+    """Read the control-plane task, including its durable PTY session id."""
+    async with httpx.AsyncClient(timeout=30) as http:
+        r = await http.get(
+            f"{API}/v1/tasks/{task_id}", headers={"Authorization": f"Bearer {token()}"}
+        )
+        return _checked(r).json()
+
+
 async def send_task_prompt(task_id: str, prompt: str) -> dict:
     """Deliver more input to an existing task without retrying.
 
