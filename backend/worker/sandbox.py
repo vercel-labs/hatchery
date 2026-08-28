@@ -1,5 +1,6 @@
 """Thin Vercel Sandbox adapter. SDK handles never escape this module."""
 
+import asyncio
 import dataclasses
 import os
 
@@ -42,19 +43,14 @@ async def provision(
         persistent=True,
         tags={"hatchery-worker": worker_id},
     )
+    process = None
     if created:
-        await _bootstrap(box, worker_id, spec, daemon_token)
+        process = await _bootstrap(box, worker_id, spec, daemon_token)
     routes = [models.Route(port=route.port, url=route.url) for route in box.routes]
     daemon_route = next((route for route in routes if route.port == DAEMON_PORT), None)
     if daemon_route is None:
         raise RuntimeError("sandbox did not expose the daemon route")
-    async with httpx.AsyncClient(timeout=10) as client:
-        response = await client.get(
-            f"{daemon_route.url}/health",
-            headers={"authorization": f"Bearer {daemon_token}"},
-        )
-        response.raise_for_status()
-        health = response.json()
+    health = await _wait_for_daemon(daemon_route.url, daemon_token, process)
     if health != {"ok": True, "version": daemon_main.VERSION}:
         raise RuntimeError("sandbox daemon returned an incompatible health response")
     return Provisioned(name, routes)
@@ -79,12 +75,17 @@ async def resume(name: str, worker_id: str, spec: models.WorkerSpec, token: str)
     )
 
 
-async def _bootstrap(box, worker_id: str, spec: models.WorkerSpec, token: str) -> None:
+async def _bootstrap(box, worker_id: str, spec: models.WorkerSpec, token: str):
     await box.fs.mkdir("/opt/hatchery")
     await box.fs.write_text(DAEMON_PATH, daemon_main.source(), mode=0o755)
     await box.run_process(
         "/bin/sh",
-        ["-lc", "command -v fx >/dev/null || curl -fsSL https://fx.sh/setup.sh | bash"],
+        [
+            "-lc",
+            "set -e; python3 -c 'from vercel import queue' 2>/dev/null || "
+            "python3 -m pip install --disable-pip-version-check 'vercel-queue==0.7.3'; "
+            "command -v fx >/dev/null || curl -fsSL https://fx.sh/setup.sh | bash",
+        ],
         check=True,
         capture_output=True,
     )
@@ -103,11 +104,37 @@ async def _bootstrap(box, worker_id: str, spec: models.WorkerSpec, token: str) -
             capture_output=True,
         )
     workspace = _workspace(spec)
-    await box.create_process(
+    return await box.create_process(
         "python3",
         [DAEMON_PATH, "--port", str(DAEMON_PORT), "--worker-id", worker_id, "--workspace", workspace, "--state", DAEMON_STATE_PATH],
         env=_daemon_env(worker_id, spec, token),
     )
+
+
+async def _wait_for_daemon(url: str, token: str, process=None) -> dict:
+    error = None
+    async with httpx.AsyncClient(timeout=10) as client:
+        for attempt in range(20):
+            try:
+                response = await client.get(
+                    f"{url}/health",
+                    headers={"authorization": f"Bearer {token}"},
+                )
+                response.raise_for_status()
+                return response.json()
+            except (httpx.HTTPError, ValueError) as current:
+                error = current
+                if process is not None:
+                    await process.refresh()
+                    if process.returncode is not None:
+                        _, stderr = await process.communicate()
+                        detail = (stderr or "").strip()
+                        raise RuntimeError(
+                            f"sandbox daemon exited with {process.returncode}: {detail}"
+                        ) from current
+                if attempt < 19:
+                    await asyncio.sleep(1)
+    raise RuntimeError("sandbox daemon did not become healthy") from error
 
 
 def _workspace(spec: models.WorkerSpec) -> str:
