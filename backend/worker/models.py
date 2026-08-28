@@ -68,6 +68,16 @@ class Worker(pydantic.BaseModel):
     updated_at: str
 
 
+class Terminal(pydantic.BaseModel):
+    id: str
+    chat_id: str
+    worker_id: str
+    title: str
+    status: typing.Literal["creating", "running", "exited"] = "creating"
+    created_at: str
+    updated_at: str
+
+
 class Task(pydantic.BaseModel):
     id: str
     chat_id: str

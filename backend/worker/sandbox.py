@@ -1,6 +1,7 @@
 """Thin Vercel Sandbox adapter. SDK handles never escape this module."""
 
 import asyncio
+import base64
 import dataclasses
 import os
 
@@ -109,6 +110,61 @@ async def _bootstrap(box, worker_id: str, spec: models.WorkerSpec, token: str):
         [DAEMON_PATH, "--port", str(DAEMON_PORT), "--worker-id", worker_id, "--workspace", workspace, "--state", DAEMON_STATE_PATH],
         env=_daemon_env(worker_id, spec, token),
     )
+
+
+def daemon_url(record: models.Worker) -> str:
+    route = next((route for route in record.routes if route.port == DAEMON_PORT), None)
+    if route is None:
+        raise RuntimeError("sandbox daemon route is unavailable")
+    return route.url.rstrip("/")
+
+
+async def tty_read(
+    record: models.Worker,
+    session_id: str,
+    offset: int,
+    cols: int,
+    rows: int,
+    *,
+    command: list[str] | None = None,
+) -> dict:
+    payload = {"offset": offset, "cols": cols, "rows": rows}
+    if command is not None:
+        payload["command"] = command
+    async with httpx.AsyncClient(timeout=35) as client:
+        response = await client.post(
+            f"{daemon_url(record)}/tty/{session_id}/read",
+            headers={"authorization": f"Bearer {record.daemon_token}"},
+            json=payload,
+        )
+        response.raise_for_status()
+        return response.json()
+
+
+async def tty_input(record: models.Worker, session_id: str, data: bytes) -> None:
+    await _tty_action(record, session_id, "input", {"data": base64.b64encode(data).decode()})
+
+
+async def tty_resize(record: models.Worker, session_id: str, cols: int, rows: int) -> None:
+    await _tty_action(record, session_id, "resize", {"cols": cols, "rows": rows})
+
+
+async def tty_signal(record: models.Worker, session_id: str, signal_name: str) -> None:
+    try:
+        await _tty_action(record, session_id, "signal", {"signal": signal_name})
+    except httpx.HTTPStatusError as error:
+        if error.response.status_code != 404:
+            raise
+
+
+async def _tty_action(record: models.Worker, session_id: str, action: str, payload: dict) -> None:
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.post(
+            f"{daemon_url(record)}/tty/{session_id}/{action}",
+            headers={"authorization": f"Bearer {record.daemon_token}"},
+            json=payload,
+        )
+        response.raise_for_status()
 
 
 async def _wait_for_daemon(url: str, token: str, process=None) -> dict:

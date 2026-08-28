@@ -62,6 +62,12 @@ async def stop(worker_id: str) -> models.Worker:
 async def destroy(worker_id: str) -> None:
     record = await _required(worker_id)
     await sandbox.destroy(record.sandbox_name)
+    for task in await store.list_tasks(record.chat_id):
+        if task.worker_id == record.id:
+            await store.delete_task(task.id)
+    for terminal in await store.list_terminals(record.chat_id):
+        if terminal.worker_id == record.id:
+            await store.delete_terminal(terminal.id)
     await store.delete(record.id)
 
 
@@ -119,6 +125,43 @@ async def send_task_input(chat_id: str, task_id: str, prompt: str) -> models.Tas
         )
     )
     return task
+
+
+async def create_terminal(chat_id: str, worker_id: str) -> models.Terminal:
+    record = await _required(worker_id)
+    if record.chat_id != chat_id:
+        raise ValueError("sandbox does not belong to this chat")
+    if record.status != "running":
+        raise RuntimeError("sandbox is not running")
+    found = [item for item in await store.list_terminals(chat_id) if item.worker_id == worker_id]
+    now = _now()
+    terminal = models.Terminal(
+        id=f"terminal_{uuid.uuid4().hex[:12]}",
+        chat_id=chat_id,
+        worker_id=worker_id,
+        title=f"bash {len(found) + 1}",
+        created_at=now,
+        updated_at=now,
+    )
+    return await store.save_terminal(terminal)
+
+
+async def delete_terminal(chat_id: str, terminal_id: str) -> None:
+    terminal = await store.get_terminal(terminal_id)
+    if terminal is None or terminal.chat_id != chat_id:
+        raise ValueError("terminal does not belong to this chat")
+    record = await _required(terminal.worker_id)
+    await sandbox.tty_signal(record, terminal.id, "terminate")
+    await store.delete_terminal(terminal.id)
+
+
+async def list_terminals(chat_id: str) -> list[models.Terminal]:
+    return await store.list_terminals(chat_id)
+
+
+async def delete_task(chat_id: str, task_id: str) -> None:
+    task = await cancel_task(chat_id, task_id)
+    await store.delete_task(task.id)
 
 
 async def cancel_task(chat_id: str, task_id: str) -> models.Task:

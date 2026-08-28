@@ -25,6 +25,14 @@ CREATE TABLE IF NOT EXISTS hatchery_worker_tasks (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS hatchery_worker_tasks_chat ON hatchery_worker_tasks (chat_id, created_at);
+CREATE TABLE IF NOT EXISTS hatchery_worker_terminals (
+    id         TEXT PRIMARY KEY,
+    chat_id    TEXT NOT NULL,
+    worker_id  TEXT NOT NULL,
+    data       JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS hatchery_worker_terminals_chat ON hatchery_worker_terminals (chat_id, created_at);
 """
 
 _lock = threading.Lock()
@@ -42,6 +50,7 @@ async def ensure_ready() -> None:
     else:
         (store.data_dir() / "workers").mkdir(parents=True, exist_ok=True)
         (store.data_dir() / "worker_tasks").mkdir(parents=True, exist_ok=True)
+        (store.data_dir() / "worker_terminals").mkdir(parents=True, exist_ok=True)
 
 
 async def save(worker: models.Worker) -> models.Worker:
@@ -92,6 +101,37 @@ async def list_tasks(chat_id: str | None = None) -> list[models.Task]:
     return [models.Task.model_validate_json(raw) for raw in await _list("worker_tasks", chat_id)]
 
 
+async def delete_task(task_id: str) -> bool:
+    return await _delete("worker_tasks", task_id)
+
+
+async def save_terminal(terminal: models.Terminal) -> models.Terminal:
+    await _save(
+        "worker_terminals",
+        terminal.id,
+        terminal.model_dump_json(),
+        chat_id=terminal.chat_id,
+        worker_id=terminal.worker_id,
+    )
+    return terminal
+
+
+async def get_terminal(terminal_id: str) -> models.Terminal | None:
+    raw = await _get("worker_terminals", terminal_id)
+    return models.Terminal.model_validate_json(raw) if raw is not None else None
+
+
+async def list_terminals(chat_id: str | None = None) -> list[models.Terminal]:
+    return [
+        models.Terminal.model_validate_json(raw)
+        for raw in await _list("worker_terminals", chat_id)
+    ]
+
+
+async def delete_terminal(terminal_id: str) -> bool:
+    return await _delete("worker_terminals", terminal_id)
+
+
 async def apply_event(event) -> tuple[models.Task | None, bool]:
     """Apply one ordered event. Duplicate IDs and stale sequences are ignored."""
     if event.task_id is None:
@@ -128,7 +168,11 @@ async def _save(kind: str, item_id: str, data: str, *, chat_id: str, worker_id: 
     if store.use_postgres():
         from store import db
 
-        table = "hatchery_workers" if kind == "workers" else "hatchery_worker_tasks"
+        table = {
+            "workers": "hatchery_workers",
+            "worker_tasks": "hatchery_worker_tasks",
+            "worker_terminals": "hatchery_worker_terminals",
+        }[kind]
         if kind == "workers":
             query = f"INSERT INTO {table} (id, chat_id, data) VALUES ($1, $2, $3::jsonb) ON CONFLICT (id) DO UPDATE SET chat_id = EXCLUDED.chat_id, data = EXCLUDED.data"
             args = (item_id, chat_id, data)
@@ -146,7 +190,7 @@ async def _get(kind: str, item_id: str) -> str | None:
     if store.use_postgres():
         from store import db
 
-        table = "hatchery_workers" if kind == "workers" else "hatchery_worker_tasks"
+        table = {"workers": "hatchery_workers", "worker_tasks": "hatchery_worker_tasks", "worker_terminals": "hatchery_worker_terminals"}[kind]
         row = await (await db.pool()).fetchrow(f"SELECT data FROM {table} WHERE id = $1", item_id)
         if row is None:
             return None
@@ -159,7 +203,7 @@ async def _list(kind: str, chat_id: str | None) -> list[str]:
     if store.use_postgres():
         from store import db
 
-        table = "hatchery_workers" if kind == "workers" else "hatchery_worker_tasks"
+        table = {"workers": "hatchery_workers", "worker_tasks": "hatchery_worker_tasks", "worker_terminals": "hatchery_worker_terminals"}[kind]
         query = f"SELECT data FROM {table}"
         args = ()
         if chat_id is not None:
@@ -180,7 +224,7 @@ async def _delete(kind: str, item_id: str) -> bool:
     if store.use_postgres():
         from store import db
 
-        table = "hatchery_workers" if kind == "workers" else "hatchery_worker_tasks"
+        table = {"workers": "hatchery_workers", "worker_tasks": "hatchery_worker_tasks", "worker_terminals": "hatchery_worker_terminals"}[kind]
         result = await (await db.pool()).execute(f"DELETE FROM {table} WHERE id = $1", item_id)
         return result != "DELETE 0"
     path = _path(kind, item_id)

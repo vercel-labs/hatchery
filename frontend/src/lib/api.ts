@@ -9,6 +9,14 @@ export function apiBase(): string {
   return BACKEND_ORIGIN;
 }
 
+export function wsBase(): string {
+  if (BACKEND_ORIGIN) return BACKEND_ORIGIN.replace(/^http/, "ws");
+  return (
+    (window.location.protocol === "https:" ? "wss://" : "ws://") +
+    window.location.host
+  );
+}
+
 export type Resource = {
   title: string;
   url: string;

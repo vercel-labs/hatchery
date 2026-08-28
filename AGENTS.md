@@ -43,9 +43,9 @@ schema is idempotent DDL, created on startup — no migrations.
 
 ## worker layer
 
-the previous DevBox integration has been removed. the retained sandbox,
-subagent, and tty boundaries are explicit not-implemented stubs while they are
-rebuilt on Vercel Sandbox and Queues; see `migration.md`.
+the previous DevBox integration has been removed. sandbox and subagent control
+uses Vercel Sandbox and Queues; terminal traffic uses the authenticated daemon
+route through the backend websocket bridge. see `migration.md`.
 
 `.reference/api` is specification material for retained behavior only. excluded
 DevBox subsystems must not be copied into hatchery.

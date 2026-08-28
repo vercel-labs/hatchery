@@ -6,6 +6,7 @@ import ai
 import pydantic
 
 import models
+from store import events
 import worker
 
 
@@ -88,7 +89,9 @@ async def suggest(space: models.Space) -> Launch:
 
 
 async def create(chat_id: str, launch: Launch) -> worker.Worker:
-    return await worker.create(chat_id, worker.WorkerSpec(**launch.model_dump()))
+    created = await worker.create(chat_id, worker.WorkerSpec(**launch.model_dump()))
+    await events.append(chat_id, "ui", {"type": "sandbox.changed"})
+    return created
 
 
 async def list_all(chat_id: str) -> list[worker.Worker]:
@@ -100,6 +103,7 @@ async def destroy(chat_id: str, sandbox_id: str) -> None:
     if record is None or record.chat_id != chat_id:
         raise ValueError("sandbox does not belong to this chat")
     await worker.destroy(sandbox_id)
+    await events.append(chat_id, "ui", {"type": "sandbox.changed"})
 
 
 async def launch_task(chat_id: str, sandbox_id: str, prompt: str, model: str) -> worker.Task:

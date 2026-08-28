@@ -34,7 +34,7 @@ async def test_provision_creates_persistent_sandbox_and_checks_daemon(monkeypatc
             pass
 
         def json(self):
-            return {"ok": True, "version": 2}
+            return {"ok": True, "version": 3}
 
     class Client:
         def __init__(self, timeout):
@@ -84,7 +84,7 @@ async def test_wait_for_daemon_retries_route_warmup(monkeypatch):
                 )
 
         def json(self):
-            return {"ok": True, "version": 2}
+            return {"ok": True, "version": 3}
 
     class Client:
         def __init__(self, timeout):
@@ -107,7 +107,7 @@ async def test_wait_for_daemon_retries_route_warmup(monkeypatch):
 
     health = await sandbox._wait_for_daemon("https://daemon.example", "secret")
 
-    assert health == {"ok": True, "version": 2}
+    assert health == {"ok": True, "version": 3}
     assert calls == 2
 
 

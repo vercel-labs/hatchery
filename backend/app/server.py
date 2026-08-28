@@ -12,6 +12,7 @@ _StoreHub (dedupe, claim binding, append); no turn runs on inbound yet.
 """
 
 import asyncio
+import base64
 import contextlib
 import html
 import json
@@ -525,10 +526,61 @@ async def create_chat_sandbox(chat_id: str, request: sandbox.Launch) -> dict:
 async def chat_sandboxes(chat_id: str) -> list[dict]:
     if await chats.get(chat_id) is None:
         raise fastapi.HTTPException(404, "unknown chat")
-    return [
-        item.model_dump(exclude={"daemon_token"})
-        for item in await sandbox.list_all(chat_id)
-    ]
+    tasks = await worker.store.list_tasks(chat_id)
+    terminals = await worker.list_terminals(chat_id)
+    result = []
+    for item in await sandbox.list_all(chat_id):
+        data = item.model_dump(exclude={"daemon_token"})
+        data["subagents"] = [
+            {
+                **task.model_dump(),
+                "sandbox_id": task.worker_id,
+                "session_id": task.id,
+            }
+            for task in tasks
+            if task.worker_id == item.id
+        ]
+        data["terminals"] = [
+            {
+                **terminal.model_dump(),
+                "sandbox_id": terminal.worker_id,
+                "session_id": terminal.id,
+            }
+            for terminal in terminals
+            if terminal.worker_id == item.id
+        ]
+        result.append(data)
+    return result
+
+
+@app.post("/api/chats/{chat_id}/sandboxes/{sandbox_id}/terminals", status_code=201)
+async def create_manual_terminal(chat_id: str, sandbox_id: str) -> dict:
+    try:
+        terminal = await worker.create_terminal(chat_id, sandbox_id)
+    except ValueError as error:
+        raise fastapi.HTTPException(404, str(error)) from error
+    except RuntimeError as error:
+        raise fastapi.HTTPException(409, str(error)) from error
+    await events.append(chat_id, "ui", {"type": "sandbox.changed"})
+    return {**terminal.model_dump(), "sandbox_id": terminal.worker_id, "session_id": terminal.id}
+
+
+@app.delete("/api/chats/{chat_id}/terminals/{terminal_id}", status_code=204)
+async def delete_manual_terminal(chat_id: str, terminal_id: str) -> None:
+    try:
+        await worker.delete_terminal(chat_id, terminal_id)
+    except ValueError as error:
+        raise fastapi.HTTPException(404, str(error)) from error
+    await events.append(chat_id, "ui", {"type": "sandbox.changed"})
+
+
+@app.delete("/api/chats/{chat_id}/subagents/{subagent_id}", status_code=204)
+async def delete_subagent(chat_id: str, subagent_id: str) -> None:
+    try:
+        await worker.delete_task(chat_id, subagent_id)
+    except ValueError as error:
+        raise fastapi.HTTPException(404, str(error)) from error
+    await events.append(chat_id, "ui", {"type": "sandbox.changed"})
 
 
 @app.delete("/api/chats/{chat_id}/sandboxes/{sandbox_id}", status_code=204)
@@ -541,10 +593,90 @@ async def delete_chat_sandbox(chat_id: str, sandbox_id: str) -> None:
         raise fastapi.HTTPException(404, str(error)) from error
 
 
+async def _bridge_tty(
+    ws: fastapi.WebSocket,
+    record: worker.Worker,
+    session_id: str,
+    command: list[str] | None = None,
+) -> None:
+    await ws.accept()
+    offset = int(ws.query_params.get("offset", "0"))
+    cols = int(ws.query_params.get("cols", "80"))
+    rows = int(ws.query_params.get("rows", "24"))
+    await ws.send_json({"type": "handshake", "body": {"sessionId": session_id, "offset": offset}})
+
+    async def down() -> None:
+        nonlocal offset, command
+        while True:
+            result = await worker.sandbox.tty_read(
+                record, session_id, offset, cols, rows, command=command
+            )
+            command = None
+            data = base64.b64decode(result.get("data", ""))
+            if data:
+                await ws.send_json(
+                    {"type": "tty-output", "body": {"data": base64.b64encode(data).decode()}}
+                )
+                offset = int(result.get("offset", offset)) + len(data)
+            if result.get("exit_code") is not None:
+                await ws.send_json({"type": "exit", "body": {"code": result["exit_code"]}})
+                return
+
+    async def up() -> None:
+        while True:
+            frame = await ws.receive_json()
+            body = frame.get("body") or {}
+            if frame.get("type") == "tty-input":
+                await worker.sandbox.tty_input(record, session_id, base64.b64decode(body["data"]))
+            elif frame.get("type") == "resize":
+                await worker.sandbox.tty_resize(record, session_id, int(body["cols"]), int(body["rows"]))
+            elif frame.get("type") == "signal":
+                await worker.sandbox.tty_signal(record, session_id, str(body["signal"]))
+
+    try:
+        done, pending = await asyncio.wait(
+            [asyncio.create_task(down()), asyncio.create_task(up())],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        for task in done:
+            task.result()
+    except fastapi.WebSocketDisconnect:
+        pass
+    finally:
+        with contextlib.suppress(RuntimeError):
+            await ws.close()
+
+
 @app.websocket("/api/chats/{chat_id}/subagents/{subagent_id}/tty")
 async def task_tty(ws: fastapi.WebSocket, chat_id: str, subagent_id: str) -> None:
-    await ws.accept()
-    await ws.close(code=1011, reason="sandbox TTY is not implemented")
+    task = await worker.get_task(chat_id, subagent_id)
+    if task is None:
+        await ws.accept()
+        await ws.close(code=4404, reason="unknown subagent")
+        return
+    record = await worker.get(task.worker_id)
+    if record is None:
+        await ws.accept()
+        await ws.close(code=4404, reason="unknown sandbox")
+        return
+    await _bridge_tty(ws, record, task.id)
+
+
+@app.websocket("/api/chats/{chat_id}/terminals/{terminal_id}/tty")
+async def manual_tty(ws: fastapi.WebSocket, chat_id: str, terminal_id: str) -> None:
+    terminal = await worker.store.get_terminal(terminal_id)
+    if terminal is None or terminal.chat_id != chat_id:
+        await ws.accept()
+        await ws.close(code=4404, reason="unknown terminal")
+        return
+    record = await worker.get(terminal.worker_id)
+    if record is None:
+        await ws.accept()
+        await ws.close(code=4404, reason="unknown sandbox")
+        return
+    await _bridge_tty(ws, record, terminal.id, ["/bin/bash", "-l"])
 
 
 @vercel.queue.subscribe(

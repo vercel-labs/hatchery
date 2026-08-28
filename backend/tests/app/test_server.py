@@ -704,7 +704,7 @@ async def test_worker_completion_persists_and_delivers_message(monkeypatch):
     assert (await chats.get(chat.id)).status == "done"
 
 
-async def test_task_tty_is_an_explicit_stub():
+async def test_task_tty_rejects_unknown_subagent():
     class FakeWebSocket:
         def __init__(self):
             self.accepted = False
@@ -719,4 +719,4 @@ async def test_task_tty_is_an_explicit_stub():
 
     ws = FakeWebSocket()
     await server.task_tty(ws, "chat_1", "subagent_1")
-    assert ws.closed == (1011, "sandbox TTY is not implemented")
+    assert ws.closed == (4404, "unknown subagent")

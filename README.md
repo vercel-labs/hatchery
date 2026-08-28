@@ -26,4 +26,5 @@ sandbox and subagent. `vercel dev` supplies the local Queue endpoint and token;
 Hatchery rewrites that endpoint to the public vgrok origin for the sandbox.
 
 Deployments use hosted Vercel Queues through deployment OIDC. No local worker or
-in-process task bypass exists. TTY access is still not implemented.
+in-process task bypass exists. Sandbox and subagent terminals connect through the
+backend WebSocket bridge to the authenticated in-sandbox daemon.

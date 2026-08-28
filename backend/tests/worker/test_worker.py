@@ -20,7 +20,7 @@ async def test_create_provisions_and_persists(monkeypatch):
 
     assert created.chat_id == "chat_1"
     assert created.status == "running"
-    assert created.daemon_version == 2
+    assert created.daemon_version == 3
     assert created.daemon_token
     assert await worker.get(created.id) == created
     assert await worker.list_all("chat_1") == [created]
