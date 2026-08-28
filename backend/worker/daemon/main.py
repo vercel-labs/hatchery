@@ -1,10 +1,13 @@
 """Small worker daemon: health, Queue polling, and fx process supervision."""
 
+from __future__ import annotations
+
 import argparse
 import asyncio
 import base64
 import datetime
 import fcntl
+import hashlib
 import http.server
 import json
 import os
@@ -40,9 +43,15 @@ class Runtime:
             except (OSError, json.JSONDecodeError):
                 state = {}
         self.sequences = {key: int(value) for key, value in state.get("commands", {}).items()}
-        self.processes: dict[str, asyncio.subprocess.Process] = {}
+        self.processes: dict[str, TTYSession] = {}
         self.event_sequences = {key: int(value) for key, value in state.get("events", {}).items()}
         self.jobs: set[asyncio.Task] = set()
+        self.streams: set[asyncio.Task] = set()
+        self.input_locks: dict[int, threading.Lock] = {}
+        self._input_generations: dict[int, int] = {}
+        self._input_generation_lock = threading.Lock()
+        self.fx_home = pathlib.Path(os.environ.get("FX_HOME", pathlib.Path.home() / ".fx"))
+        self.instructions = os.environ.get("HATCHERY_AGENT_INSTRUCTIONS", "")
 
     async def handle(self, raw: dict) -> None:
         task_id = str(raw.get("task_id") or "")
@@ -55,69 +64,349 @@ class Runtime:
         self._save_state()
         kind = raw.get("type")
         if kind == "task.cancel":
-            with Handler.sessions_lock:
-                session = Handler.sessions.get(task_id)
+            session = self.processes.get(task_id)
+            self.cancel_pending_input(session)
             if session is not None and session.exit_code is None:
                 session.send_signal("interrupt")
             return
         if kind not in ("task.launch", "task.input"):
             return
-        job = asyncio.create_task(
-            self._run(
-                task_id,
-                str((raw.get("payload") or {}).get("prompt") or ""),
-                str((raw.get("payload") or {}).get("model") or ""),
-                resume=kind == "task.input",
+        payload = raw.get("payload") or {}
+        prompt = str(payload.get("prompt") or "")
+        model = str(payload.get("model") or "")
+        session = self.processes.get(task_id)
+        if kind == "task.input" and session is not None and session.exit_code is None:
+            job = asyncio.create_task(self._deliver(task_id, session, prompt))
+        else:
+            job = asyncio.create_task(
+                self._launch(task_id, prompt, model, resume=kind == "task.input")
             )
-        )
         self.jobs.add(job)
         job.add_done_callback(self.jobs.discard)
 
-    async def _run(self, task_id: str, prompt: str, model: str, *, resume: bool) -> None:
+    async def _launch(self, task_id: str, prompt: str, model: str, *, resume: bool) -> None:
         await self._emit(task_id, "task.started", {})
-        command = ["fx", "ask", "--json", "--yolo"]
-        if resume:
-            command += ["--resume", "last"]
-        command += ["--", prompt]
-        env = os.environ.copy()
-        env["FX_PERMISSION_MODE"] = "yolo"
-        env["FX_AUTO_UPGRADE"] = "0"
-        if model:
-            env["FX_MODEL"] = model
         try:
-            session = TTYSession(task_id, command, self.workspace, 80, 24, env)
+            self.configure_fx(model=model)
+            self.prepare_workspace(self.workspace)
+            env = os.environ.copy()
+            env["FX_AUTO_UPGRADE"] = "0"
+            session = TTYSession(task_id, self.fx_command(resume=resume), self.workspace, 80, 24, env)
+            self.processes[task_id] = session
             with Handler.sessions_lock:
                 Handler.sessions[task_id] = session
-            exit_code = await asyncio.to_thread(session.wait)
-            _, stdout, _ = session.read(0, 0)
-            if exit_code == 0:
-                text = stdout.decode(errors="replace").strip()
-                try:
-                    data = json.loads(text or "{}")
-                except json.JSONDecodeError:
-                    data = {"output": text}
-                output = str(data.get("output") or "subagent completed")
-                await self._emit(task_id, "task.output", {"text": output})
-                await self._emit(
-                    task_id,
-                    "task.completed",
-                    {
+            stream = asyncio.create_task(self._stream_task(task_id, session))
+            self.streams.add(stream)
+            stream.add_done_callback(self.streams.discard)
+            if prompt:
+                await asyncio.to_thread(self.deliver_input, session, prompt, first=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            await self._emit(task_id, "task.failed", {"error": str(error)})
+
+    async def _deliver(self, task_id: str, session: "TTYSession", prompt: str) -> None:
+        try:
+            await asyncio.to_thread(self.deliver_input, session, prompt, first=False)
+            await self._emit(task_id, "task.started", {})
+        except asyncio.CancelledError:
+            self.cancel_pending_input(session)
+            raise
+        except Exception as error:
+            await self._emit(task_id, "task.failed", {"error": str(error)})
+
+    async def _stream_task(self, task_id: str, session: "TTYSession") -> None:
+        seen: set[str] = set()
+        last_summary = ""
+        stream = iter(
+            self.stream_fx_events(
+                self.workspace,
+                seen=seen,
+                stop=lambda: session.exit_code is not None,
+            )
+        )
+        try:
+            while session.exit_code is None:
+                event = await asyncio.to_thread(next, stream, None)
+                if event is None:
+                    break
+                if event["type"] == "assistant":
+                    last_summary = event["text"]
+                    await self._emit(task_id, "task.output", {"text": last_summary})
+                elif event["type"] == "attention":
+                    await self._emit(task_id, "task.question", {"question": event["text"]})
+                elif event["type"] == "turn.completed":
+                    await self._emit(task_id, "task.completed", {
                         "result": {
-                            "summary": output,
-                            "session_id": data.get("session_id"),
-                            "tool_calls": data.get("tool_calls", []),
+                            "summary": last_summary or "subagent completed",
+                            "session_id": event.get("session_id"),
+                            "tool_calls": [],
                         }
-                    },
-                )
-            else:
-                error = stdout.decode(errors="replace").strip()
-                await self._emit(task_id, "task.failed", {"error": error[-4000:]})
+                    })
+            exit_code = await asyncio.to_thread(session.wait)
+            if exit_code != 0:
+                _, output, _ = session.read(0, 0)
+                await self._emit(task_id, "task.failed", {
+                    "error": output.decode(errors="replace")[-4000:]
+                })
         except asyncio.CancelledError:
             raise
         except Exception as error:
             await self._emit(task_id, "task.failed", {"error": str(error)})
         finally:
-            self.processes.pop(task_id, None)
+            if self.processes.get(task_id) is session:
+                self.processes.pop(task_id, None)
+
+    def _write_private_json(self, path: pathlib.Path, updates: dict) -> None:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            data = {}
+        data.update(updates)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.parent.chmod(0o700)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
+        temporary.chmod(0o600)
+        temporary.replace(path)
+        path.chmod(0o600)
+
+    def configure_fx(self, *, model: str = "", gateway_key: str = "", instructions: str = "") -> dict[str, str]:
+        settings = {"permission_mode": "yolo", "yolo_acknowledged": True}
+        if model:
+            settings["model"] = model
+        self._write_private_json(self.fx_home / "settings.json", settings)
+        content = instructions or self.instructions
+        if content:
+            note = (
+                "\n\n## Reaching MCP tools in fx\n\n"
+                "MCP tools are reached through `mcp_search_tools` and `mcp_select_tool`. "
+                "Search for the exact tool, select the returned tool, then call it. "
+                "If search returns no tools, retry with the exact name rather than asking in prose.\n"
+            )
+            path = self.fx_home / "box-instructions.md"
+            path.write_text(content + note, encoding="utf-8")
+            path.chmod(0o600)
+        key = gateway_key or os.environ.get("AI_GATEWAY_API_KEY", "")
+        return {"AI_GATEWAY_API_KEY": key} if key else {}
+
+    def configure_fx_mcp(
+        self,
+        name: str,
+        *,
+        url: str = "",
+        command: list[str] | None = None,
+        environment: dict[str, str] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        path = self.fx_home / "mcp.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            data = {}
+        servers = data.setdefault("mcp", {})
+        if command:
+            entry: dict = {"type": "local", "command": command, "enabled": True}
+            if environment:
+                entry["environment"] = environment
+        else:
+            entry = {"type": "http", "url": url, "enabled": not bool(headers)}
+        servers[name] = entry
+        self._write_private_json(path, data)
+
+    def prepare_workspace(self, workspace: str) -> None:
+        root = pathlib.Path(workspace)
+        stored = self.fx_home / "box-instructions.md"
+        if not stored.exists() or (root / ".git").exists():
+            return
+        content = stored.read_text(encoding="utf-8")
+        if content.strip():
+            (root / "AGENTS.md").write_text(content, encoding="utf-8")
+
+    @staticmethod
+    def fx_command(*, resume: bool = False) -> list[str]:
+        command = ["fx"]
+        if resume:
+            command += ["--resume", "last"]
+        return command
+
+    def cancel_pending_input(self, session: "TTYSession" | None = None) -> None:
+        with self._input_generation_lock:
+            key = id(session) if session is not None else 0
+            self._input_generations[key] = self._input_generations.get(key, 0) + 1
+
+    def deliver_input(self, session: "TTYSession", text: str, *, first: bool = False) -> None:
+        if not text:
+            raise ValueError("fx input must not be empty")
+        if session.exit_code is not None:
+            raise LookupError("fx session is not running")
+        key = id(session)
+        with self._input_generation_lock:
+            generation = self._input_generations.get(key, 0)
+        lock = self.input_locks.setdefault(key, threading.Lock())
+        with lock:
+            if first:
+                with session.condition:
+                    while not session.output and session.exit_code is None:
+                        session.condition.wait(0.05)
+                        with self._input_generation_lock:
+                            if generation != self._input_generations.get(key, 0):
+                                return
+            if session.exit_code is not None:
+                raise LookupError("fx session is not running")
+            with self._input_generation_lock:
+                if generation != self._input_generations.get(key, 0):
+                    return
+            if not first:
+                session.write(b"\x03")
+            session.write(b"\x1b[200~" + text.encode() + b"\x1b[201~")
+            session.write(b"\r")
+
+    def discover_fx_session(self, workspace: str) -> str | None:
+        canonical = str(pathlib.Path(workspace).resolve())
+        latest = self.fx_home / "sessions" / "latest"
+        hashed = latest / f"{hashlib.sha256(canonical.encode()).hexdigest()}.json"
+        candidates = [hashed]
+        try:
+            candidates.extend(path for path in latest.glob("*.json") if path != hashed)
+        except OSError:
+            return None
+        best: tuple[int, str] | None = None
+        for path in candidates:
+            try:
+                pointer = json.loads(path.read_text(encoding="utf-8"))
+                if str(pathlib.Path(pointer.get("workspace_root", "")).resolve()) != canonical:
+                    continue
+                candidate = (int(pointer.get("updated_at_ms", 0)), str(pointer["session_id"]))
+                if best is None or candidate[0] > best[0]:
+                    best = candidate
+            except (OSError, ValueError, KeyError, json.JSONDecodeError):
+                continue
+        return best[1] if best else None
+
+    @staticmethod
+    def decode_fx_event(record: dict, state: dict | None = None) -> list[dict]:
+        state = state if state is not None else {}
+        seen_calls = state.setdefault("calls", set())
+        seen_results = state.setdefault("results", set())
+        seen_turns = state.setdefault("turns", set())
+        payload = record.get("payload") or {}
+        kind = record.get("kind")
+        source = str(record.get("event_id") or record.get("seq") or "")
+        events: list[dict] = []
+        execution = {}
+        if kind == "recovery_checkpoint_set":
+            checkpoint = payload.get("checkpoint") or {}
+            turn_id = checkpoint.get("turn_id")
+            user = (checkpoint.get("user") or {}).get("text")
+            if user and turn_id not in seen_turns:
+                seen_turns.add(turn_id)
+                events.append({"type": "user", "text": user, "source_key": f"{source}:user"})
+            execution = checkpoint.get("execution") or {}
+        elif kind == "history_turn_committed":
+            turn = payload.get("turn") or {}
+            execution = turn.get("execution") or {}
+        else:
+            return events
+        for step in execution.get("tool_steps") or []:
+            for call in step.get("tool_calls") or []:
+                call_id = str(call.get("id") or "")
+                if not call_id or call_id in seen_calls:
+                    continue
+                seen_calls.add(call_id)
+                raw = call.get("arguments_json") or "{}"
+                try:
+                    arguments = json.loads(raw)
+                except (TypeError, json.JSONDecodeError):
+                    arguments = {"raw": raw}
+                name = str(call.get("name") or "")
+                normalized = {"name": name, "arguments": arguments}
+                if name == "run_command":
+                    normalized["command"] = arguments.get("command", "")
+                elif name in ("read_file", "write_file", "edit_file"):
+                    normalized["path"] = arguments.get("path", "")
+                events.append({"type": "tool.call", "id": call_id, "tool": normalized, "source_key": f"{source}:call:{call_id}"})
+            for result in step.get("tool_results") or []:
+                call_id = str(result.get("tool_call_id") or "")
+                if not call_id or call_id in seen_results:
+                    continue
+                seen_results.add(call_id)
+                events.append({
+                    "type": "tool.result",
+                    "id": call_id,
+                    "output": str(result.get("output") or ""),
+                    "error": result.get("status") != "success",
+                    "source_key": f"{source}:result:{call_id}",
+                })
+        if kind == "history_turn_committed":
+            turn = payload.get("turn") or {}
+            assistant = str(turn.get("assistant") or "")
+            if assistant:
+                events.append({"type": "assistant", "text": assistant, "source_key": f"{source}:assistant"})
+            if turn.get("kind") == "interrupted" and turn.get("terminal_reason") == "cancelled":
+                events.append({"type": "attention", "text": "the turn was cancelled", "source_key": f"{source}:cancelled"})
+            else:
+                events.append({"type": "turn.completed", "source_key": f"{source}:completed"})
+        return events
+
+    @classmethod
+    def decode_fx_jsonl(cls, raw: bytes, state: dict | None = None) -> list[dict]:
+        state = state if state is not None else {}
+        events: list[dict] = []
+        for line in raw.splitlines():
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            events.extend(cls.decode_fx_event(record, state))
+        return events
+
+    def stream_fx_events(
+        self,
+        workspace: str,
+        *,
+        seen: set[str] | None = None,
+        wait: bool = True,
+        stop=None,
+    ):
+        seen = seen if seen is not None else set()
+        tailed: set[str] = set()
+        session_id = self.discover_fx_session(workspace)
+        while session_id is None:
+            if not wait or (stop is not None and stop()):
+                return
+            time.sleep(0.15)
+            session_id = self.discover_fx_session(workspace)
+        while session_id:
+            if stop is not None and stop():
+                return
+            if session_id in tailed:
+                return
+            tailed.add(session_id)
+            path = self.fx_home / "sessions" / session_id / "events.jsonl"
+            decoder_state: dict = {}
+            initial_size = path.stat().st_size if path.exists() else 0
+            follow_armed = True
+            while True:
+                if stop is not None and stop():
+                    return
+                if path.exists():
+                    for event in self.decode_fx_jsonl(path.read_bytes(), decoder_state):
+                        key = f"{session_id}:{event['source_key']}"
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        yield {**event, "source_key": key, "session_id": session_id}
+                if not wait:
+                    return
+                time.sleep(0.15)
+                current_size = path.stat().st_size if path.exists() else 0
+                newer = self.discover_fx_session(workspace)
+                if follow_armed and current_size == initial_size and newer and newer not in tailed:
+                    session_id = newer
+                    break
+                if current_size != initial_size:
+                    initial_size = current_size
+                    follow_armed = False
 
     async def _emit(self, task_id: str, kind: str, payload: dict) -> None:
         sequence = self.event_sequences.get(task_id, -1) + 1

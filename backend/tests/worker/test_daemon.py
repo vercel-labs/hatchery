@@ -28,31 +28,37 @@ def test_health_is_authenticated(monkeypatch):
         server.server_close()
 
 
-async def test_runtime_runs_fx_and_resumes_follow_up(monkeypatch, tmp_path):
+async def test_runtime_runs_interactive_fx_and_reuses_it_for_follow_up(monkeypatch, tmp_path):
     emitted = []
     commands = []
 
     class Session:
-        exit_code = 0
+        exit_code = None
 
         def __init__(self, task_id, command, workspace, cols, rows, env):
             commands.append((command, {"cwd": workspace, "env": env}))
+            self.output = bytearray(b"drawn")
+            self.writes = []
+            self.condition = threading.Condition()
 
-        def wait(self):
-            return 0
-
-        def read(self, offset, timeout=25):
-            return 0, json.dumps({"output": "done", "session_id": "ses_1"}).encode(), 0
+        def write(self, data):
+            self.writes.append(data)
 
         def send_signal(self, sent):
             pass
 
     monkeypatch.setattr(main, "TTYSession", Session)
+    monkeypatch.setenv("HOME", str(tmp_path))
 
     async def publish(event):
         emitted.append(event)
 
     runtime = main.Runtime("wrk_1", str(tmp_path), publish)
+
+    async def keep_streaming(task_id, session):
+        return None
+
+    monkeypatch.setattr(runtime, "_stream_task", keep_streaming)
     base = {
         "worker_id": "wrk_1",
         "task_id": "task_1",
@@ -60,18 +66,30 @@ async def test_runtime_runs_fx_and_resumes_follow_up(monkeypatch, tmp_path):
     }
     await runtime.handle({**base, "sequence": 0, "type": "task.launch"})
     await asyncio.gather(*runtime.jobs)
+    session = runtime.processes["task_1"]
     await runtime.handle({**base, "sequence": 1, "type": "task.input"})
     await asyncio.gather(*runtime.jobs)
 
-    assert "--resume" not in commands[0][0]
-    assert commands[1][0][0:7] == ["fx", "ask", "--json", "--yolo", "--resume", "last", "--"]
-    assert commands[0][1]["cwd"] == str(tmp_path)
-    assert commands[0][1]["env"]["FX_MODEL"] == "openai/test"
-    assert [event["type"] for event in emitted] == [
-        "task.started", "task.output", "task.completed",
-        "task.started", "task.output", "task.completed",
+    assert commands == [(["fx"], {"cwd": str(tmp_path), "env": commands[0][1]["env"]})]
+    assert json.loads((tmp_path / ".fx" / "settings.json").read_text()) == {
+        "permission_mode": "yolo",
+        "yolo_acknowledged": True,
+        "model": "openai/test",
+    }
+    assert session.writes == [
+        b"\x1b[200~fix it\x1b[201~",
+        b"\r",
+        b"\x03",
+        b"\x1b[200~fix it\x1b[201~",
+        b"\r",
     ]
-    assert [event["sequence"] for event in emitted] == list(range(6))
+    assert [event["type"] for event in emitted] == ["task.started", "task.started"]
+    assert [event["sequence"] for event in emitted] == [0, 1]
+
+
+def test_fx_resume_is_only_used_for_relaunch():
+    assert main.Runtime.fx_command(resume=False) == ["fx"]
+    assert main.Runtime.fx_command(resume=True) == ["fx", "--resume", "last"]
 
 
 async def test_runtime_keeps_ordering_state_across_restart(tmp_path):
