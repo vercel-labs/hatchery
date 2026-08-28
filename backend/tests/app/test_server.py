@@ -675,6 +675,54 @@ async def test_devbox_completion_is_persisted_and_delivered_once(monkeypatch):
             server.bot.channels["fake"] = previous
 
 
+async def test_devbox_attention_wakes_dispatcher_and_exposes_question(monkeypatch):
+    seen = None
+
+    async def fake_turn(chat_id, record, wake):
+        nonlocal seen
+        seen = (chat_id, wake)
+        return server.CompletionOutcome(notify=False)
+
+    pending = []
+    monkeypatch.setattr(server, "_run_completion_turn", fake_turn)
+    monkeypatch.setattr(server, "_spawn", pending.append)
+    space = await server.spaces.default()
+    chat = await chats.create(space.id, "task")
+    await chats.finish(chat.id, "running")
+    launch = await subagents.create(chat.id, "devbox_1", "inspect", "secret")
+    launch["task_id"] = "task_1"
+    await subagents.save(launch)
+    body = {
+        "kind": "taskStateChange",
+        "taskStateChange": {
+            "taskId": "task_1",
+            "state": "attention-required",
+            "seq": 1,
+            "result": {"question": "Which repository path should I use?"},
+        },
+    }
+
+    async with client() as c:
+        response = await c.post(
+            "/channels/v1/devbox",
+            params={"launch_id": launch["id"], "secret": "secret"},
+            json=body,
+        )
+    await pending[0]
+
+    assert response.status_code == 200
+    assert seen is not None
+    assert seen[0] == chat.id
+    assert "attention-required" in seen[1].text
+    status = await activity.status(chat.id, launch["id"])
+    assert status["result"] == {"question": "Which repository path should I use?"}
+    saved = await chats.get(chat.id)
+    assert saved is not None and saved.status == "running"
+    assert await events.read(chat.id, "ui") == [
+        (0, {"type": "task.changed", "launch_id": launch["id"], "state": "attention-required"})
+    ]
+
+
 async def test_devbox_completion_schedules_retry_without_duplicate_transcript(monkeypatch):
     class FlakyChannel:
         name = "flaky"

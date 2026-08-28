@@ -784,7 +784,7 @@ async def devbox_webhook(body: dict, launch_id: str = "", secret: str = "") -> d
     current_seq = int(record.get("webhook_seq") or 0)
     if seq < current_seq or (
         seq == current_seq
-        and (state not in devbox.TERMINAL_STATES or record.get("completion_delivered"))
+        and (state not in devbox.ACTIONABLE_STATES or record.get("completion_delivered"))
     ):
         return {"ok": True, "duplicate": True}
     if seq == current_seq:
@@ -800,7 +800,7 @@ async def devbox_webhook(body: dict, launch_id: str = "", secret: str = "") -> d
         record["id"], "state_transition", {"state": state, "result": result, "seq": seq}
     )
     await subagents.save(record)
-    if state not in devbox.TERMINAL_STATES:
+    if state not in devbox.ACTIONABLE_STATES:
         return {"ok": True}
 
     if not record.get("completion_delivered"):
@@ -809,9 +809,9 @@ async def devbox_webhook(body: dict, launch_id: str = "", secret: str = "") -> d
 
 
 async def complete_task(launch_id: str) -> None:
-    """Run one serialized completion turn for a terminal task."""
+    """Run one serialized dispatcher turn for an actionable task state."""
     current = await subagents.get(launch_id)
-    if current is None or current.get("state") not in devbox.TERMINAL_STATES:
+    if current is None or current.get("state") not in devbox.ACTIONABLE_STATES:
         return
     record = await subagents.claim_completion(launch_id)
     if record is None:
@@ -825,10 +825,14 @@ async def complete_task(launch_id: str) -> None:
         if cached:
             outcome = CompletionOutcome(notify=True, message=cached)
         else:
+            state = str(record.get("state", "unknown"))
             wake = ai.user_message(
-                f"Complete subagent {launch_id}. Call check_subagent with "
-                f"subagent_id={launch_id!r} and after={cursor}. "
-                "Do not launch another subagent. Return JSON with notify=true and a completion message."
+                f"Handle subagent {launch_id} state {state!r}. Call check_subagent with "
+                f"subagent_id={launch_id!r} and after={cursor}. Do not launch another subagent. "
+                "If it needs attention, answer it with message_subagent when the answer is available "
+                "from the conversation or workspace context; return notify=false. Otherwise ask the "
+                "user for the missing input with notify=true. For completion or failure, return "
+                "notify=true and a concise final message."
             )
             outcome = await _run_completion_turn(chat_id, {"id": chat_id}, wake)
             if outcome.message:
@@ -844,20 +848,26 @@ async def complete_task(launch_id: str) -> None:
             if not failures:
                 updates["completion_delivered"] = True
                 updates["completion_message"] = outcome.message
-        result = latest.get("result") or {}
-        artifact = next(
-            (str(pr["url"]) for pr in result.get("prs") or [] if isinstance(pr, dict) and pr.get("url")),
-            outcome.message or "subagent completed",
-        )
-        siblings = await subagents.list_for_chat(chat_id)
-        active = any(
-            sibling["id"] != launch_id and sibling.get("state") not in devbox.TERMINAL_STATES
-            for sibling in siblings
-        )
-        if not active:
-            await chats.finish(
-                chat_id, "done" if latest.get("state") == "complete" else "failed", artifact
+        if latest.get("state") in devbox.TERMINAL_STATES:
+            result = latest.get("result") or {}
+            artifact = next(
+                (
+                    str(pr["url"])
+                    for pr in result.get("prs") or []
+                    if isinstance(pr, dict) and pr.get("url")
+                ),
+                outcome.message or "subagent completed",
             )
+            siblings = await subagents.list_for_chat(chat_id)
+            active = any(
+                sibling["id"] != launch_id
+                and sibling.get("state") not in devbox.TERMINAL_STATES
+                for sibling in siblings
+            )
+            if not active:
+                await chats.finish(
+                    chat_id, "done" if latest.get("state") == "complete" else "failed", artifact
+                )
         await events.append(
             chat_id,
             "ui",

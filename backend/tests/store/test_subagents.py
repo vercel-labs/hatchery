@@ -114,8 +114,15 @@ async def test_activity_status_is_bounded_and_cursor_based():
     assert second["has_more"] is False
 
 
-async def test_activity_status_returns_compact_terminal_result():
+async def test_activity_status_returns_compact_actionable_result():
     launch = await subagents.create("chat_1", "devbox_1", "finish it", "secret")
+    launch["state"] = "attention-required"
+    launch["result"] = {"question": "Which repository path should I use?", "diffs": []}
+    await subagents.save(launch)
+
+    status = await activity.status("chat_1", launch["id"])
+    assert status["result"] == {"question": "Which repository path should I use?"}
+
     launch["state"] = "complete"
     launch["result"] = {
         "summary": "done",
@@ -137,6 +144,14 @@ async def test_completion_claim_is_serialized_and_generation_safe():
     launch = await subagents.create("chat_1", "devbox_1", "task", "secret")
     assert await subagents.claim_completion(launch["id"]) is None
 
+    launch["state"] = "attention-required"
+    await subagents.save(launch)
+    attention = await subagents.claim_completion(launch["id"])
+    assert attention is not None
+    await subagents.finish_completion(launch["id"], attention["completion_generation"])
+
+    launch = await subagents.get(launch["id"])
+    assert launch is not None
     launch["state"] = "complete"
     await subagents.save(launch)
     claimed = await subagents.claim_completion(launch["id"])

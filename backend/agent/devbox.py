@@ -22,6 +22,7 @@ API = os.environ.get("DEVBOX_API_URL", "https://api.vercel.com")
 _CLI = pathlib.Path.home() / "Library/Application Support/com.vercel.cli"
 
 TERMINAL_STATES = ("complete", "errored")
+ACTIONABLE_STATES = (*TERMINAL_STATES, "attention-required")
 DEFAULT_MODEL = "openai/gpt-5.6-sol"
 
 

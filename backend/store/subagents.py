@@ -196,7 +196,7 @@ async def resume(task_id: str) -> dict:
 
 
 async def claim_completion(task_id: str) -> dict | None:
-    """Atomically claim one completion turn, with an expiring crash-safe lease."""
+    """Atomically claim one actionable-state turn, with an expiring crash-safe lease."""
     if store.use_postgres():
         from store import db
 
@@ -212,7 +212,7 @@ async def claim_completion(task_id: str) -> dict | None:
             running = bool(lease and lease > datetime.datetime.now(datetime.UTC).isoformat())
             if running or record.get("completion_delivered"):
                 return None
-            if record.get("state") not in ("complete", "errored"):
+            if record.get("state") not in ("attention-required", "complete", "errored"):
                 return None
             record["completion_lease_until"] = (
                 datetime.datetime.now(datetime.UTC) + datetime.timedelta(minutes=5)
@@ -233,7 +233,7 @@ async def claim_completion(task_id: str) -> dict | None:
         running = bool(lease and lease > datetime.datetime.now(datetime.UTC).isoformat())
         if running or record.get("completion_delivered"):
             return None
-        if record.get("state") not in ("complete", "errored"):
+        if record.get("state") not in ("attention-required", "complete", "errored"):
             return None
         record["completion_lease_until"] = (
             datetime.datetime.now(datetime.UTC) + datetime.timedelta(minutes=5)
