@@ -31,13 +31,10 @@ concrete."""
 def system_prompt(space: models.Space) -> str:
     description = space.about.strip() or "No description provided."
     repositories = "\n".join(f"- {repo}" for repo in space.repos) or "- None"
-    resources = (
-        "\n".join(
-            f"- {resource.title} ({resource.kind}): {resource.url}"
-            for resource in space.resources
-        )
-        or "- None"
-    )
+    resources = "\n".join(
+        f"- {resource.title} ({resource.kind}): {resource.url}"
+        for resource in space.resources
+    ) or "- None"
     return f"""{SYSTEM}
 
 You are working in this space:
@@ -58,10 +55,7 @@ def model() -> ai.Model:
     return ai.get_model("openai/gpt-5.6-sol")
 
 
-def agent_for(
-    chat: dict,
-    on_task_created: typing.Callable[[dict, dict], None] | None = None,
-) -> ai.Agent:
+def agent_for(chat: dict) -> ai.Agent:
     """Build the dispatcher tools scoped to one chat."""
 
     @ai.tool
@@ -198,9 +192,6 @@ def agent_for(
             },
         )
 
-        if on_task_created is not None:
-            on_task_created(dict(launch), created)
-
         yield {
             "subagent_id": launch["id"],
             "devbox_id": workspace["id"],
@@ -232,9 +223,7 @@ def agent_for(
             if launch is None:
                 raise ValueError("no subagent can accept a message")
         else:
-            launch = next(
-                (item for item in launches if item["id"] == subagent_id), None
-            )
+            launch = next((item for item in launches if item["id"] == subagent_id), None)
             if launch is None:
                 raise ValueError("subagent does not belong to this chat")
             if launch.get("state") == "errored":
@@ -242,8 +231,7 @@ def agent_for(
             if not launch.get("task_id"):
                 raise RuntimeError("subagent task is not ready")
 
-        was_terminal = launch.get("state") in devbox.TERMINAL_STATES
-        delivered = await devbox.send_task_prompt(launch["task_id"], message)
+        await devbox.send_task_prompt(launch["task_id"], message)
         launch = await subagents.resume(launch["id"])
         await chats.finish(chat["id"], "running")
         await events.append(chat["id"], "ui", {"type": "chat.changed"})
@@ -257,12 +245,6 @@ def agent_for(
                 "state": "running",
             },
         )
-
-        if was_terminal and on_task_created is not None:
-            on_task_created(
-                dict(launch),
-                {**delivered, "resumed": True, "was_terminal": True},
-            )
 
         return {
             "subagent_id": launch["id"],
@@ -285,9 +267,7 @@ def agent_for(
         if subagent_id is None:
             launch = launches[-1] if launches else None
         else:
-            launch = next(
-                (item for item in launches if item["id"] == subagent_id), None
-            )
+            launch = next((item for item in launches if item["id"] == subagent_id), None)
             if launch is None:
                 raise ValueError("subagent does not belong to this chat")
         if (
@@ -299,9 +279,7 @@ def agent_for(
             remote_state = str(remote.get("state", ""))
             if not remote_state:
                 raise RuntimeError("DevBox task response is missing state")
-            result = (
-                remote.get("result") if isinstance(remote.get("result"), dict) else None
-            )
+            result = remote.get("result") if isinstance(remote.get("result"), dict) else None
             _, changed, previous = await subagents.apply_state(
                 launch["id"], remote_state, result, reconcile=True
             )

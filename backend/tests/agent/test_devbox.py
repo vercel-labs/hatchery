@@ -12,18 +12,15 @@ def vercel_project(monkeypatch):
     monkeypatch.setenv("VERCEL_PROJECT_ID", "prj_hatchery")
 
 
-def test_vercel_dev_does_not_register_public_webhook(monkeypatch):
-    monkeypatch.delenv("DEVBOX_WEBHOOK_URL", raising=False)
-    monkeypatch.delenv("VERCEL_ENV", raising=False)
-    monkeypatch.setenv("VERCEL_URL", "localhost:3000")
-    assert devbox.webhook_url() is None
+def test_webhook_uses_public_url(monkeypatch):
+    monkeypatch.setenv("HATCHERY_PUBLIC_URL", "https://hatchery.example/")
+    assert devbox.webhook_url() == "https://hatchery.example/channels/v1/devbox"
 
 
-def test_deployment_uses_vercel_webhook(monkeypatch):
-    monkeypatch.delenv("DEVBOX_WEBHOOK_URL", raising=False)
-    monkeypatch.setenv("VERCEL_ENV", "preview")
-    monkeypatch.setenv("VERCEL_URL", "hatchery-preview.vercel.app")
-    assert devbox.webhook_url() == "https://hatchery-preview.vercel.app/channels/v1/devbox"
+def test_webhook_requires_public_url(monkeypatch):
+    monkeypatch.delenv("HATCHERY_PUBLIC_URL")
+    with pytest.raises(KeyError, match="HATCHERY_PUBLIC_URL"):
+        devbox.webhook_url()
 
 
 async def test_create_box_sends_clone_repos(monkeypatch):
@@ -154,9 +151,8 @@ async def test_create_task_uses_fx(monkeypatch):
 
     monkeypatch.setattr(httpx.AsyncClient, "send", send)
     monkeypatch.setattr(devbox, "token", lambda: "token")
-    monkeypatch.setattr(devbox, "webhook_url", lambda: None)
 
-    task = await devbox.create_task("box_1", "set_1", "fix it")
+    task = await devbox.create_task("box_1", "set_1", "fix it", "secret", "subagent_1")
 
     assert task == {"task_id": "task_1", "session_id": "session_1", "state": "pending"}
     assert json.loads(seen["request"].content) == {
@@ -165,7 +161,36 @@ async def test_create_task_uses_fx(monkeypatch):
         "assistant": "fx",
         "model": "openai/gpt-5.6-sol",
         "prompt": "fix it",
+        "webhooks": [
+            {
+                "url": "https://hatchery.example/channels/v1/devbox?launch_id=subagent_1&secret=secret"
+            }
+        ],
     }
+
+
+async def test_get_task_uses_control_plane_endpoint(monkeypatch):
+    seen = {}
+
+    async def send(self, request, **kwargs):
+        seen["request"] = request
+        return httpx.Response(
+            200,
+            request=request,
+            json={"task_id": "task_1", "session_id": "session_1", "state": "running"},
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
+    monkeypatch.setattr(devbox, "token", lambda: "token")
+
+    task = await devbox.get_task("task_1")
+
+    assert task["session_id"] == "session_1"
+    assert (seen["request"].method, seen["request"].url.path) == (
+        "GET",
+        "/v1/tasks/task_1",
+    )
+    assert seen["request"].headers["authorization"] == "Bearer token"
 
 
 async def test_delete_task_and_box_use_control_plane_endpoints(monkeypatch):

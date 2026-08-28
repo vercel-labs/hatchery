@@ -65,7 +65,7 @@ async def status(
             for index, event in bounded
         ],
         "result": _result(record.get("result"))
-        if record.get("state") in ("complete", "errored")
+        if record.get("state") in ("attention-required", "complete", "errored")
         else None,
     }
 
@@ -75,7 +75,7 @@ def _result(raw: typing.Any) -> dict[str, typing.Any] | None:
         return None
     result = {
         key: raw[key]
-        for key in ("summary", "error")
+        for key in ("summary", "error", "question")
         if raw.get(key) is not None
     }
     prs = raw.get("prs")

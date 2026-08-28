@@ -12,6 +12,13 @@ from store import devboxes, events, terminals, workspaces
 
 
 class Launch(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "required": ["title", "repos", "setup_script", "ports", "branch", "git_sha"]
+        },
+    )
+
     title: str = "devbox"
     repos: list[str] = []
     setup_script: str | None = None

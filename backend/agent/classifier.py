@@ -16,6 +16,8 @@ output. Never answer the user or do the work."""
 
 
 class Classification(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="forbid")
+
     space_id: str
 
 

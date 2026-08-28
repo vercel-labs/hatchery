@@ -34,9 +34,7 @@ async def ensure_ready() -> None:
         (store.data_dir() / "subagents").mkdir(parents=True, exist_ok=True)
 
 
-async def create(
-    chat_id: str, devbox_id: str, prompt: str, webhook_secret: str
-) -> dict:
+async def create(chat_id: str, devbox_id: str, prompt: str, webhook_secret: str) -> dict:
     record = {
         "id": f"subagent_{uuid.uuid4().hex[:12]}",
         "chat_id": chat_id,
@@ -47,6 +45,8 @@ async def create(
         "webhook_secret": webhook_secret,
         "webhook_seq": 0,
         "completion_delivered": False,
+        "completion_generation": 0,
+        "completion_cursor": -1,
         "created_at": datetime.datetime.now(datetime.UTC).isoformat(),
     }
     await save(record)
@@ -190,11 +190,7 @@ async def apply_state(
             old_resume = (
                 reconcile
                 and record.get("awaiting_resume")
-                and state
-                in (
-                    "complete",
-                    "errored",
-                )
+                and state in ("complete", "errored")
             )
             if stale or regresses or old_resume:
                 return record, False, previous
@@ -228,11 +224,7 @@ async def apply_state(
         old_resume = (
             reconcile
             and record.get("awaiting_resume")
-            and state
-            in (
-                "complete",
-                "errored",
-            )
+            and state in ("complete", "errored")
         )
         if stale or regresses or old_resume:
             return record, False, previous
@@ -265,7 +257,7 @@ async def resume(task_id: str) -> dict:
             record["state"] = "running"
             record["completion_delivered"] = False
             record["awaiting_resume"] = True
-            for key in ("result", "completion_message"):
+            for key in ("result", "completion_message", "completion_lease_until"):
                 record.pop(key, None)
             await conn.execute(
                 "UPDATE hatchery_subagents SET data = $2::jsonb WHERE id = $1",
@@ -281,14 +273,14 @@ async def resume(task_id: str) -> dict:
         record["state"] = "running"
         record["completion_delivered"] = False
         record["awaiting_resume"] = True
-        for key in ("result", "completion_message"):
+        for key in ("result", "completion_message", "completion_lease_until"):
             record.pop(key, None)
         path.write_text(json.dumps(record, separators=(",", ":")))
         return record
 
 
 async def claim_completion(task_id: str) -> dict | None:
-    """Claim terminal report delivery with an expiring crash-safe lease."""
+    """Atomically claim one actionable-state turn, with an expiring crash-safe lease."""
     if store.use_postgres():
         from store import db
 
@@ -301,25 +293,15 @@ async def claim_completion(task_id: str) -> dict | None:
                 return None
             record = _data(row["data"])
             lease = record.get("completion_lease_until")
-            busy = bool(
-                lease and lease > datetime.datetime.now(datetime.UTC).isoformat()
-            )
-            if (
-                busy
-                or record.get("completion_delivered")
-                or record.get("state")
-                not in (
-                    "complete",
-                    "errored",
-                )
-            ):
+            running = bool(lease and lease > datetime.datetime.now(datetime.UTC).isoformat())
+            if running or record.get("completion_delivered"):
+                return None
+            if record.get("state") not in ("attention-required", "complete", "errored"):
                 return None
             record["completion_lease_until"] = (
                 datetime.datetime.now(datetime.UTC) + datetime.timedelta(minutes=5)
             ).isoformat()
-            record["completion_generation"] = (
-                int(record.get("completion_generation") or 0) + 1
-            )
+            record["completion_generation"] = int(record.get("completion_generation") or 0) + 1
             await conn.execute(
                 "UPDATE hatchery_subagents SET data = $2::jsonb WHERE id = $1",
                 task_id,
@@ -332,23 +314,15 @@ async def claim_completion(task_id: str) -> dict | None:
             return None
         record = json.loads(path.read_text())
         lease = record.get("completion_lease_until")
-        busy = bool(lease and lease > datetime.datetime.now(datetime.UTC).isoformat())
-        if (
-            busy
-            or record.get("completion_delivered")
-            or record.get("state")
-            not in (
-                "complete",
-                "errored",
-            )
-        ):
+        running = bool(lease and lease > datetime.datetime.now(datetime.UTC).isoformat())
+        if running or record.get("completion_delivered"):
+            return None
+        if record.get("state") not in ("attention-required", "complete", "errored"):
             return None
         record["completion_lease_until"] = (
             datetime.datetime.now(datetime.UTC) + datetime.timedelta(minutes=5)
         ).isoformat()
-        record["completion_generation"] = (
-            int(record.get("completion_generation") or 0) + 1
-        )
+        record["completion_generation"] = int(record.get("completion_generation") or 0) + 1
         path.write_text(json.dumps(record, separators=(",", ":")))
         return record
 
@@ -394,8 +368,7 @@ async def list_for_chat(chat_id: str) -> list[dict]:
         from store import db
 
         rows = await (await db.pool()).fetch(
-            "SELECT data FROM hatchery_subagents WHERE chat_id = $1 ORDER BY created_at",
-            chat_id,
+            "SELECT data FROM hatchery_subagents WHERE chat_id = $1 ORDER BY created_at", chat_id
         )
         return [_data(row["data"]) for row in rows]
     with _lock:
@@ -412,6 +385,4 @@ def _data(raw) -> dict:
 
 
 def _path(task_id: str):
-    return (
-        store.data_dir() / "subagents" / f"{urllib.parse.quote(task_id, safe='')}.json"
-    )
+    return store.data_dir() / "subagents" / f"{urllib.parse.quote(task_id, safe='')}.json"
