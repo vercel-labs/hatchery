@@ -52,9 +52,10 @@ def command(
     *,
     task_id: str | None = None,
     payload: dict[str, typing.Any] | None = None,
+    command_id: str | None = None,
 ) -> Command:
     return Command(
-        id=f"cmd_{uuid.uuid4().hex}",
+        id=command_id or f"cmd_{uuid.uuid4().hex}",
         worker_id=worker_id,
         task_id=task_id,
         sequence=sequence,

@@ -408,6 +408,117 @@ class Runtime:
                     initial_size = current_size
                     follow_armed = False
 
+    def recover(self) -> dict:
+        """Return the persisted transport cursors loaded during construction."""
+        return {
+            "commands": dict(self.sequences),
+            "events": dict(self.event_sequences),
+        }
+
+    @staticmethod
+    def meaningful_input(text: str) -> bool:
+        return bool(text and text.strip())
+
+    @staticmethod
+    def is_runtime_echo(text: str, prompt: str = "") -> bool:
+        cleaned = text.replace("\x1b[200~", "").replace("\x1b[201~", "").strip()
+        return bool(prompt) and cleaned == prompt.strip()
+
+    @staticmethod
+    def task_context(repos: list[str] | None = None, *, existing_prs: int = 0) -> str:
+        repos = repos or []
+        if repos:
+            listed = "\n".join(f"- {repo}" for repo in repos)
+            context = f"Repositories:\n{listed}\n"
+            if existing_prs == 0:
+                context += "Create a pull request when the task requires code changes.\n"
+            elif existing_prs == 1:
+                context += "Update the existing pull request instead of creating another.\n"
+            else:
+                context += "Inspect the existing pull requests and update the relevant one.\n"
+            return context
+        return "No repository is attached; work in the provided workspace.\n"
+
+    @classmethod
+    def task_prompt(
+        cls,
+        task: str,
+        inputs: list[str] | None = None,
+        *,
+        repos: list[str] | None = None,
+        existing_prs: int = 0,
+        first: bool = True,
+    ) -> str:
+        protocol = (
+            "If you need information from the user, use ask_user_question; prose alone does not reach them. "
+            "When finished, stop; there is no completion tool."
+        )
+        pending = "\n\n".join(value.strip() for value in (inputs or []) if value.strip())
+        if not first:
+            return f"{pending}\n\n{protocol}".strip()
+        body = f"Task:\n{task.strip()}\n\n{cls.task_context(repos, existing_prs=existing_prs)}"
+        if pending:
+            body += f"\nAdditional input:\n{pending}\n"
+        return f"{body}\n{protocol}".strip()
+
+    def build_workspace(self, task_id: str | None = None) -> str:
+        path = pathlib.Path(self.workspace)
+        path.mkdir(parents=True, exist_ok=True)
+        return str(path)
+
+    async def launch_recorded_task(self, task_id: str, prompt: str, model: str = "") -> None:
+        if not self.meaningful_input(prompt):
+            await self._emit(task_id, "task.failed", {"error": "task has no initial prompt"})
+            return
+        await self._launch(task_id, prompt, model, resume=False)
+
+    async def deliver_pending_input(
+        self,
+        task_id: str,
+        inputs: list[str] | str,
+        model: str = "",
+        *,
+        max_bytes: int = 32 * 1024,
+    ) -> int:
+        values = [inputs] if isinstance(inputs, str) else inputs
+        batch: list[str] = []
+        size = 0
+        for value in values:
+            if not self.meaningful_input(value):
+                continue
+            encoded = value.encode()
+            if batch and size + len(encoded) > max_bytes:
+                break
+            batch.append(value)
+            size += len(encoded)
+            if size >= max_bytes:
+                break
+        if not batch:
+            return 0
+        session = self.processes.get(task_id)
+        prompt = "\n\n".join(batch)
+        if session is not None and session.exit_code is None:
+            await self._deliver(task_id, session, prompt)
+        else:
+            await self._launch(task_id, prompt, model, resume=True)
+        return len(batch)
+
+    async def ingest_fx_event(self, task_id: str, event: dict) -> None:
+        """Publish one decoded fx event through the daemon's ordered event channel."""
+        kind = event.get("type")
+        if kind == "assistant":
+            await self._emit(task_id, "task.output", {"text": event.get("text", "")})
+        elif kind == "attention":
+            await self._emit(task_id, "task.question", {"question": event.get("text", "input required")})
+        elif kind == "turn.completed":
+            await self._emit(task_id, "task.completed", {
+                "result": {
+                    "summary": event.get("summary") or "subagent completed",
+                    "session_id": event.get("session_id"),
+                    "tool_calls": [],
+                }
+            })
+
     async def _emit(self, task_id: str, kind: str, payload: dict) -> None:
         sequence = self.event_sequences.get(task_id, -1) + 1
         self.event_sequences[task_id] = sequence

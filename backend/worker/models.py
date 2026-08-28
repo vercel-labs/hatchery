@@ -78,6 +78,14 @@ class Terminal(pydantic.BaseModel):
     updated_at: str
 
 
+class TaskInput(pydantic.BaseModel):
+    id: str
+    sequence: int
+    text: str
+    created_at: str
+    delivered_at: str | None = None
+
+
 class Task(pydantic.BaseModel):
     id: str
     chat_id: str
@@ -91,6 +99,14 @@ class Task(pydantic.BaseModel):
     command_sequence: int = 0
     event_sequence: int = -1
     event_ids: list[str] = []
+    source_sequences: dict[str, int] = {}
+    inputs: list[TaskInput] = []
+    active_question: str | None = None
+    active_question_id: str | None = None
+    open_tool_calls: list[str] = []
+    last_agent_event_at: str | None = None
+    last_agent_words: str | None = None
+    launch_attempts: int = 0
     result: dict[str, typing.Any] | None = None
     completion_delivered: bool = False
     created_at: str

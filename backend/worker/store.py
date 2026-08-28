@@ -2,6 +2,7 @@
 
 import json
 import threading
+import typing
 import urllib.parse
 
 import pydantic
@@ -87,6 +88,76 @@ async def save_task(task: models.Task) -> models.Task:
     return task
 
 
+async def create_task(task: models.Task) -> bool:
+    """Insert one task without replacing an existing task of the same identity."""
+    if store.use_postgres():
+        from store import db
+
+        result = await (await db.pool()).execute(
+            "INSERT INTO hatchery_worker_tasks (id, chat_id, worker_id, data) "
+            "VALUES ($1, $2, $3, $4::jsonb) ON CONFLICT (id) DO NOTHING",
+            task.id,
+            task.chat_id,
+            task.worker_id,
+            task.model_dump_json(),
+        )
+        return result == "INSERT 0 1"
+    with _lock:
+        path = _path("worker_tasks", task.id)
+        if path.exists():
+            return False
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(task.model_dump_json(), encoding="utf-8")
+        return True
+
+
+async def mutate_task(
+    task_id: str,
+    mutate: typing.Callable[[models.Task], models.Task | None],
+) -> models.Task | None:
+    """Atomically read, change, and save one task in either storage backend."""
+    if store.use_postgres():
+        from store import db
+
+        pool = await db.pool()
+        async with pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT data FROM hatchery_worker_tasks WHERE id = $1 FOR UPDATE",
+                task_id,
+            )
+            if row is None:
+                return None
+            raw = row["data"] if isinstance(row["data"], str) else json.dumps(row["data"])
+            task = models.Task.model_validate_json(raw)
+            changed = mutate(task)
+            if changed is None:
+                return task
+            await conn.execute(
+                "UPDATE hatchery_worker_tasks SET chat_id = $2, worker_id = $3, data = $4::jsonb WHERE id = $1",
+                changed.id,
+                changed.chat_id,
+                changed.worker_id,
+                changed.model_dump_json(),
+            )
+            return changed
+    with _lock:
+        raw = await _get("worker_tasks", task_id)
+        if raw is None:
+            return None
+        task = models.Task.model_validate_json(raw)
+        changed = mutate(task)
+        if changed is None:
+            return task
+        await _save(
+            "worker_tasks",
+            changed.id,
+            changed.model_dump_json(),
+            chat_id=changed.chat_id,
+            worker_id=changed.worker_id,
+        )
+        return changed
+
+
 async def get_task(task_id: str) -> models.Task | None:
     raw = await _get("worker_tasks", task_id)
     if raw is None:
@@ -133,35 +204,47 @@ async def delete_terminal(terminal_id: str) -> bool:
 
 
 async def apply_event(event) -> tuple[models.Task | None, bool]:
-    """Apply one ordered event. Duplicate IDs and stale sequences are ignored."""
+    """Apply one ordered event atomically. Duplicate IDs and stale sequences are inert."""
     if event.task_id is None:
         return None, False
-    task = await get_task(event.task_id)
-    if task is None:
-        return None, False
-    with _lock:
-        # The local lock covers file mode. Postgres still gets deterministic,
-        # idempotent writes; a later transaction can tighten concurrent delivery.
+    changed = False
+
+    def apply(task: models.Task) -> models.Task | None:
+        nonlocal changed
         if event.id in task.event_ids or event.sequence <= task.event_sequence:
-            return task, False
-        task.event_ids = [*task.event_ids[-99:], event.id]
+            return None
+        changed = True
+        task.event_ids.append(event.id)
         task.event_sequence = event.sequence
-        states = {
-            "task.started": "running",
-            "task.question": "attention",
-            "task.completed": "complete",
-            "task.failed": "errored",
-        }
-        if event.type in states:
-            task.status = states[event.type]
-        if event.type == "task.question":
-            task.result = {"question": event.payload.get("question") or event.payload.get("text")}
+        task.last_agent_event_at = event.created_at
+        if event.type == "task.started":
+            task.status = "running"
+            task.launch_attempts = 0
+        elif event.type == "task.output":
+            text = str(event.payload.get("text") or "").strip()
+            if text:
+                task.last_agent_words = text
+        elif event.type == "task.question":
+            question = str(event.payload.get("question") or event.payload.get("text") or "input required")
+            task.status = "attention"
+            task.active_question = question
+            task.active_question_id = event.id
+            task.result = {"question": question}
         elif event.type == "task.completed":
-            task.result = event.payload.get("result") or {"summary": event.payload.get("summary")}
+            task.status = "complete"
+            task.active_question = None
+            task.active_question_id = None
+            task.result = event.payload.get("result") or {
+                "summary": event.payload.get("summary") or task.last_agent_words or "subagent completed"
+            }
         elif event.type == "task.failed":
+            task.status = "errored"
             task.result = {"error": event.payload.get("error") or "worker task failed"}
         task.updated_at = event.created_at
-    return await save_task(task), True
+        return task
+
+    task = await mutate_task(event.task_id, apply)
+    return task, changed
 
 
 async def _save(kind: str, item_id: str, data: str, *, chat_id: str, worker_id: str | None = None) -> None:

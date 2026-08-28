@@ -1,5 +1,6 @@
 """App-side Worker and task lifecycle."""
 
+import asyncio
 import datetime
 import secrets
 import uuid
@@ -72,7 +73,13 @@ async def destroy(worker_id: str) -> None:
 
 
 async def launch_task(
-    chat_id: str, worker_id: str, prompt: str, model: str
+    chat_id: str,
+    worker_id: str,
+    prompt: str,
+    model: str,
+    *,
+    task_id: str | None = None,
+    command_id: str | None = None,
 ) -> models.Task:
     record = await _required(worker_id)
     if record.chat_id != chat_id:
@@ -86,35 +93,60 @@ async def launch_task(
         raise RuntimeError("sandbox is not running")
     now = _now()
     task = models.Task(
-        id=f"task_{uuid.uuid4().hex[:12]}",
+        id=task_id or f"task_{uuid.uuid4().hex[:12]}",
         chat_id=chat_id,
         worker_id=worker_id,
         title=prompt.strip().splitlines()[0][:80] or "subagent",
         prompt=prompt,
         model=model,
+        inputs=[models.TaskInput(
+            id=f"input_{uuid.uuid4().hex}",
+            sequence=0,
+            text=prompt,
+            created_at=now,
+        )],
         created_at=now,
         updated_at=now,
     )
-    await store.save_task(task)
+    if not await store.create_task(task):
+        raise ValueError("task already exists")
     command = protocol.command(
         worker_id,
         task.command_sequence,
         "task.launch",
         task_id=task.id,
         payload={"prompt": prompt, "model": model},
+        command_id=command_id,
     )
     await queue.send(command)
     return task
 
 
 async def send_task_input(chat_id: str, task_id: str, prompt: str) -> models.Task:
-    task = await _required_task(chat_id, task_id)
-    task.command_sequence += 1
-    task.status = "pending"
-    task.result = None
-    task.completion_delivered = False
-    task.updated_at = _now()
-    await store.save_task(task)
+    if not prompt.strip():
+        raise ValueError("task input must not be empty")
+    current = await _required_task(chat_id, task_id)
+    now = _now()
+
+    def record(task: models.Task) -> models.Task:
+        task.command_sequence += 1
+        task.inputs.append(models.TaskInput(
+            id=f"input_{uuid.uuid4().hex}",
+            sequence=task.command_sequence,
+            text=prompt,
+            created_at=now,
+        ))
+        task.status = "pending"
+        task.active_question = None
+        task.active_question_id = None
+        task.result = None
+        task.completion_delivered = False
+        task.updated_at = now
+        return task
+
+    task = await store.mutate_task(current.id, record)
+    if task is None:
+        raise KeyError(task_id)
     await queue.send(
         protocol.command(
             task.worker_id,
@@ -179,6 +211,216 @@ async def cancel_task(chat_id: str, task_id: str) -> models.Task:
         )
     )
     return task
+
+
+async def launch_task_idempotent(
+    chat_id: str,
+    worker_id: str,
+    prompt: str,
+    model: str,
+    request_id: str,
+) -> models.Task:
+    """Create a task once for a caller-supplied idempotency key."""
+    task_id = f"task_{uuid.uuid5(uuid.NAMESPACE_URL, f'{worker_id}:{request_id}').hex[:12]}"
+    existing = await store.get_task(task_id)
+    if existing is not None:
+        if (
+            existing.chat_id != chat_id
+            or existing.worker_id != worker_id
+            or existing.prompt != prompt
+            or existing.model != model
+        ):
+            raise ValueError("task idempotency key conflicts with an existing task")
+        return existing
+    return await launch_task(
+        chat_id,
+        worker_id,
+        prompt,
+        model,
+        task_id=task_id,
+        command_id=f"cmd_{uuid.uuid5(uuid.NAMESPACE_URL, f'{worker_id}:{request_id}:launch').hex}",
+    )
+
+
+async def record_input(task_id: str, text: str) -> models.Task:
+    """Durably enqueue input without publishing it."""
+    if not text.strip():
+        raise ValueError("task input must not be empty")
+    now = _now()
+
+    def record(task: models.Task) -> models.Task:
+        sequence = max((item.sequence for item in task.inputs), default=-1) + 1
+        task.inputs.append(models.TaskInput(
+            id=f"input_{uuid.uuid4().hex}", sequence=sequence, text=text, created_at=now
+        ))
+        task.updated_at = now
+        return task
+
+    task = await store.mutate_task(task_id, record)
+    if task is None:
+        raise KeyError(task_id)
+    return task
+
+
+async def allocate_event_sequence(task_id: str, source_id: str) -> int:
+    """Return one stable sequence for a durable source event."""
+    sequence = -1
+
+    def allocate(task: models.Task) -> models.Task | None:
+        nonlocal sequence
+        if source_id in task.source_sequences:
+            sequence = task.source_sequences[source_id]
+            return None
+        task.event_sequence += 1
+        sequence = task.event_sequence
+        task.event_ids.append(source_id)
+        task.source_sequences[source_id] = sequence
+        return task
+
+    task = await store.mutate_task(task_id, allocate)
+    if task is None:
+        raise KeyError(task_id)
+    return sequence
+
+
+async def ask_question(task_id: str, question: str, source_id: str | None = None) -> models.Task:
+    if not question.strip():
+        raise ValueError("question must not be empty")
+    now = _now()
+    question_id = source_id or f"question_{uuid.uuid4().hex}"
+
+    def ask(task: models.Task) -> models.Task | None:
+        if task.status == "attention" and task.active_question == question:
+            return None
+        task.status = "attention"
+        task.active_question = question
+        task.active_question_id = question_id
+        task.result = {"question": question}
+        task.updated_at = now
+        return task
+
+    task = await store.mutate_task(task_id, ask)
+    if task is None:
+        raise KeyError(task_id)
+    return task
+
+
+async def answer_question(chat_id: str, task_id: str, answer: str) -> models.Task:
+    """Record an answer as ordinary durable input and retire the active question."""
+    task = await _required_task(chat_id, task_id)
+    return await send_task_input(chat_id, task.id, answer)
+
+
+async def complete_task(task_id: str, result: dict | str | None = None) -> models.Task:
+    if isinstance(result, str):
+        result = {"summary": result}
+    return await complete_task_atomic(task_id, result or {})
+
+
+async def complete_task_atomic(task_id: str, result: dict) -> models.Task:
+    now = _now()
+
+    def complete(task: models.Task) -> models.Task:
+        task.status = "complete"
+        task.active_question = None
+        task.active_question_id = None
+        task.result = result or {"summary": task.last_agent_words or "subagent completed"}
+        task.updated_at = now
+        return task
+
+    task = await store.mutate_task(task_id, complete)
+    if task is None:
+        raise KeyError(task_id)
+    return task
+
+
+async def fail_task(task_id: str, reason: str) -> models.Task:
+    now = _now()
+
+    def fail(task: models.Task) -> models.Task:
+        task.status = "errored"
+        task.result = {"error": reason or "worker task failed"}
+        task.updated_at = now
+        return task
+
+    task = await store.mutate_task(task_id, fail)
+    if task is None:
+        raise KeyError(task_id)
+    return task
+
+
+async def park_task(task_id: str, question: str | None = None) -> models.Task:
+    task = await store.get_task(task_id)
+    if task is None:
+        raise KeyError(task_id)
+    prompt = question or task.active_question or task.last_agent_words or "input required"
+    return await ask_question(task_id, prompt)
+
+
+async def subscribe_task(task_id: str, after: int | None = None):
+    """Yield durable task activity from a resumable cursor."""
+    from store import events
+
+    async for index, event in events.watch(task_id, "activity", 0 if after is None else after + 1):
+        yield index, event
+
+
+async def watch_task(chat_id: str, task_id: str, after: int | None = None):
+    task = await _required_task(chat_id, task_id)
+    from store import events
+
+    start = 0 if after is None else after + 1
+    existing = await events.read(task.id, "activity", start)
+    for item in existing:
+        yield item
+    task = await store.get_task(task.id)
+    if task is not None and task.status in ("complete", "errored", "cancelled"):
+        return
+    async for item in events.watch(task_id, "activity", start + len(existing)):
+        yield item
+        current = await store.get_task(task_id)
+        if current is not None and current.status in ("complete", "errored", "cancelled"):
+            return
+
+
+async def reconcile_task(task_id: str) -> models.Task:
+    """Drive durable pending input toward the sandbox Queue without changing semantics by environment."""
+    task = await store.get_task(task_id)
+    if task is None:
+        raise KeyError(task_id)
+    if task.status in ("errored", "cancelled"):
+        return task
+    pending = [item for item in task.inputs if item.delivered_at is None]
+    if not pending:
+        return task
+    kind = "task.launch" if task.event_sequence < 0 and pending[0].sequence == 0 else "task.input"
+    text = "\n\n".join(item.text for item in pending)
+    command = protocol.command(
+        task.worker_id,
+        task.command_sequence,
+        kind,
+        task_id=task.id,
+        payload={"prompt": text, "model": task.model if kind == "task.launch" else ""},
+        command_id=f"cmd_{uuid.uuid5(uuid.NAMESPACE_URL, f'{task.id}:{task.command_sequence}:{kind}').hex}",
+    )
+    try:
+        await queue.send(command)
+    except Exception:
+        task.launch_attempts += 1
+        task.updated_at = _now()
+        await store.save_task(task)
+        raise
+    now = _now()
+
+    def delivered(current: models.Task) -> models.Task:
+        ids = {item.id for item in pending}
+        for item in current.inputs:
+            if item.id in ids:
+                item.delivered_at = now
+        current.updated_at = now
+        return current
+
+    return await store.mutate_task(task.id, delivered) or task
 
 
 async def get_task(chat_id: str, task_id: str | None = None) -> models.Task | None:
