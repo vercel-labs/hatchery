@@ -1,14 +1,16 @@
-"""Manual and dispatcher-driven devbox creation."""
+"""Future Vercel Sandbox control-plane boundary.
+
+The old DevBox implementation was removed in migration step 1. The functions
+below mark the retained architecture surfaces until the Sandbox and Queues
+implementations land.
+"""
 
 import json
-import typing
 
 import ai
 import pydantic
 
 import models
-from agent import devbox
-from store import devboxes, events, terminals, workspaces
 
 
 class Launch(pydantic.BaseModel):
@@ -19,7 +21,7 @@ class Launch(pydantic.BaseModel):
         },
     )
 
-    title: str = "devbox"
+    title: str = "sandbox"
     repos: list[str] = []
     setup_script: str | None = None
     ports: list[int] = []
@@ -29,7 +31,7 @@ class Launch(pydantic.BaseModel):
     @pydantic.field_validator("title")
     @classmethod
     def valid_title(cls, title: str) -> str:
-        return title.strip()[:80] or "devbox"
+        return title.strip()[:80] or "sandbox"
 
     @pydantic.field_validator("repos")
     @classmethod
@@ -93,41 +95,35 @@ async def suggest(space: models.Space) -> Launch:
         return result.output
 
 
-async def prepare(chat_id: str, launch: Launch) -> dict[str, typing.Any]:
-    record = await devboxes.create(chat_id, launch.title, launch.repos)
-    record.update(
-        setup_script=launch.setup_script,
-        ports=launch.ports,
-        branch=launch.branch,
-        git_sha=launch.git_sha,
-    )
-    await devboxes.save(record)
-    await terminals.create(chat_id, record["id"], "bash")
-    await events.append(chat_id, "ui", {"type": "devbox.changed"})
-    return record
+def unavailable() -> NotImplementedError:
+    return NotImplementedError("Vercel Sandbox control plane is not implemented")
 
 
-async def provision(record: dict[str, typing.Any]) -> dict[str, typing.Any]:
-    async with workspaces.provision(record["chat_id"]):
-        try:
-            record["set_id"] = await devbox.create_taskset(
-                f"hatchery {record['chat_id']} / {record['title']}"
-            )
-            record["box"] = await devbox.create_box(
-                f"hatchery-{record['chat_id']}-{record['id'][-6:]}",
-                record["repos"],
-                setup_script=record.get("setup_script"),
-                ports=record.get("ports"),
-                branch=record.get("branch"),
-                git_sha=record.get("git_sha"),
-            )
-            record["state"] = "ready"
-        except Exception as error:
-            record["state"] = "errored"
-            record["error"] = str(error)
-            await devboxes.save(record)
-            await events.append(record["chat_id"], "ui", {"type": "devbox.changed"})
-            raise
-        await devboxes.save(record)
-        await events.append(record["chat_id"], "ui", {"type": "devbox.changed"})
-        return record
+async def create(launch: Launch) -> dict:
+    """Create and configure a persistent Vercel Sandbox."""
+    raise unavailable()
+
+
+async def list_all() -> list[dict]:
+    """List persisted sandboxes visible to Hatchery."""
+    raise unavailable()
+
+
+async def destroy(sandbox_id: str) -> None:
+    """Destroy a sandbox and its retained runtime resources."""
+    raise unavailable()
+
+
+async def launch_task(sandbox_id: str, prompt: str, model: str) -> dict:
+    """Enqueue an idempotent fx task launch command."""
+    raise unavailable()
+
+
+async def send_task_input(task_id: str, prompt: str) -> None:
+    """Enqueue idempotent input for an existing fx task."""
+    raise unavailable()
+
+
+async def cancel_task(task_id: str) -> None:
+    """Enqueue cancellation for an existing fx task."""
+    raise unavailable()

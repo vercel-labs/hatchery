@@ -1,34 +1,19 @@
 import type { UIMessage } from "ai";
 
-// Tools live in the Python backend, so the map is written by hand
-// (InferUITools needs TypeScript tool definitions). Unknown tools still
-// render through the generic ToolPart fallback.
+// Worker tools live in the Python backend. Their implementations are migration
+// stubs until the Vercel Sandbox control plane lands.
 export type HatcheryTools = {
-  create_devbox: {
+  create_sandbox: {
     input: { repos?: string[]; title?: string };
-    output:
-      | { devbox_id: string; title: string; repos: string[]; state: string }
-      | string;
+    output: unknown;
   };
-  list_devboxes: {
+  list_sandboxes: {
     input: Record<string, never>;
-    output: Array<{
-      id: string;
-      title: string;
-      repos: string[];
-      state: string;
-    }>;
+    output: unknown;
   };
   create_subagent: {
-    input: { devbox_id?: string; task?: string; model?: string };
-    output:
-      | {
-          subagent_id: string;
-          devbox_id: string;
-          task_id: string;
-          state: string;
-        }
-      | string;
+    input: { sandbox_id?: string; task?: string; model?: string };
+    output: unknown;
   };
 };
 

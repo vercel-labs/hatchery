@@ -11,7 +11,6 @@ dependencies = [
     "pydantic>=2.7",
     "vercel",
     "vercel-connect",
-    "websockets>=13",
 ]
 
 [dependency-groups]

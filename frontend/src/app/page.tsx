@@ -8,7 +8,6 @@ import {
   LinkIcon,
   PencilIcon,
   PlusIcon,
-  TerminalIcon,
   Trash2Icon,
   XIcon,
 } from "lucide-react";
@@ -18,8 +17,6 @@ import remarkGfm from "remark-gfm";
 import { apiBase, type Chat, type Resource, type Space } from "@/lib/api";
 import type { ChatUIMessage } from "@/lib/messages";
 import { ChatView } from "@/components/chat";
-import { SandboxForm } from "@/components/sandbox-form";
-import { TerminalPane, type DevboxWorkspace } from "@/components/terminal-pane";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import {
@@ -788,10 +785,7 @@ function EditableResource({
   );
 }
 
-// The chat pane, with the devbox pane splitting in on the right once the
-// dispatcher launches work. Keyed by chat.id at the call site so useChat
-// remounts per chat. The stored transcript loads first: useChat only takes
-// initial messages at construction.
+// Keyed by chat.id at the call site so useChat remounts per chat.
 function LiveChat({
   chat,
   onChatChanged,
@@ -804,29 +798,14 @@ function LiveChat({
   const [initialMessages, setInitialMessages] = useState<
     ChatUIMessage[] | null
   >(null);
-  const [devboxes, setDevboxes] = useState<DevboxWorkspace[]>([]);
   const [messageRevision, setMessageRevision] = useState(0);
-  const [showTerminal, setShowTerminal] = useState(false);
-  const [showSandboxForm, setShowSandboxForm] = useState(false);
-  const [preferredDevboxId, setPreferredDevboxId] = useState<string>();
-
-  const loadDevboxes = useCallback(() => {
-    fetch(`${apiBase()}/api/chats/${chat.id}/devboxes`)
-      .then((res) => (res.ok ? res.json() : []))
-      .then((found: DevboxWorkspace[]) => {
-        setDevboxes(found);
-        if (found.length) setShowTerminal(true);
-      })
-      .catch(() => setDevboxes([]));
-  }, [chat.id]);
 
   useEffect(() => {
     fetch(`${apiBase()}/api/chats/${chat.id}/messages`)
       .then((res) => (res.ok ? res.json() : []))
       .then(setInitialMessages)
       .catch(() => setInitialMessages([]));
-    loadDevboxes();
-  }, [chat.id, loadDevboxes]);
+  }, [chat.id]);
 
   useEffect(() => {
     const source = new EventSource(
@@ -837,13 +816,12 @@ function LiveChat({
       if (event.type === "chat.changed" || event.type === "task.changed") {
         onChatChanged();
       }
-      if (event.type === "task.changed" || event.type === "devbox.changed") loadDevboxes();
       if (event.type === "messages.changed") {
         setMessageRevision((revision) => revision + 1);
       }
     };
     return () => source.close();
-  }, [chat.id, loadDevboxes, onChatChanged]);
+  }, [chat.id, onChatChanged]);
 
   const onMessagesChange = useCallback(
     (messages: ChatUIMessage[]) => {
@@ -860,66 +838,18 @@ function LiveChat({
       ) {
         onSpaceAssigned(assignment.data.space_id);
       }
-      const accepted = messages.some((message) =>
-        message.parts.some(
-          (part) =>
-            part.type === "tool-create_subagent" &&
-            part.state === "output-available" &&
-            !part.preliminary,
-        ),
-      );
-      if (accepted) loadDevboxes();
     },
-    [loadDevboxes, onSpaceAssigned],
+    [onSpaceAssigned],
   );
 
   if (initialMessages === null) return <div className="flex-1" />;
 
   return (
-    <div className="@container flex min-h-0 flex-1">
-      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col @4xl:flex-row">
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col @4xl:min-w-[28rem]">
-          <ChatView
-            chatId={chat.id}
-            initialMessages={initialMessages}
-            messageRevision={messageRevision}
-            onMessagesChange={onMessagesChange}
-            onCreateSandbox={() => setShowSandboxForm(true)}
-          />
-        </div>
-        {devboxes.length > 0 && !showTerminal && (
-          <Button
-            variant="outline"
-            size="sm"
-            className="absolute top-2 right-2 z-10"
-            onClick={() => setShowTerminal(true)}
-          >
-            <TerminalIcon className="size-4" />
-            terminal
-          </Button>
-        )}
-        {showTerminal && devboxes.length > 0 && (
-          <TerminalPane
-            key={`${chat.id}:${preferredDevboxId ?? ""}`}
-            chatId={chat.id}
-            devboxes={devboxes}
-            preferredDevboxId={preferredDevboxId}
-            onClose={() => setShowTerminal(false)}
-            onCreateSandbox={() => setShowSandboxForm(true)}
-            onChanged={loadDevboxes}
-          />
-        )}
-        <SandboxForm
-          chatId={chat.id}
-          open={showSandboxForm}
-          onOpenChange={setShowSandboxForm}
-          onCreated={(devboxId) => {
-            setPreferredDevboxId(devboxId);
-            setShowTerminal(true);
-            loadDevboxes();
-          }}
-        />
-      </div>
-    </div>
+    <ChatView
+      chatId={chat.id}
+      initialMessages={initialMessages}
+      messageRevision={messageRevision}
+      onMessagesChange={onMessagesChange}
+    />
   );
 }
