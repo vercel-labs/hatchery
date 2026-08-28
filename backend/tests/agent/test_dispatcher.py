@@ -116,7 +116,6 @@ async def test_create_subagent_uses_selected_devbox(monkeypatch):
         return {"task_id": "task_1", "session_id": "session_1", "state": "pending"}
 
     monkeypatch.setattr(dispatcher.devbox, "create_task", create_task)
-    monkeypatch.setattr(dispatcher.devbox, "webhook_url", lambda: None)
 
     agent = dispatcher.agent_for({"id": "chat_1"})
     tool = next(tool for tool in agent.tools if tool.name == "create_subagent")
@@ -177,7 +176,6 @@ async def test_multiple_subagents_can_share_devbox(monkeypatch):
         }
 
     monkeypatch.setattr(dispatcher.devbox, "create_task", create_task)
-    monkeypatch.setattr(dispatcher.devbox, "webhook_url", lambda: None)
     agent = dispatcher.agent_for({"id": "chat_1"})
     tool = next(tool for tool in agent.tools if tool.name == "create_subagent")
 
@@ -211,7 +209,6 @@ async def test_message_subagent_resumes_existing_task(monkeypatch):
         return {"task_id": task_id, "state": "complete"}
 
     monkeypatch.setattr(dispatcher.devbox, "send_task_prompt", send_task_prompt)
-    monkeypatch.setattr(dispatcher.devbox, "webhook_url", lambda: None)
 
     agent = dispatcher.agent_for({"id": "chat_1"})
     tool = next(tool for tool in agent.tools if tool.name == "message_subagent")
@@ -219,45 +216,13 @@ async def test_message_subagent_resumes_existing_task(monkeypatch):
 
     saved = await subagents.get(launch["id"])
     assert seen == [("task_2", "use the existing helper")]
-    assert result == {
-        "subagent_id": launch["id"],
-        "task_id": "task_2",
-        "state": "running",
-    }
+    assert result == {"subagent_id": launch["id"], "task_id": "task_2", "state": "running"}
     assert saved is not None
     assert saved["state"] == "running"
     assert saved["completion_delivered"] is False
     assert "result" not in saved
     assert "completion_message" not in saved
     assert len(await subagents.list_for_chat("chat_1")) == 2
-
-
-async def test_message_subagent_observer_marks_completed_resume(monkeypatch):
-    launch = await subagents.create("chat_1", "devbox_1", "fix it", "secret")
-    launch.update({"task_id": "task_1", "state": "complete"})
-    await subagents.save(launch)
-    observed = []
-
-    async def send_task_prompt(task_id, prompt):
-        return {"task_id": task_id, "state": "complete"}
-
-    monkeypatch.setattr(dispatcher.devbox, "send_task_prompt", send_task_prompt)
-    monkeypatch.setattr(dispatcher.devbox, "webhook_url", lambda: None)
-    agent = dispatcher.agent_for(
-        {"id": "chat_1"}, lambda record, sent: observed.append(sent)
-    )
-    tool = next(tool for tool in agent.tools if tool.name == "message_subagent")
-
-    await tool.fn("continue")
-
-    assert observed == [
-        {
-            "task_id": "task_1",
-            "state": "complete",
-            "resumed": True,
-            "was_terminal": True,
-        }
-    ]
 
 
 async def test_message_subagent_rejects_wrong_chat_and_errored_task(monkeypatch):
@@ -278,9 +243,9 @@ async def test_message_subagent_rejects_wrong_chat_and_errored_task(monkeypatch)
         await tool.fn("continue")
 
 
-async def test_check_subagent_reads_authoritative_state_and_activity(monkeypatch):
+async def test_check_subagent_reads_chat_activity():
     launch = await subagents.create("chat_1", "devbox_1", "fix it", "secret")
-    launch.update({"task_id": "task_1", "state": "pending"})
+    launch["state"] = "running"
     await subagents.save(launch)
     await activity.append(
         launch["id"],
@@ -288,72 +253,12 @@ async def test_check_subagent_reads_authoritative_state_and_activity(monkeypatch
         {"name": "assistant_message", "body": {"text": "Found the bug"}},
     )
 
-    async def get_task(task_id):
-        assert task_id == "task_1"
-        return {
-            "task_id": task_id,
-            "state": "complete",
-            "result": {"summary": "Fixed it"},
-        }
-
-    monkeypatch.setattr(dispatcher.devbox, "get_task", get_task)
     agent = dispatcher.agent_for({"id": "chat_1"})
     tool = next(tool for tool in agent.tools if tool.name == "check_subagent")
     result = await tool.fn()
 
     assert result["subagent_id"] == launch["id"]
-    assert result["state"] == "complete"
-    assert result["result"] == {"summary": "Fixed it"}
+    assert result["state"] == "running"
     assert result["events"] == [
-        {"cursor": 0, "kind": "assistant_event", "summary": "Found the bug"},
-        {
-            "cursor": 1,
-            "kind": "state_transition",
-            "summary": "state changed to complete",
-        },
+        {"cursor": 0, "kind": "assistant_event", "summary": "Found the bug"}
     ]
-
-
-async def test_check_subagent_does_not_regress_terminal_state(monkeypatch):
-    launch = await subagents.create("chat_1", "devbox_1", "fix it", "secret")
-    launch.update(
-        {"task_id": "task_1", "state": "complete", "result": {"summary": "done"}}
-    )
-    await subagents.save(launch)
-
-    async def get_task(task_id):
-        return {"task_id": task_id, "state": "running"}
-
-    monkeypatch.setattr(dispatcher.devbox, "get_task", get_task)
-    agent = dispatcher.agent_for({"id": "chat_1"})
-    tool = next(tool for tool in agent.tools if tool.name == "check_subagent")
-
-    result = await tool.fn(launch["id"])
-
-    assert result["state"] == "complete"
-    assert result["result"] == {"summary": "done"}
-
-
-async def test_check_subagent_waits_for_resumed_task_to_start(monkeypatch):
-    launch = await subagents.create("chat_1", "devbox_1", "fix it", "secret")
-    launch.update({"task_id": "task_1", "state": "running", "awaiting_resume": True})
-    await subagents.save(launch)
-    rows = iter(
-        [
-            {"task_id": "task_1", "state": "complete", "result": {"summary": "old"}},
-            {"task_id": "task_1", "state": "running"},
-        ]
-    )
-
-    async def get_task(task_id):
-        return next(rows)
-
-    monkeypatch.setattr(dispatcher.devbox, "get_task", get_task)
-    agent = dispatcher.agent_for({"id": "chat_1"})
-    tool = next(tool for tool in agent.tools if tool.name == "check_subagent")
-
-    assert (await tool.fn(launch["id"]))["state"] == "running"
-    assert (await tool.fn(launch["id"]))["state"] == "running"
-    saved = await subagents.get(launch["id"])
-    assert saved is not None
-    assert "awaiting_resume" not in saved

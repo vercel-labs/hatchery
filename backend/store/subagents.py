@@ -34,9 +34,7 @@ async def ensure_ready() -> None:
         (store.data_dir() / "subagents").mkdir(parents=True, exist_ok=True)
 
 
-async def create(
-    chat_id: str, devbox_id: str, prompt: str, webhook_secret: str
-) -> dict:
+async def create(chat_id: str, devbox_id: str, prompt: str, webhook_secret: str) -> dict:
     record = {
         "id": f"subagent_{uuid.uuid4().hex[:12]}",
         "chat_id": chat_id,
@@ -47,6 +45,8 @@ async def create(
         "webhook_secret": webhook_secret,
         "webhook_seq": 0,
         "completion_delivered": False,
+        "completion_generation": 0,
+        "completion_cursor": -1,
         "created_at": datetime.datetime.now(datetime.UTC).isoformat(),
     }
     await save(record)
@@ -159,96 +159,6 @@ async def list_for_devbox(devbox_id: str) -> list[dict]:
         return sorted(found, key=lambda record: record.get("created_at", ""))
 
 
-async def apply_state(
-    task_id: str,
-    state: str,
-    result: dict | None = None,
-    *,
-    seq: int | None = None,
-    reconcile: bool = False,
-    remote_task_id: str | None = None,
-) -> tuple[dict, bool, str]:
-    """Atomically apply a pushed or reconciled state without regressing completion."""
-    if store.use_postgres():
-        from store import db
-
-        pool = await db.pool()
-        async with pool.acquire() as conn, conn.transaction():
-            row = await conn.fetchrow(
-                "SELECT data FROM hatchery_subagents WHERE id = $1 FOR UPDATE", task_id
-            )
-            if row is None:
-                raise KeyError(task_id)
-            record = _data(row["data"])
-            previous = str(record.get("state", ""))
-            current_seq = int(record.get("webhook_seq") or 0)
-            stale = seq is not None and seq <= current_seq
-            regresses = previous in ("complete", "errored") and state not in (
-                "complete",
-                "errored",
-            )
-            old_resume = (
-                reconcile
-                and record.get("awaiting_resume")
-                and state
-                in (
-                    "complete",
-                    "errored",
-                )
-            )
-            if stale or regresses or old_resume:
-                return record, False, previous
-            record["state"] = state
-            if remote_task_id is not None:
-                record["task_id"] = remote_task_id
-            if seq is not None:
-                record["webhook_seq"] = seq
-            if result is not None:
-                record["result"] = result
-            if reconcile and state not in ("complete", "errored"):
-                record.pop("awaiting_resume", None)
-            await conn.execute(
-                "UPDATE hatchery_subagents SET data = $2::jsonb WHERE id = $1",
-                task_id,
-                json.dumps(record, separators=(",", ":")),
-            )
-            return record, state != previous, previous
-    path = _path(task_id)
-    with _lock:
-        if not path.exists():
-            raise KeyError(task_id)
-        record = json.loads(path.read_text())
-        previous = str(record.get("state", ""))
-        current_seq = int(record.get("webhook_seq") or 0)
-        stale = seq is not None and seq <= current_seq
-        regresses = previous in ("complete", "errored") and state not in (
-            "complete",
-            "errored",
-        )
-        old_resume = (
-            reconcile
-            and record.get("awaiting_resume")
-            and state
-            in (
-                "complete",
-                "errored",
-            )
-        )
-        if stale or regresses or old_resume:
-            return record, False, previous
-        record["state"] = state
-        if remote_task_id is not None:
-            record["task_id"] = remote_task_id
-        if seq is not None:
-            record["webhook_seq"] = seq
-        if result is not None:
-            record["result"] = result
-        if reconcile and state not in ("complete", "errored"):
-            record.pop("awaiting_resume", None)
-        path.write_text(json.dumps(record, separators=(",", ":")))
-        return record, state != previous, previous
-
-
 async def resume(task_id: str) -> dict:
     """Reset completion state after more input was delivered to the same task."""
     if store.use_postgres():
@@ -264,8 +174,7 @@ async def resume(task_id: str) -> dict:
             record = _data(row["data"])
             record["state"] = "running"
             record["completion_delivered"] = False
-            record["awaiting_resume"] = True
-            for key in ("result", "completion_message"):
+            for key in ("result", "completion_message", "completion_lease_until"):
                 record.pop(key, None)
             await conn.execute(
                 "UPDATE hatchery_subagents SET data = $2::jsonb WHERE id = $1",
@@ -280,15 +189,14 @@ async def resume(task_id: str) -> dict:
         record = json.loads(path.read_text())
         record["state"] = "running"
         record["completion_delivered"] = False
-        record["awaiting_resume"] = True
-        for key in ("result", "completion_message"):
+        for key in ("result", "completion_message", "completion_lease_until"):
             record.pop(key, None)
         path.write_text(json.dumps(record, separators=(",", ":")))
         return record
 
 
 async def claim_completion(task_id: str) -> dict | None:
-    """Claim terminal report delivery with an expiring crash-safe lease."""
+    """Atomically claim one completion turn, with an expiring crash-safe lease."""
     if store.use_postgres():
         from store import db
 
@@ -301,25 +209,15 @@ async def claim_completion(task_id: str) -> dict | None:
                 return None
             record = _data(row["data"])
             lease = record.get("completion_lease_until")
-            busy = bool(
-                lease and lease > datetime.datetime.now(datetime.UTC).isoformat()
-            )
-            if (
-                busy
-                or record.get("completion_delivered")
-                or record.get("state")
-                not in (
-                    "complete",
-                    "errored",
-                )
-            ):
+            running = bool(lease and lease > datetime.datetime.now(datetime.UTC).isoformat())
+            if running or record.get("completion_delivered"):
+                return None
+            if record.get("state") not in ("complete", "errored"):
                 return None
             record["completion_lease_until"] = (
                 datetime.datetime.now(datetime.UTC) + datetime.timedelta(minutes=5)
             ).isoformat()
-            record["completion_generation"] = (
-                int(record.get("completion_generation") or 0) + 1
-            )
+            record["completion_generation"] = int(record.get("completion_generation") or 0) + 1
             await conn.execute(
                 "UPDATE hatchery_subagents SET data = $2::jsonb WHERE id = $1",
                 task_id,
@@ -332,23 +230,15 @@ async def claim_completion(task_id: str) -> dict | None:
             return None
         record = json.loads(path.read_text())
         lease = record.get("completion_lease_until")
-        busy = bool(lease and lease > datetime.datetime.now(datetime.UTC).isoformat())
-        if (
-            busy
-            or record.get("completion_delivered")
-            or record.get("state")
-            not in (
-                "complete",
-                "errored",
-            )
-        ):
+        running = bool(lease and lease > datetime.datetime.now(datetime.UTC).isoformat())
+        if running or record.get("completion_delivered"):
+            return None
+        if record.get("state") not in ("complete", "errored"):
             return None
         record["completion_lease_until"] = (
             datetime.datetime.now(datetime.UTC) + datetime.timedelta(minutes=5)
         ).isoformat()
-        record["completion_generation"] = (
-            int(record.get("completion_generation") or 0) + 1
-        )
+        record["completion_generation"] = int(record.get("completion_generation") or 0) + 1
         path.write_text(json.dumps(record, separators=(",", ":")))
         return record
 
@@ -394,8 +284,7 @@ async def list_for_chat(chat_id: str) -> list[dict]:
         from store import db
 
         rows = await (await db.pool()).fetch(
-            "SELECT data FROM hatchery_subagents WHERE chat_id = $1 ORDER BY created_at",
-            chat_id,
+            "SELECT data FROM hatchery_subagents WHERE chat_id = $1 ORDER BY created_at", chat_id
         )
         return [_data(row["data"]) for row in rows]
     with _lock:
@@ -412,6 +301,4 @@ def _data(raw) -> dict:
 
 
 def _path(task_id: str):
-    return (
-        store.data_dir() / "subagents" / f"{urllib.parse.quote(task_id, safe='')}.json"
-    )
+    return store.data_dir() / "subagents" / f"{urllib.parse.quote(task_id, safe='')}.json"

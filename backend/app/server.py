@@ -23,19 +23,19 @@ import logging
 import os
 import re
 
-import ai
-import ai.ui.ai_sdk.outbound_stream
-import ai.ui.ai_sdk.ui_events
 import fastapi
 import fastapi.middleware.cors
 import fastapi.responses
 import pydantic
-import vercel.functions
 import websockets
 
+import ai
+import ai.ui.ai_sdk.outbound_stream
+import ai.ui.ai_sdk.ui_events
 import channels
 import models
 import store
+import vercel.functions
 from agent import classifier, devbox, dispatcher, sandbox, topic
 from channels import github, slack
 from store import activity, chats, devboxes, events, spaces, subagents, terminals, turns
@@ -78,9 +78,7 @@ class _StoreHub:
         )
         if created:
             await events.append(
-                chat.id,
-                "messages",
-                ai.user_message(inbound.text).model_dump(mode="json"),
+                chat.id, "messages", ai.user_message(inbound.text).model_dump(mode="json")
             )
             await _classify_chat(
                 chat.id,
@@ -110,16 +108,9 @@ class _StoreHub:
             chat = await chats.get(chat.id) or chat
         else:
             await events.append(
-                chat.id,
-                "messages",
-                ai.user_message(inbound.text).model_dump(mode="json"),
+                chat.id, "messages", ai.user_message(inbound.text).model_dump(mode="json")
             )
-        log.info(
-            "inbound %s -> %s chat %s",
-            channel,
-            "new" if created else "existing",
-            chat.id,
-        )
+        log.info("inbound %s -> %s chat %s", channel, "new" if created else "existing", chat.id)
         await _run_inbound_turn(chat.id)
 
     async def dedupe(self, key: str) -> bool:
@@ -252,11 +243,7 @@ class UpdateSpaceResourcesRequest(pydantic.BaseModel):
     def valid_repos(cls, repos: list[str]) -> list[str]:
         for repo in repos:
             parts = repo.split("/")
-            if (
-                len(parts) != 2
-                or not all(parts)
-                or any(part.strip() != part for part in parts)
-            ):
+            if len(parts) != 2 or not all(parts) or any(part.strip() != part for part in parts):
                 raise ValueError("repos must use owner/repo form")
         return repos
 
@@ -300,9 +287,7 @@ async def create_chat(request: CreateChatRequest) -> models.Chat:
     found = await spaces.list_all()
     if not found:
         found = [await spaces.default()]
-    if request.space_id is not None and not any(
-        space.id == request.space_id for space in found
-    ):
+    if request.space_id is not None and not any(space.id == request.space_id for space in found):
         raise fastapi.HTTPException(404, "unknown space")
     return await chats.create(request.space_id, request.title)
 
@@ -312,9 +297,7 @@ class AssignChatSpaceRequest(pydantic.BaseModel):
 
 
 @app.patch("/api/chats/{chat_id}/space")
-async def assign_chat_space(
-    chat_id: str, request: AssignChatSpaceRequest
-) -> models.Chat:
+async def assign_chat_space(chat_id: str, request: AssignChatSpaceRequest) -> models.Chat:
     if await spaces.get(request.space_id) is None:
         raise fastapi.HTTPException(404, "unknown space")
     if await chats.get(chat_id) is None:
@@ -339,9 +322,7 @@ async def chat_events(
         try:
             while True:
                 try:
-                    index, event = await asyncio.wait_for(
-                        asyncio.shield(pending), timeout=30
-                    )
+                    index, event = await asyncio.wait_for(asyncio.shield(pending), timeout=30)
                 except TimeoutError:
                     yield ": keepalive\n\n"
                     continue
@@ -370,11 +351,7 @@ async def chat_messages(chat_id: str) -> list[ai.ui.ai_sdk.UIMessage]:
         for part in message.parts:
             if getattr(part, "type", None) != "text":
                 continue
-            match = re.fullmatch(
-                r"<slack_message\b[^>]*>\s*(.*?)\s*</slack_message>",
-                part.text,
-                re.DOTALL,
-            )
+            match = re.fullmatch(r'<slack_message\b[^>]*>\s*(.*?)\s*</slack_message>', part.text, re.DOTALL)
             if match is None:
                 continue
             part.text = html.unescape(match.group(1))
@@ -412,9 +389,7 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                 # server-owned and their IDs may change in the UI round-trip, so accepting
                 # them here duplicates tool results and corrupts the next model history.
                 if message.role == "user" and message.id not in known:
-                    await events.append(
-                        request.chat_id, "messages", message.model_dump(mode="json")
-                    )
+                    await events.append(request.chat_id, "messages", message.model_dump(mode="json"))
                     stored.append(message)
                     received.append(message)
             for message in received:
@@ -429,17 +404,13 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
 
             current = await chats.get(request.chat_id)
             if received and current is not None and current.topic is None:
-                first = next(
-                    (message for message in stored if message.role == "user"), None
-                )
+                first = next((message for message in stored if message.role == "user"), None)
                 if first is not None:
                     _spawn(_name_chat(request.chat_id, first.text))
             if current is None:
                 raise fastapi.HTTPException(404, "unknown chat")
             if current.space_id is None:
-                first = next(
-                    (message for message in stored if message.role == "user"), None
-                )
+                first = next((message for message in stored if message.role == "user"), None)
                 if first is None:
                     raise fastapi.HTTPException(409, "chat has no first prompt")
                 yield ai.ui.ai_sdk.outbound_stream.format_sse(
@@ -466,9 +437,7 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                 )
             space = await _space_for_chat(request.chat_id)
             history = [ai.system_message(dispatcher.system_prompt(space)), *stored]
-            agent = dispatcher.agent_for(
-                {"id": request.chat_id}, _task_observer(request.chat_id)
-            )
+            agent = dispatcher.agent_for({"id": request.chat_id})
             await _emit(request.chat_id, channels.event(channels.protocol.TURN_STARTED))
             try:
                 async with agent.run(dispatcher.model(), history) as result:
@@ -480,11 +449,7 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                             request.chat_id, "messages", message.model_dump(mode="json")
                         )
                 reply = next(
-                    (
-                        message.text
-                        for message in reversed(added)
-                        if message.role == "assistant" and message.text
-                    ),
+                    (message.text for message in reversed(added) if message.role == "assistant" and message.text),
                     "",
                 )
                 if reply:
@@ -513,17 +478,6 @@ async def _space_for_chat(chat_id: str) -> models.Space:
     return space
 
 
-def _task_observer(chat_id: str):
-    def observe(launch: dict, created: dict) -> None:
-        if devbox.webhook_url() is None:
-            if created.get("was_terminal"):
-                _spawn(_watch_local_resumed_task(chat_id, launch))
-            else:
-                _spawn(_watch_local_task(chat_id, launch, created))
-
-    return observe
-
-
 async def _transcript(chat_id: str) -> list[ai.messages.Message]:
     stored = [
         ai.messages.Message.model_validate(data)
@@ -532,9 +486,7 @@ async def _transcript(chat_id: str) -> list[ai.messages.Message]:
     return _dedupe_tool_history(stored)
 
 
-def _dedupe_tool_history(
-    messages: list[ai.messages.Message],
-) -> list[ai.messages.Message]:
+def _dedupe_tool_history(messages: list[ai.messages.Message]) -> list[ai.messages.Message]:
     """Drop duplicate tool parts left by the old UI transcript ingestion bug."""
     seen_calls = set()
     seen_results = set()
@@ -547,19 +499,12 @@ def _dedupe_tool_history(
                     continue
                 seen_calls.add(part.tool_call_id)
             elif isinstance(part, ai.messages.ToolResultPart):
-                if (
-                    part.tool_call_id in seen_results
-                    or part.tool_call_id not in seen_calls
-                ):
+                if part.tool_call_id in seen_results or part.tool_call_id not in seen_calls:
                     continue
                 seen_results.add(part.tool_call_id)
             parts.append(part)
         if parts:
-            repaired.append(
-                message
-                if len(parts) == len(message.parts)
-                else message.model_copy(update={"parts": parts})
-            )
+            repaired.append(message if len(parts) == len(message.parts) else message.model_copy(update={"parts": parts}))
     return repaired
 
 
@@ -581,9 +526,7 @@ async def create_chat_devbox(chat_id: str, request: sandbox.Launch) -> dict:
         raise fastapi.HTTPException(404, "unknown chat")
     record = await sandbox.prepare(chat_id, request)
     _spawn(sandbox.provision(record))
-    return {
-        key: record.get(key) for key in ("id", "title", "repos", "state", "created_at")
-    }
+    return {key: record.get(key) for key in ("id", "title", "repos", "state", "created_at")}
 
 
 @app.get("/api/chats/{chat_id}/devboxes")
@@ -687,9 +630,7 @@ async def delete_subagent(chat_id: str, launch_id: str) -> None:
         and launch.get("session_id")
         and workspace.get("box")
     ):
-        await devbox.send_tty_input(
-            workspace["box"]["url"], launch["session_id"], b"\x03"
-        )
+        await devbox.send_tty_input(workspace["box"]["url"], launch["session_id"], b"\x03")
     if launch.get("task_id"):
         await devbox.delete_task(launch["task_id"])
     await subagents.delete(launch_id)
@@ -790,11 +731,7 @@ async def manual_tty(ws: fastapi.WebSocket, chat_id: str, terminal_id: str) -> N
         await ws.close(code=4404, reason="unknown terminal")
         return
     workspace = await devboxes.get(str(terminal.get("devbox_id", "")))
-    if (
-        workspace is None
-        or workspace.get("chat_id") != chat_id
-        or not workspace.get("box")
-    ):
+    if workspace is None or workspace.get("chat_id") != chat_id or not workspace.get("box"):
         await ws.close(code=4404, reason="terminal session not on the devbox yet")
         return
 
@@ -813,9 +750,7 @@ async def devbox_webhook(body: dict, launch_id: str = "", secret: str = "") -> d
     """Persist one task event without disturbing sibling subagents."""
     kind = str(body.get("kind", ""))
     payload = body.get(kind)
-    if kind not in ("taskStateChange", "assistantEvent") or not isinstance(
-        payload, dict
-    ):
+    if kind not in ("taskStateChange", "assistantEvent") or not isinstance(payload, dict):
         raise fastapi.HTTPException(400, "unsupported devbox event")
     task_id = str(payload.get("taskId", ""))
     if not task_id:
@@ -838,166 +773,87 @@ async def devbox_webhook(body: dict, launch_id: str = "", secret: str = "") -> d
             raise fastapi.HTTPException(400, "invalid assistant event")
         if not await chats.dedupe(f"devbox:{launch_id}:activity:{cursor}"):
             return {"ok": True, "duplicate": True}
-        await activity.append(
-            record["id"], "assistant_event", event, source_cursor=cursor
-        )
+        await activity.append(record["id"], "assistant_event", event, source_cursor=cursor)
         return {"ok": True}
 
     seq = int(payload.get("seq") or 0)
     state = str(payload.get("state", ""))
-    result = payload.get("result") if isinstance(payload.get("result"), dict) else None
-    record, changed, previous = await subagents.apply_state(
-        record["id"], state, result, seq=seq, remote_task_id=task_id
-    )
-    if not changed:
-        if state in devbox.TERMINAL_STATES and not record.get("completion_delivered"):
-            vercel.functions.wait_until(deliver_completion(record["id"]))
-            return {"ok": True}
+    current_seq = int(record.get("webhook_seq") or 0)
+    if seq < current_seq or (
+        seq == current_seq
+        and (state not in devbox.TERMINAL_STATES or record.get("completion_delivered"))
+    ):
         return {"ok": True, "duplicate": True}
+    if seq == current_seq:
+        _spawn(complete_task(record["id"]))
+        return {"ok": True}
+
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+    record["webhook_seq"] = seq
+    record["state"] = state
+    if result:
+        record["result"] = result
     await activity.append(
-        record["id"],
-        "state_transition",
-        {"from": previous, "to": state, "result": result or {}, "seq": seq},
+        record["id"], "state_transition", {"state": state, "result": result, "seq": seq}
     )
+    await subagents.save(record)
     if state not in devbox.TERMINAL_STATES:
         return {"ok": True}
 
     if not record.get("completion_delivered"):
-        vercel.functions.wait_until(deliver_completion(record["id"]))
+        _spawn(complete_task(record["id"]))
     return {"ok": True}
 
 
-async def _watch_local_resumed_task(chat_id: str, record: dict) -> None:
-    """Wait for a resumed task to leave its old terminal state, then watch it."""
-    for _ in range(60):
-        row = await devbox.get_task(record["task_id"])
-        if row.get("state") not in devbox.TERMINAL_STATES:
-            await _watch_local_task(chat_id, record, row)
-            return
-        await asyncio.sleep(1)
-    raise RuntimeError("resumed subagent did not start")
-
-
-async def _watch_local_task(chat_id: str, record: dict, created: dict) -> None:
-    """Observe local work after the chat response, then use the same finisher."""
-    workspace = await devboxes.get(record["devbox_id"])
-    if workspace is None or workspace.get("chat_id") != chat_id:
-        raise RuntimeError("subagent devbox is missing")
-    for attempt in (1, 2, 3):
-        state = str(created.get("state", "pending"))
-        summary = ""
-        async for frame in devbox.watch(workspace["box"]["url"], created["task_id"]):
-            body = (frame or {}).get("body") or {}
-            if event := body.get("assistantEvent"):
-                cursor = str((frame or {}).get("ts", ""))
-                if not cursor or await chats.dedupe(
-                    f"devbox:{record['id']}:activity:{cursor}"
-                ):
-                    await activity.append(
-                        record["id"],
-                        "assistant_event",
-                        event,
-                        source_cursor=cursor or None,
-                    )
-                if event.get("name") == "complete":
-                    summary = str((event.get("body") or {}).get("summary") or summary)
-            if transition := body.get("stateTransition"):
-                state = str(transition["to"])
-                await activity.append(
-                    record["id"], "state_transition", dict(transition)
-                )
-                if state in devbox.TERMINAL_STATES:
-                    break
-        row = await devbox.get_task(created["task_id"])
-        result = row.get("result") or {}
-        if summary and not result.get("summary"):
-            result["summary"] = summary
-        if row.get("state") in devbox.TERMINAL_STATES:
-            state = row["state"]
-        if (
-            "executable file not found" not in str(result.get("error", ""))
-            or attempt == 3
-        ):
-            record["state"] = state
-            record["result"] = result
-            await subagents.save(record)
-            await deliver_completion(record["id"])
-            return
-        await asyncio.sleep(20)
-        try:
-            created = await devbox.create_task(
-                workspace["box"]["id"],
-                workspace["set_id"],
-                record["prompt"],
-                model=record.get("model", devbox.DEFAULT_MODEL),
-            )
-        except Exception as error:
-            record["state"] = "errored"
-            record["result"] = {"error": f"subagent retry failed: {error}"}
-            await activity.append(
-                record["id"],
-                "state_transition",
-                {"from": state, "to": "errored", "error": str(error)},
-            )
-            await subagents.save(record)
-            await deliver_completion(record["id"])
-            return
-        record["task_id"] = created["task_id"]
-        record["session_id"] = created["session_id"]
-        record["state"] = created["state"]
-        await subagents.save(record)
-
-
-async def deliver_completion(launch_id: str) -> None:
-    """Run and deliver one terminal subagent report."""
+async def complete_task(launch_id: str) -> None:
+    """Run one serialized completion turn for a terminal task."""
+    current = await subagents.get(launch_id)
+    if current is None or current.get("state") not in devbox.TERMINAL_STATES:
+        return
     record = await subagents.claim_completion(launch_id)
     if record is None:
         return
+
     generation = int(record["completion_generation"])
     chat_id = record["chat_id"]
+    cursor = int(record.get("completion_cursor", -1))
     try:
-        message = str(record.get("completion_message") or "")
-        if not message:
+        cached = str(record.get("completion_message") or "")
+        if cached:
+            outcome = CompletionOutcome(notify=True, message=cached)
+        else:
             wake = ai.user_message(
-                f"Subagent {launch_id} finished. Call check_subagent with "
-                f"subagent_id={launch_id!r}. Do not launch another subagent. "
-                "Return JSON with notify=true and a concise completion report."
+                f"Complete subagent {launch_id}. Call check_subagent with "
+                f"subagent_id={launch_id!r} and after={cursor}. "
+                "Do not launch another subagent. Return JSON with notify=true and a completion message."
             )
             outcome = await _run_completion_turn(chat_id, {"id": chat_id}, wake)
-            message = str(outcome.message or "")
-            if message:
-                record["completion_message"] = message
+            if outcome.message:
+                record["completion_message"] = outcome.message
                 await subagents.save(record)
         latest = await subagents.get(launch_id) or record
         if int(latest.get("completion_generation") or 0) != generation:
             return
-        updates: dict = {}
-        if message:
-            failures = await _deliver(chat_id, message)
+        updates: dict = {"completion_cursor": await activity.cursor(launch_id)}
+        if outcome.notify and outcome.message:
+            failures = await _deliver(chat_id, outcome.message)
             updates["delivery_errors"] = failures
             if not failures:
                 updates["completion_delivered"] = True
-                updates["completion_message"] = message
+                updates["completion_message"] = outcome.message
         result = latest.get("result") or {}
         artifact = next(
-            (
-                str(pr["url"])
-                for pr in result.get("prs") or []
-                if isinstance(pr, dict) and pr.get("url")
-            ),
-            message or "subagent completed",
+            (str(pr["url"]) for pr in result.get("prs") or [] if isinstance(pr, dict) and pr.get("url")),
+            outcome.message or "subagent completed",
         )
         siblings = await subagents.list_for_chat(chat_id)
         active = any(
-            sibling["id"] != launch_id
-            and sibling.get("state") not in devbox.TERMINAL_STATES
+            sibling["id"] != launch_id and sibling.get("state") not in devbox.TERMINAL_STATES
             for sibling in siblings
         )
         if not active:
             await chats.finish(
-                chat_id,
-                "done" if latest.get("state") == "complete" else "failed",
-                artifact,
+                chat_id, "done" if latest.get("state") == "complete" else "failed", artifact
             )
         await events.append(
             chat_id,
@@ -1008,7 +864,7 @@ async def deliver_completion(launch_id: str) -> None:
                 "state": latest.get("state"),
             },
         )
-        if message:
+        if outcome.notify and outcome.message:
             await events.append(chat_id, "ui", {"type": "messages.changed"})
         await subagents.finish_completion(launch_id, generation, **updates)
     except Exception:
@@ -1057,9 +913,7 @@ async def _run_completion_turn(
     space = await _space_for_chat(chat_id)
     history = [ai.system_message(dispatcher.system_prompt(space)), *stored, wake]
     agent = dispatcher.agent_for(record)
-    async with agent.run(
-        dispatcher.model(), history, output_type=CompletionOutcome
-    ) as result:
+    async with agent.run(dispatcher.model(), history, output_type=CompletionOutcome) as result:
         async for _ in result:
             pass
         outcome = result.output
@@ -1084,7 +938,7 @@ async def _run_dispatcher_turn(
     history = [ai.system_message(dispatcher.system_prompt(space)), *stored]
     if wake is not None:
         history.append(wake)
-    agent = dispatcher.agent_for(record, _task_observer(chat_id))
+    agent = dispatcher.agent_for(record)
     async with agent.run(dispatcher.model(), history) as result:
         async for _ in result:
             pass
@@ -1092,11 +946,7 @@ async def _run_dispatcher_turn(
         for message in added:
             await events.append(chat_id, "messages", message.model_dump(mode="json"))
     return next(
-        (
-            message.text
-            for message in reversed(added)
-            if message.role == "assistant" and message.text
-        ),
+        (message.text for message in reversed(added) if message.role == "assistant" and message.text),
         "subagent completion recorded",
     )
 
