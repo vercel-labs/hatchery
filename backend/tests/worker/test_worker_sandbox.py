@@ -64,3 +64,46 @@ async def test_provision_creates_persistent_sandbox_and_checks_daemon(monkeypatc
         "https://daemon.example/health",
         {"authorization": "Bearer secret"},
     )
+
+
+def test_daemon_env_bridges_vercel_dev_queue_through_public_origin(monkeypatch):
+    monkeypatch.setenv("VERCEL_QUEUE_TOKEN", "vc-dev-token")
+    monkeypatch.setenv("VERCEL_QUEUE_BASE_URL", "http://127.0.0.1:3000/_svc/_queues")
+    monkeypatch.setenv("VERCEL_REGION", "dev1")
+    monkeypatch.setenv("HATCHERY_PUBLIC_URL", "https://hatchery.vgrok.example/")
+
+    env = sandbox._daemon_env("wrk_1", models.WorkerSpec(), "secret")
+
+    assert env["VERCEL_QUEUE_TOKEN"] == "vc-dev-token"
+    assert env["VERCEL_QUEUE_BASE_URL"] == (
+        "https://hatchery.vgrok.example/_svc/_queues"
+    )
+    assert env["VERCEL_REGION"] == "dev1"
+    assert "VERCEL_DEPLOYMENT_ID" not in env
+
+
+def test_daemon_env_preserves_cloud_queue_identity(monkeypatch):
+    monkeypatch.setenv("VERCEL_OIDC_TOKEN", "oidc")
+    monkeypatch.setenv("VERCEL_REGION", "iad1")
+    monkeypatch.setenv("VERCEL_DEPLOYMENT_ID", "dpl_1")
+    monkeypatch.setenv("VERCEL_QUEUE_BASE_URL", "https://queues.example")
+    monkeypatch.delenv("VERCEL_QUEUE_TOKEN", raising=False)
+
+    env = sandbox._daemon_env("wrk_1", models.WorkerSpec(), "secret")
+
+    assert env["VERCEL_OIDC_TOKEN"] == "oidc"
+    assert env["VERCEL_REGION"] == "iad1"
+    assert env["VERCEL_DEPLOYMENT_ID"] == "dpl_1"
+    assert env["VERCEL_QUEUE_BASE_URL"] == "https://queues.example"
+
+
+def test_daemon_env_requires_public_origin_for_vercel_dev(monkeypatch):
+    monkeypatch.setenv("VERCEL_QUEUE_TOKEN", "vc-dev-token")
+    monkeypatch.delenv("HATCHERY_PUBLIC_URL", raising=False)
+
+    try:
+        sandbox._daemon_env("wrk_1", models.WorkerSpec(), "secret")
+    except RuntimeError as error:
+        assert "HATCHERY_PUBLIC_URL" in str(error)
+    else:
+        raise AssertionError("missing public origin should fail")

@@ -124,7 +124,21 @@ def _daemon_env(worker_id: str, spec: models.WorkerSpec, token: str) -> dict[str
         "FX_PERMISSION_MODE": "yolo",
         "FX_AUTO_UPGRADE": "0",
     }
-    for name in ("VERCEL_OIDC_TOKEN", "AI_GATEWAY_API_KEY", "VERCEL_QUEUE_REGION"):
+    for name in (
+        "VERCEL_OIDC_TOKEN",
+        "AI_GATEWAY_API_KEY",
+        "VERCEL_QUEUE_TOKEN",
+        "VERCEL_QUEUE_BASE_URL",
+        "VERCEL_REGION",
+        "VERCEL_DEPLOYMENT_ID",
+    ):
         if value := os.environ.get(name):
             env[name] = value
+    if env.get("VERCEL_QUEUE_TOKEN") == "vc-dev-token":
+        public_url = os.environ.get("HATCHERY_PUBLIC_URL", "").rstrip("/")
+        if not public_url:
+            raise RuntimeError(
+                "HATCHERY_PUBLIC_URL is required to connect a sandbox to vercel dev"
+            )
+        env["VERCEL_QUEUE_BASE_URL"] = f"{public_url}/_svc/_queues"
     return env

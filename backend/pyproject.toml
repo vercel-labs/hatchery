@@ -23,6 +23,9 @@ dev = [
 [tool.vercel]
 entrypoint = "app.server:app"
 
+[[tool.vercel.subscribers]]
+entrypoint = "app.server:worker_event"
+
 [tool.uv]
 package = false
 
