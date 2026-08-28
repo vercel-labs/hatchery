@@ -31,7 +31,10 @@ import channels
 import models
 import store
 import vercel.functions
+import vercel.queue
 from agent import classifier, dispatcher, sandbox, topic
+import worker
+from worker import protocol as worker_protocol
 from channels import github, slack
 from store import chats, events, spaces, turns
 
@@ -511,30 +514,78 @@ async def suggest_chat_sandbox(chat_id: str) -> sandbox.Launch:
 
 
 @app.post("/api/chats/{chat_id}/sandboxes")
-async def create_chat_sandbox(chat_id: str, request: sandbox.Launch) -> None:
+async def create_chat_sandbox(chat_id: str, request: sandbox.Launch) -> dict:
     if await chats.get(chat_id) is None:
         raise fastapi.HTTPException(404, "unknown chat")
-    raise fastapi.HTTPException(501, str(sandbox.unavailable()))
+    created = await sandbox.create(chat_id, request)
+    return created.model_dump(exclude={"daemon_token"})
 
 
 @app.get("/api/chats/{chat_id}/sandboxes")
-async def chat_sandboxes(chat_id: str) -> None:
+async def chat_sandboxes(chat_id: str) -> list[dict]:
     if await chats.get(chat_id) is None:
         raise fastapi.HTTPException(404, "unknown chat")
-    raise fastapi.HTTPException(501, str(sandbox.unavailable()))
+    return [
+        item.model_dump(exclude={"daemon_token"})
+        for item in await sandbox.list_all(chat_id)
+    ]
 
 
-@app.delete("/api/chats/{chat_id}/sandboxes/{sandbox_id}")
+@app.delete("/api/chats/{chat_id}/sandboxes/{sandbox_id}", status_code=204)
 async def delete_chat_sandbox(chat_id: str, sandbox_id: str) -> None:
     if await chats.get(chat_id) is None:
         raise fastapi.HTTPException(404, "unknown chat")
-    raise fastapi.HTTPException(501, str(sandbox.unavailable()))
+    try:
+        await sandbox.destroy(chat_id, sandbox_id)
+    except ValueError as error:
+        raise fastapi.HTTPException(404, str(error)) from error
 
 
 @app.websocket("/api/chats/{chat_id}/subagents/{subagent_id}/tty")
 async def task_tty(ws: fastapi.WebSocket, chat_id: str, subagent_id: str) -> None:
     await ws.accept()
     await ws.close(code=1011, reason="sandbox TTY is not implemented")
+
+
+@vercel.queue.subscribe(
+    topic=worker_protocol.EVENT_TOPIC,
+    consumer_group="hatchery-control-plane-v1",
+)
+async def worker_event(event: worker_protocol.Event) -> None:
+    """Persist one at-least-once worker event and wake the owning chat."""
+    task, changed = await worker.ingest(event)
+    if changed and task is not None and task.status in ("attention", "complete", "errored"):
+        await complete_worker_task(task)
+
+
+async def complete_worker_task(task: worker.Task) -> None:
+    """Record and deliver one actionable subagent result."""
+    current = await worker.get_task(task.chat_id, task.id)
+    if current is None or current.completion_delivered:
+        return
+    result = current.result or {}
+    if current.status == "attention":
+        message = str(result.get("question") or "subagent needs input")
+    elif current.status == "errored":
+        message = f"Subagent failed: {result.get('error') or 'unknown error'}"
+    else:
+        message = str(result.get("summary") or "subagent completed")
+    await events.append(
+        current.chat_id,
+        "messages",
+        ai.assistant_message(message).model_dump(mode="json"),
+    )
+    failures = await _deliver(current.chat_id, message)
+    if not failures:
+        current.completion_delivered = True
+        await worker.store.save_task(current)
+    await chats.finish(
+        current.chat_id,
+        "failed" if current.status == "errored" else "done",
+        message,
+    )
+    await events.append(current.chat_id, "ui", {"type": "messages.changed"})
+    await events.append(current.chat_id, "ui", {"type": "chat.changed"})
 
 
 async def _emit(chat_id: str, event: channels.Event) -> list[str]:

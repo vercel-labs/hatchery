@@ -81,7 +81,7 @@ export function ChatView({
             <EmptyHeader>
               <EmptyTitle>Talk to the dispatcher</EmptyTitle>
               <EmptyDescription>
-                Describe the work. Sandbox execution is being migrated.
+                Describe the work. The dispatcher can start fx subagents.
               </EmptyDescription>
             </EmptyHeader>
           </Empty>

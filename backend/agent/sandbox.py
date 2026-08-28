@@ -1,9 +1,4 @@
-"""Future Vercel Sandbox control-plane boundary.
-
-The old DevBox implementation was removed in migration step 1. The functions
-below mark the retained architecture surfaces until the Sandbox and Queues
-implementations land.
-"""
+"""Chat-scoped Vercel Sandbox control-plane boundary."""
 
 import json
 
@@ -11,14 +6,13 @@ import ai
 import pydantic
 
 import models
+import worker
 
 
 class Launch(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(
         extra="forbid",
-        json_schema_extra={
-            "required": ["title", "repos", "setup_script", "ports", "branch", "git_sha"]
-        },
+        json_schema_extra={"required": ["title", "repos", "setup_script", "ports", "branch", "git_sha"]},
     )
 
     title: str = "sandbox"
@@ -84,9 +78,7 @@ async def suggest(space: models.Space) -> Launch:
         [ai.system_message(_SYSTEM), ai.user_message(request)],
         output_type=Launch,
         params=ai.InferenceRequestParams(
-            sampling={
-                ai.TemperatureSamplerParams: ai.TemperatureSamplerParams(temperature=0)
-            },
+            sampling={ai.TemperatureSamplerParams: ai.TemperatureSamplerParams(temperature=0)},
             output=ai.OutputParams(max_tokens=4096),
         ),
     ) as result:
@@ -95,35 +87,28 @@ async def suggest(space: models.Space) -> Launch:
         return result.output
 
 
-def unavailable() -> NotImplementedError:
-    return NotImplementedError("Vercel Sandbox control plane is not implemented")
+async def create(chat_id: str, launch: Launch) -> worker.Worker:
+    return await worker.create(chat_id, worker.WorkerSpec(**launch.model_dump()))
 
 
-async def create(launch: Launch) -> dict:
-    """Create and configure a persistent Vercel Sandbox."""
-    raise unavailable()
+async def list_all(chat_id: str) -> list[worker.Worker]:
+    return await worker.list_all(chat_id)
 
 
-async def list_all() -> list[dict]:
-    """List persisted sandboxes visible to Hatchery."""
-    raise unavailable()
+async def destroy(chat_id: str, sandbox_id: str) -> None:
+    record = await worker.get(sandbox_id)
+    if record is None or record.chat_id != chat_id:
+        raise ValueError("sandbox does not belong to this chat")
+    await worker.destroy(sandbox_id)
 
 
-async def destroy(sandbox_id: str) -> None:
-    """Destroy a sandbox and its retained runtime resources."""
-    raise unavailable()
+async def launch_task(chat_id: str, sandbox_id: str, prompt: str, model: str) -> worker.Task:
+    return await worker.launch_task(chat_id, sandbox_id, prompt, model)
 
 
-async def launch_task(sandbox_id: str, prompt: str, model: str) -> dict:
-    """Enqueue an idempotent fx task launch command."""
-    raise unavailable()
+async def send_task_input(chat_id: str, task_id: str, prompt: str) -> worker.Task:
+    return await worker.send_task_input(chat_id, task_id, prompt)
 
 
-async def send_task_input(task_id: str, prompt: str) -> None:
-    """Enqueue idempotent input for an existing fx task."""
-    raise unavailable()
-
-
-async def cancel_task(task_id: str) -> None:
-    """Enqueue cancellation for an existing fx task."""
-    raise unavailable()
+async def cancel_task(chat_id: str, task_id: str) -> worker.Task:
+    return await worker.cancel_task(chat_id, task_id)

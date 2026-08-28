@@ -2,6 +2,14 @@
 
 See `AGENTS.md` for layout and development commands.
 
-The worker layer is being migrated from DevBox to Vercel Sandbox and Queues.
-Sandbox creation, subagent execution, and TTY access are currently explicit
-not-implemented stubs.
+The worker layer always uses Vercel Sandbox and Queues, including during local
+development:
+
+```sh
+cd backend && uv run dev.py
+cd frontend && pnpm dev
+```
+
+Open `http://localhost:3000`, create a chat, and ask the dispatcher to create a
+sandbox and subagent. Local development needs the same Vercel credentials as the
+deployment. TTY access is still not implemented.

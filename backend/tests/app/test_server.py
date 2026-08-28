@@ -630,29 +630,78 @@ def test_spawn_uses_wait_until_on_vercel(monkeypatch):
 
 
 
-async def test_sandbox_routes_are_explicit_stubs():
+async def test_sandbox_routes_use_chat_scoped_control_plane(monkeypatch):
     space = await server.spaces.default()
     chat = await chats.create(space.id, "task")
+    seen = {}
+
+    class Record:
+        def model_dump(self, exclude=None):
+            assert exclude == {"daemon_token"}
+            return {"id": "wrk_1", "chat_id": chat.id, "title": "sandbox"}
+
+    async def list_all(chat_id):
+        seen["listed"] = chat_id
+        return [Record()]
+
+    async def create(chat_id, launch):
+        seen["created"] = (chat_id, launch)
+        return Record()
+
+    monkeypatch.setattr(server.sandbox, "list_all", list_all)
+    monkeypatch.setattr(server.sandbox, "create", create)
 
     async with client() as c:
         listed = await c.get(f"/api/chats/{chat.id}/sandboxes")
         created = await c.post(
             f"/api/chats/{chat.id}/sandboxes",
             json={
-                "title": "sandbox",
-                "repos": [],
-                "setup_script": None,
-                "ports": [],
-                "branch": None,
-                "git_sha": None,
+                "title": "sandbox", "repos": [], "setup_script": None,
+                "ports": [], "branch": None, "git_sha": None,
             },
         )
         old = await c.get(f"/api/chats/{chat.id}/devboxes")
 
-    assert listed.status_code == 501
-    assert created.status_code == 501
-    assert listed.json() == {"detail": "Vercel Sandbox control plane is not implemented"}
+    assert listed.status_code == 200
+    assert created.status_code == 200
+    assert listed.json()[0]["id"] == "wrk_1"
+    assert created.json()["id"] == "wrk_1"
+    assert seen["listed"] == chat.id
+    assert seen["created"][0] == chat.id
     assert old.status_code == 404
+
+
+async def test_worker_completion_persists_and_delivers_message(monkeypatch):
+    space = await server.spaces.default()
+    chat = await chats.create(space.id, "task")
+    task = server.worker.Task(
+        id="task_1",
+        chat_id=chat.id,
+        worker_id="wrk_1",
+        title="fix",
+        prompt="fix it",
+        model="openai/test",
+        status="complete",
+        result={"summary": "fixed and tested"},
+        created_at="2026-08-28T00:00:00+00:00",
+        updated_at="2026-08-28T00:00:00+00:00",
+    )
+    await server.worker.store.save_task(task)
+    delivered = []
+
+    async def deliver(chat_id, message):
+        delivered.append((chat_id, message))
+        return []
+
+    monkeypatch.setattr(server, "_deliver", deliver)
+    await server.complete_worker_task(task)
+    await server.complete_worker_task(task)
+
+    stored = [ai.messages.Message.model_validate(data) for _, data in await events.read(chat.id, "messages")]
+    assert [(message.role, message.text) for message in stored] == [("assistant", "fixed and tested")]
+    assert delivered == [(chat.id, "fixed and tested")]
+    assert (await server.worker.get_task(chat.id, task.id)).completion_delivered is True
+    assert (await chats.get(chat.id)).status == "done"
 
 
 async def test_task_tty_is_an_explicit_stub():

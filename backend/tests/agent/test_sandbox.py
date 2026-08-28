@@ -69,6 +69,17 @@ def test_launch_validates_sandbox_parameters():
     assert launch.branch == "main"
 
 
-async def test_sandbox_operations_are_not_implemented():
-    with pytest.raises(NotImplementedError, match="Sandbox control plane"):
-        await sandbox.create(sandbox.Launch())
+async def test_sandbox_operations_delegate_with_chat_scope(monkeypatch):
+    seen = {}
+
+    async def create(chat_id, spec):
+        seen.update(chat_id=chat_id, spec=spec)
+        return "created"
+
+    monkeypatch.setattr(sandbox.worker, "create", create)
+
+    result = await sandbox.create("chat_1", sandbox.Launch(repos=["acme/app"]))
+
+    assert result == "created"
+    assert seen["chat_id"] == "chat_1"
+    assert seen["spec"].repos == ["acme/app"]
