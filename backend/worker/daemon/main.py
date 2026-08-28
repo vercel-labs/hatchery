@@ -13,8 +13,10 @@ import json
 import os
 import pathlib
 import pty
+import re
 import signal
 import struct
+import subprocess
 import termios
 import threading
 import time
@@ -26,6 +28,24 @@ REPLAY_LIMIT = 1024 * 1024
 
 def _now() -> str:
     return datetime.datetime.now(datetime.UTC).isoformat()
+
+
+def agent_environment(env: dict[str, str] | None = None) -> dict[str, str]:
+    """Return the agent environment without daemon/control-plane credentials."""
+    source = dict(env or os.environ)
+    private = {
+        "HATCHERY_DAEMON_TOKEN",
+        "HATCHERY_WORKER_ID",
+        "VERCEL_OIDC_TOKEN",
+        "VERCEL_QUEUE_TOKEN",
+        "VERCEL_QUEUE_BASE_URL",
+        "VERCEL_DEPLOYMENT_ID",
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+    }
+    result = {name: value for name, value in source.items() if name not in private}
+    result["PATH"] = f"/opt/hatchery/bin:{result.get('PATH', '/usr/local/bin:/usr/bin:/bin')}"
+    return result
 
 
 class Runtime:
@@ -52,6 +72,8 @@ class Runtime:
         self._input_generation_lock = threading.Lock()
         self.fx_home = pathlib.Path(os.environ.get("FX_HOME", pathlib.Path.home() / ".fx"))
         self.instructions = os.environ.get("HATCHERY_AGENT_INSTRUCTIONS", "")
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.sign_commits = None
 
     async def handle(self, raw: dict) -> None:
         task_id = str(raw.get("task_id") or "")
@@ -89,8 +111,10 @@ class Runtime:
         try:
             self.configure_fx(model=model)
             self.prepare_workspace(self.workspace)
-            env = os.environ.copy()
+            env = agent_environment()
             env["FX_AUTO_UPGRADE"] = "0"
+            env["HATCHERY_ACTIVE_TASK"] = task_id
+            env["HATCHERY_WORKSPACE"] = self.workspace
             session = TTYSession(task_id, self.fx_command(resume=resume), self.workspace, 80, 24, env)
             self.processes[task_id] = session
             with Handler.sessions_lock:
@@ -669,6 +693,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     sessions: dict[str, TTYSession] = {}
     sessions_lock = threading.Lock()
     workspace = "/vercel/sandbox"
+    runtime: Runtime | None = None
 
     @classmethod
     def list_sessions(cls) -> list[dict]:
@@ -707,6 +732,55 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_error(404)
 
     def do_POST(self) -> None:
+        loopback = self.client_address[0] in ("127.0.0.1", "::1")
+        if self.path in ("/pr-created", "/sign-commits"):
+            if not loopback:
+                self.send_error(403)
+                return
+            body = self._json()
+            if self.path == "/pr-created":
+                url = str(body.get("url") or "")
+                if not re.fullmatch(r"https://github\.com/[^/\s]+/[^/\s]+/pull/\d+", url):
+                    self.send_error(400)
+                    return
+                runtime = self.runtime
+                task_id = str(body.get("task_id") or "")
+                if body.get("workspace") != self.workspace:
+                    self.send_error(403)
+                    return
+                if runtime is not None and task_id:
+                    asyncio.run_coroutine_threadsafe(
+                        runtime._emit(task_id, "task.output", {"pull_request": body}),
+                        runtime.loop,
+                    )
+                self._send_json({"ok": True})
+                return
+            if self.runtime is None or self.runtime.sign_commits is None:
+                self.send_error(503, "commit signing is not configured")
+                return
+            repo = body.get("repo") or {}
+            owner = str(repo.get("owner") or "")
+            name = str(repo.get("name") or "")
+            requested = [str(item.get("sha") or "") for item in body.get("commits") or []]
+            try:
+                origin = subprocess.run(
+                    ["git", "-C", self.workspace, "remote", "get-url", "origin"],
+                    text=True, capture_output=True, check=True,
+                ).stdout.strip()
+                match = re.search(r"github\.com[/:]([^/]+)/([^/#]+?)(?:\.git)?$", origin)
+                if match is None or (owner, name) != match.groups() or not requested:
+                    raise ValueError("sign request does not match the workspace repository")
+                for sha in requested:
+                    subprocess.run(
+                        ["git", "-C", self.workspace, "cat-file", "-e", f"{sha}^{{commit}}"],
+                        capture_output=True, check=True,
+                    )
+                signed = self.runtime.sign_commits(body)
+            except Exception as error:
+                self.send_error(502, str(error))
+                return
+            self._send_json({"signed_shas": signed})
+            return
         if not self._authorized():
             return
         parts = self.path.strip("/").split("/")
@@ -724,6 +798,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self.workspace,
                     int(body.get("cols", 80)),
                     int(body.get("rows", 24)),
+                    agent_environment(),
                 )
                 self.sessions[session_id] = session
         if session is None:
@@ -757,14 +832,58 @@ def source() -> str:
     return pathlib.Path(__file__).read_text(encoding="utf-8")
 
 
+async def _sign_commits(connect, connector: str, request: dict) -> list[str]:
+    import httpx
+
+    token = await connect.get_token(connector, subject=connect.ConnectAppTokenSubject())
+    repo = request.get("repo") or {}
+    owner = str(repo.get("owner") or "")
+    name = str(repo.get("name") or "")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", owner) or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
+        raise ValueError("invalid GitHub repository")
+    signed: list[str] = []
+    headers = {
+        "authorization": f"Bearer {token}",
+        "accept": "application/vnd.github+json",
+        "x-github-api-version": "2022-11-28",
+    }
+    async with httpx.AsyncClient(base_url="https://api.github.com", headers=headers, timeout=60) as client:
+        for commit in request.get("commits") or []:
+            parents = [signed[-1]] if signed else [str(item) for item in commit.get("parents") or []]
+            body = {
+                "message": str(commit.get("message") or ""),
+                "tree": str(commit.get("tree_sha") or ""),
+                "parents": parents,
+            }
+            author = commit.get("original_author")
+            if isinstance(author, dict) and author.get("name") and author.get("email"):
+                trailer = f"Co-Authored-By: {author['name']} <{author['email']}>"
+                if trailer not in body["message"]:
+                    body["message"] = body["message"].rstrip() + f"\n\n{trailer}\n"
+            response = await client.post(f"/repos/{owner}/{name}/git/commits", json=body)
+            response.raise_for_status()
+            signed.append(str(response.json()["sha"]))
+    return signed
+
+
 async def run(worker_id: str, workspace: str, port: int, state_path: str) -> None:
-    from vercel import queue
+    from vercel import connect, queue
 
     async def publish(event: dict) -> None:
         await queue.send("hatchery-worker-events-v1", event, idempotency_key=event["id"])
 
     runtime = Runtime(worker_id, workspace, publish, state_path)
+    connector = os.environ.get("GITHUB_CONNECTOR", "")
+    if connector:
+        def sign_commits(request: dict) -> list[str]:
+            future = asyncio.run_coroutine_threadsafe(
+                _sign_commits(connect, connector, request), runtime.loop
+            )
+            return future.result(timeout=300)
+        runtime.sign_commits = sign_commits
+    runtime.loop = asyncio.get_running_loop()
     Handler.workspace = workspace
+    Handler.runtime = runtime
     server = http.server.ThreadingHTTPServer(("0.0.0.0", port), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

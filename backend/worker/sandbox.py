@@ -4,16 +4,40 @@ import asyncio
 import base64
 import dataclasses
 import os
+import pathlib
 
 import httpx
 from vercel import sandbox as vercel_sandbox
 
-from worker import models
+from worker import git, models
 from worker.daemon import main as daemon_main
 
 DAEMON_PORT = 8787
 DAEMON_PATH = "/opt/hatchery/daemon.py"
 DAEMON_STATE_PATH = "/opt/hatchery/daemon-state.json"
+GIT_RUNTIME_PATH = "/opt/hatchery/git_runtime.py"
+SHIM_PATH = "/opt/hatchery/bin"
+
+# The worker adapter exposes the retained behavioral surface while the shared
+# implementation lives in worker.git and is copied into each sandbox.
+configure_git_auth = git.configure_git_auth
+configure_gh = git.configure_gh
+run_gh = git.run_gh
+parse_pr_url = git.parse_pr_url
+is_pr_create = git.is_pr_create
+validate_pr_url = git.validate_pr_url
+find_pr_url = git.find_pr_url
+record_pr = git.record_pr
+git_credentials = git.git_credentials
+parse_git_args = git.parse_git_args
+neutralize_commit_signing = git.neutralize_commit_signing
+needs_signed_push = git.needs_signed_push
+push_with_signing_fallback = git.push_with_signing_fallback
+scrub_git_config_env = git.scrub_git_config_env
+first_unsigned_commit = git.first_unsigned_commit
+sign_request = git.sign_request
+is_signed_by_app = git.is_signed_by_app
+origin_owner_repo = git.origin_owner_repo
 
 
 @dataclasses.dataclass(frozen=True)
@@ -26,12 +50,15 @@ async def provision(
     worker_id: str, spec: models.WorkerSpec, daemon_token: str
 ) -> Provisioned:
     name = f"hatchery-{worker_id}"
+    credential = await git.git_credentials()
     source = None
     if spec.repos:
         revision = spec.git_sha or spec.branch
         source = vercel_sandbox.GitSource(
             url=f"https://github.com/{spec.repos[0]}.git",
             revision=revision,
+            username="x-access-token" if credential else None,
+            password=credential,
         )
     resources = None
     if spec.vcpus is not None or spec.memory is not None:
@@ -42,6 +69,7 @@ async def provision(
         ports=list(dict.fromkeys([*spec.ports, DAEMON_PORT])),
         resources=resources,
         persistent=True,
+        network_policy=git.github_network_policy(credential),
         tags={"hatchery-worker": worker_id},
     )
     process = None
@@ -69,6 +97,8 @@ async def destroy(name: str) -> None:
 
 async def resume(name: str, worker_id: str, spec: models.WorkerSpec, token: str) -> None:
     box = await vercel_sandbox.resume_sandbox(name=name)
+    await box.update_network_policy(git.github_network_policy(await git.git_credentials()))
+    await git.configure(box)
     await box.create_process(
         "python3",
         [DAEMON_PATH, "--port", str(DAEMON_PORT), "--worker-id", worker_id, "--workspace", _workspace(spec), "--state", DAEMON_STATE_PATH],
@@ -78,18 +108,25 @@ async def resume(name: str, worker_id: str, spec: models.WorkerSpec, token: str)
 
 async def _bootstrap(box, worker_id: str, spec: models.WorkerSpec, token: str):
     await box.fs.mkdir("/opt/hatchery")
+    await box.fs.mkdir(SHIM_PATH)
     await box.fs.write_text(DAEMON_PATH, daemon_main.source(), mode=0o755)
+    await box.fs.write_text(GIT_RUNTIME_PATH, pathlib.Path(git.__file__).read_text(encoding="utf-8"), mode=0o755)
+    shim = f"#!/bin/sh\nexec python3 {GIT_RUNTIME_PATH} $(basename \"$0\") \"$@\"\n"
+    await box.fs.write_text(f"{SHIM_PATH}/git", shim, mode=0o755)
+    await box.fs.write_text(f"{SHIM_PATH}/gh", shim, mode=0o755)
     await box.run_process(
         "/bin/sh",
         [
             "-lc",
             "set -e; python3 -c 'from vercel import queue' 2>/dev/null || "
             "python3 -m pip install --disable-pip-version-check 'vercel-queue==0.7.3'; "
+            "command -v gh >/dev/null || true; "
             "command -v fx >/dev/null || curl -fsSL https://fx.sh/setup.sh | bash",
         ],
         check=True,
         capture_output=True,
     )
+    await git.configure(box)
     for repo in spec.repos[1:]:
         await box.run_process(
             "git",
@@ -210,6 +247,7 @@ def _daemon_env(worker_id: str, spec: models.WorkerSpec, token: str) -> dict[str
     for name in (
         "VERCEL_OIDC_TOKEN",
         "AI_GATEWAY_API_KEY",
+        "GITHUB_CONNECTOR",
         "VERCEL_QUEUE_TOKEN",
         "VERCEL_QUEUE_BASE_URL",
         "VERCEL_REGION",

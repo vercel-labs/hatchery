@@ -104,6 +104,7 @@ class Task(pydantic.BaseModel):
     active_question: str | None = None
     active_question_id: str | None = None
     open_tool_calls: list[str] = []
+    pull_requests: list[dict[str, str]] = []
     last_agent_event_at: str | None = None
     last_agent_words: str | None = None
     launch_attempts: int = 0
