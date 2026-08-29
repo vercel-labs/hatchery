@@ -17,7 +17,7 @@ def test_health_is_authenticated(monkeypatch):
         with urllib.request.urlopen(
             urllib.request.Request(url, headers={"authorization": "Bearer secret"})
         ) as response:
-            assert response.read() == b'{"ok": true, "version": 3}'
+            assert response.read() == b'{"ok": true, "version": 4}'
         try:
             urllib.request.urlopen(url)
         except urllib.error.HTTPError as error:

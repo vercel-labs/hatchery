@@ -5,10 +5,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import collections
 import datetime
 import fcntl
 import hashlib
+import http
 import http.server
+import ipaddress
 import json
 import os
 import pathlib
@@ -20,10 +23,17 @@ import subprocess
 import termios
 import threading
 import time
+import urllib.parse
 import uuid
 
-VERSION = 3
+import asyncssh
+import websockets.asyncio.server
+
+VERSION = 4
 REPLAY_LIMIT = 1024 * 1024
+SSH_PORT = 8788
+SSH_INTERNAL_PORT = 8022
+SSH_STREAM_GRACE = 300
 
 
 def _now() -> str:
@@ -689,6 +699,266 @@ class TTYSession:
             pass
 
 
+def allow_ssh_forward(host: str) -> bool:
+    """Allow SSH forwarding only to services bound inside this sandbox."""
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+class SSHServer(asyncssh.SSHServer):
+    def begin_auth(self, username: str) -> bool:
+        return False
+
+    def connection_requested(
+        self, dest_host: str, dest_port: int, orig_host: str, orig_port: int
+    ) -> bool:
+        return allow_ssh_forward(dest_host)
+
+    def server_requested(self, listen_host: str, listen_port: int) -> bool:
+        return False
+
+
+async def run_ssh_process(process: asyncssh.SSHServerProcess, workspace: str) -> None:
+    """Run an SSH shell or exec with normal PTY and pipe semantics."""
+    command = process.command or "/bin/bash -l"
+    env = agent_environment()
+    env.update({str(name): str(value) for name, value in process.env.items()})
+    if process.term_type:
+        env["TERM"] = process.term_type
+        child = TTYSession(
+            f"ssh_{uuid.uuid4().hex}",
+            ["/bin/sh", "-lc", command],
+            workspace,
+            process.term_size[0] or 80,
+            process.term_size[1] or 24,
+            env,
+        )
+
+        async def input_to_pty() -> None:
+            while child.exit_code is None:
+                try:
+                    data = await process.stdin.read(65536)
+                except asyncssh.TerminalSizeChanged as changed:
+                    child.resize(changed.width, changed.height)
+                    continue
+                if not data:
+                    return
+                child.write(data)
+
+        async def pty_to_output() -> None:
+            offset = 0
+            while True:
+                start, data, exit_code = await asyncio.to_thread(child.read, offset, 1)
+                if data:
+                    process.stdout.write(data)
+                    offset = start + len(data)
+                if exit_code is not None:
+                    process.exit(exit_code)
+                    return
+
+        tasks = [asyncio.create_task(input_to_pty()), asyncio.create_task(pty_to_output())]
+        try:
+            await tasks[1]
+        finally:
+            tasks[0].cancel()
+        return
+
+    child = await asyncio.create_subprocess_exec(
+        "/bin/sh",
+        "-lc",
+        command,
+        cwd=workspace,
+        env=env,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
+    )
+
+    async def copy_input() -> None:
+        assert child.stdin is not None
+        while data := await process.stdin.read(65536):
+            child.stdin.write(data)
+            await child.stdin.drain()
+        child.stdin.close()
+
+    async def copy_output(reader: asyncio.StreamReader, writer) -> None:
+        while data := await reader.read(65536):
+            writer.write(data)
+
+    assert child.stdout is not None and child.stderr is not None
+    input_task = asyncio.create_task(copy_input())
+    try:
+        await asyncio.gather(
+            copy_output(child.stdout, process.stdout),
+            copy_output(child.stderr, process.stderr),
+        )
+        process.exit(await child.wait())
+    finally:
+        input_task.cancel()
+
+
+class SSHStream:
+    """A TCP connection to the SSH server which survives WebSocket replacement."""
+
+    def __init__(self, stream_id: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        self.id = stream_id
+        self.reader = reader
+        self.writer = writer
+        self.output = bytearray()
+        self.base_offset = 0
+        self.input_offset = 0
+        self.condition = asyncio.Condition()
+        self.closed = False
+        self.last_attached = time.monotonic()
+        self.reader_task = asyncio.create_task(self._read())
+
+    async def _read(self) -> None:
+        try:
+            while data := await self.reader.read(65536):
+                async with self.condition:
+                    self.output.extend(data)
+                    if len(self.output) > REPLAY_LIMIT:
+                        drop = len(self.output) - REPLAY_LIMIT
+                        del self.output[:drop]
+                        self.base_offset += drop
+                    self.condition.notify_all()
+        finally:
+            async with self.condition:
+                self.closed = True
+                self.condition.notify_all()
+
+    async def write(self, offset: int, data: bytes) -> None:
+        if offset > self.input_offset:
+            raise ValueError("SSH input has a gap")
+        overlap = self.input_offset - offset
+        if overlap < len(data):
+            self.writer.write(data[overlap:])
+            await self.writer.drain()
+            self.input_offset += len(data) - overlap
+
+    async def read(self, offset: int) -> tuple[int, bytes, bool]:
+        async with self.condition:
+            if offset < self.base_offset:
+                offset = self.base_offset
+            while offset >= self.base_offset + len(self.output) and not self.closed:
+                await self.condition.wait()
+            start = offset - self.base_offset
+            return offset, bytes(self.output[start:]), self.closed
+
+    async def close(self) -> None:
+        self.writer.close()
+        await self.writer.wait_closed()
+
+
+class SSHService:
+    def __init__(self, workspace: str):
+        self.workspace = workspace
+        self.streams: dict[str, SSHStream] = {}
+        self.ssh_server = None
+        self.websocket_server = None
+        self.ssh_port = SSH_INTERNAL_PORT
+        self.websocket_port = SSH_PORT
+
+    async def start(self, websocket_port: int = SSH_PORT, ssh_port: int = SSH_INTERNAL_PORT) -> None:
+        self.websocket_port = websocket_port
+        self.ssh_port = ssh_port
+        key_path = pathlib.Path(os.environ.get("HATCHERY_SSH_HOST_KEY", "/opt/hatchery/ssh_host_key"))
+        key_path.parent.mkdir(parents=True, exist_ok=True)
+        if key_path.exists():
+            host_key = asyncssh.read_private_key(key_path)
+        else:
+            host_key = asyncssh.generate_private_key("ssh-ed25519")
+            key_path.write_bytes(host_key.export_private_key())
+            key_path.chmod(0o600)
+        self.ssh_server = await asyncssh.create_server(
+            SSHServer,
+            "127.0.0.1",
+            ssh_port,
+            server_host_keys=[host_key],
+            process_factory=lambda process: run_ssh_process(process, self.workspace),
+            encoding=None,
+            line_editor=False,
+        )
+        self.ssh_port = self.ssh_server.get_port()
+        self.websocket_server = await websockets.asyncio.server.serve(
+            self.handle,
+            "0.0.0.0",
+            websocket_port,
+            process_request=self.authorize,
+            max_size=None,
+            compression=None,
+        )
+        self.websocket_port = self.websocket_server.sockets[0].getsockname()[1]
+
+    async def authorize(self, connection, request):
+        token = os.environ.get("HATCHERY_DAEMON_TOKEN", "")
+        if token and request.headers.get("authorization") == f"Bearer {token}":
+            return None
+        return connection.respond(http.HTTPStatus.UNAUTHORIZED, "unauthorized\n")
+
+    async def handle(self, websocket) -> None:
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(websocket.request.path).query)
+        requested = query.get("stream_id", ["new"])[0]
+        output_offset = int(query.get("offset", ["0"])[0])
+        if requested == "new":
+            reader, writer = await asyncio.open_connection("127.0.0.1", self.ssh_port)
+            stream = SSHStream(f"ssh_{uuid.uuid4().hex}", reader, writer)
+            self.streams[stream.id] = stream
+        else:
+            stream = self.streams.get(requested)
+            if stream is None:
+                await websocket.close(4404, "stream not found")
+                return
+        stream.last_attached = time.monotonic()
+        await websocket.send(json.dumps({
+            "stream_id": stream.id,
+            "offset": max(output_offset, stream.base_offset),
+            "input_offset": stream.input_offset,
+        }))
+
+        async def upload() -> None:
+            async for message in websocket:
+                if not isinstance(message, bytes) or len(message) < 8:
+                    continue
+                await stream.write(int.from_bytes(message[:8], "big"), message[8:])
+
+        async def download() -> None:
+            offset = output_offset
+            while True:
+                start, data, closed = await stream.read(offset)
+                if data:
+                    await websocket.send(start.to_bytes(8, "big") + data)
+                    offset = start + len(data)
+                if closed:
+                    await websocket.close()
+                    return
+
+        tasks = [asyncio.create_task(upload()), asyncio.create_task(download())]
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+        for task in done:
+            if not task.cancelled():
+                task.result()
+        if stream.closed:
+            self.streams.pop(stream.id, None)
+
+    async def stop(self) -> None:
+        for stream in list(self.streams.values()):
+            await stream.close()
+        if self.websocket_server is not None:
+            self.websocket_server.close()
+            await self.websocket_server.wait_closed()
+        if self.ssh_server is not None:
+            self.ssh_server.close()
+            await self.ssh_server.wait_closed()
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     sessions: dict[str, TTYSession] = {}
     sessions_lock = threading.Lock()
@@ -887,6 +1157,8 @@ async def run(worker_id: str, workspace: str, port: int, state_path: str) -> Non
     server = http.server.ThreadingHTTPServer(("0.0.0.0", port), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
+    ssh = SSHService(workspace)
+    await ssh.start()
     try:
         while True:
             delivered = False
@@ -902,6 +1174,7 @@ async def run(worker_id: str, workspace: str, port: int, state_path: str) -> Non
             if not delivered:
                 await asyncio.sleep(1)
     finally:
+        await ssh.stop()
         server.shutdown()
         server.server_close()
 

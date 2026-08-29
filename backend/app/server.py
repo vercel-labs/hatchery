@@ -24,6 +24,7 @@ import fastapi
 import fastapi.middleware.cors
 import fastapi.responses
 import pydantic
+import websockets.asyncio.client
 
 import ai
 import ai.ui.ai_sdk.outbound_stream
@@ -643,6 +644,54 @@ async def _bridge_tty(
         for task in done:
             task.result()
     except fastapi.WebSocketDisconnect:
+        pass
+    finally:
+        with contextlib.suppress(RuntimeError):
+            await ws.close()
+
+
+@app.websocket("/api/chats/{chat_id}/sandboxes/{sandbox_id}/ssh")
+async def sandbox_ssh(ws: fastapi.WebSocket, chat_id: str, sandbox_id: str) -> None:
+    record = await worker.get(sandbox_id)
+    if record is None or record.chat_id != chat_id:
+        await ws.accept()
+        await ws.close(code=4404, reason="unknown sandbox")
+        return
+    url, headers = worker.sandbox.ssh(record)
+    query = str(ws.url.query)
+    if query:
+        url += "?" + query
+    await ws.accept()
+    try:
+        async with websockets.asyncio.client.connect(
+            url, additional_headers=headers, max_size=None, compression=None
+        ) as upstream:
+            async def down() -> None:
+                async for message in upstream:
+                    if isinstance(message, bytes):
+                        await ws.send_bytes(message)
+                    else:
+                        await ws.send_text(message)
+
+            async def up() -> None:
+                while True:
+                    message = await ws.receive()
+                    if message["type"] == "websocket.disconnect":
+                        return
+                    if message.get("bytes") is not None:
+                        await upstream.send(message["bytes"])
+                    elif message.get("text") is not None:
+                        await upstream.send(message["text"])
+
+            done, pending = await asyncio.wait(
+                [asyncio.create_task(down()), asyncio.create_task(up())],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            for task in done:
+                task.result()
+    except (fastapi.WebSocketDisconnect, websockets.ConnectionClosed):
         pass
     finally:
         with contextlib.suppress(RuntimeError):

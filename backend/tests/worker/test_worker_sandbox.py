@@ -17,7 +17,10 @@ async def test_provision_creates_persistent_sandbox_and_checks_daemon(monkeypatc
 
     class Box:
         fs = Files()
-        routes = [types.SimpleNamespace(port=8787, url="https://daemon.example")]
+        routes = [
+            types.SimpleNamespace(port=8787, url="https://daemon.example"),
+            types.SimpleNamespace(port=8788, url="https://ssh.example"),
+        ]
 
         async def run_process(self, command, args, **options):
             calls.setdefault("runs", []).append((command, args, options))
@@ -34,7 +37,7 @@ async def test_provision_creates_persistent_sandbox_and_checks_daemon(monkeypatc
             pass
 
         def json(self):
-            return {"ok": True, "version": 3}
+            return {"ok": True, "version": 4}
 
     class Client:
         def __init__(self, timeout):
@@ -59,7 +62,7 @@ async def test_provision_creates_persistent_sandbox_and_checks_daemon(monkeypatc
     assert calls["options"]["persistent"] is True
     assert "vercel-queue==0.7.3" in calls["runs"][0][1][1]
     assert "fx.sh/setup.sh" in calls["runs"][0][1][1]
-    assert calls["options"]["ports"] == [8787]
+    assert calls["options"]["ports"] == [8787, 8788]
     assert calls["process"][2]["HATCHERY_DAEMON_TOKEN"] == "secret"
     assert calls["process"][2]["HATCHERY_WORKER_ID"] == "wrk_1"
     assert calls["process"][2]["FX_PERMISSION_MODE"] == "yolo"
@@ -84,7 +87,7 @@ async def test_wait_for_daemon_retries_route_warmup(monkeypatch):
                 )
 
         def json(self):
-            return {"ok": True, "version": 3}
+            return {"ok": True, "version": 4}
 
     class Client:
         def __init__(self, timeout):
@@ -107,7 +110,7 @@ async def test_wait_for_daemon_retries_route_warmup(monkeypatch):
 
     health = await sandbox._wait_for_daemon("https://daemon.example", "secret")
 
-    assert health == {"ok": True, "version": 3}
+    assert health == {"ok": True, "version": 4}
     assert calls == 2
 
 

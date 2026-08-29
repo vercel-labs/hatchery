@@ -1,3 +1,3 @@
 """Code installed inside each worker sandbox."""
 
-VERSION = 3
+VERSION = 4

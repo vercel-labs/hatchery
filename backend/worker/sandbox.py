@@ -13,6 +13,7 @@ from worker import git, models
 from worker.daemon import main as daemon_main
 
 DAEMON_PORT = 8787
+SSH_PORT = 8788
 DAEMON_PATH = "/opt/hatchery/daemon.py"
 DAEMON_STATE_PATH = "/opt/hatchery/daemon-state.json"
 GIT_RUNTIME_PATH = "/opt/hatchery/git_runtime.py"
@@ -66,7 +67,7 @@ async def provision(
     box, created = await vercel_sandbox.get_or_create_sandbox(
         name=name,
         source=source,
-        ports=list(dict.fromkeys([*spec.ports, DAEMON_PORT])),
+        ports=list(dict.fromkeys([*spec.ports, DAEMON_PORT, SSH_PORT])),
         resources=resources,
         persistent=True,
         network_policy=git.github_network_policy(credential),
@@ -118,8 +119,9 @@ async def _bootstrap(box, worker_id: str, spec: models.WorkerSpec, token: str):
         "/bin/sh",
         [
             "-lc",
-            "set -e; python3 -c 'from vercel import queue' 2>/dev/null || "
-            "python3 -m pip install --disable-pip-version-check 'vercel-queue==0.7.3'; "
+            "set -e; python3 -c 'from vercel import queue; import asyncssh, websockets' 2>/dev/null || "
+            "python3 -m pip install --disable-pip-version-check 'vercel-queue==0.7.3' "
+            "'asyncssh>=2.21,<3' 'websockets>=15,<17'; "
             "command -v gh >/dev/null || true; "
             "command -v fx >/dev/null || curl -fsSL https://fx.sh/setup.sh | bash",
         ],
@@ -154,6 +156,19 @@ def daemon_url(record: models.Worker) -> str:
     if route is None:
         raise RuntimeError("sandbox daemon route is unavailable")
     return route.url.rstrip("/")
+
+
+def ssh(record: models.Worker) -> tuple[str, dict[str, str]]:
+    """Return the authenticated SSH WebSocket endpoint for any environment."""
+    route = next((route for route in record.routes if route.port == SSH_PORT), None)
+    if route is None:
+        raise RuntimeError("sandbox SSH route is unavailable")
+    url = route.url.rstrip("/")
+    if url.startswith("https://"):
+        url = "wss://" + url.removeprefix("https://")
+    elif url.startswith("http://"):
+        url = "ws://" + url.removeprefix("http://")
+    return url, {"authorization": f"Bearer {record.daemon_token}"}
 
 
 async def tty_read(
