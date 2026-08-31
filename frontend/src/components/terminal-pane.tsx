@@ -59,7 +59,7 @@ function tabs(box: SandboxWorkspace | undefined): TerminalTab[] {
   ].sort((left, right) => left.created_at.localeCompare(right.created_at));
 }
 
-function CopyValue({ label, value }: { label: string; value: string }) {
+function CopyContext({ value }: { value: string }) {
   const [copied, setCopied] = useState(false);
 
   const copy = async () => {
@@ -69,16 +69,9 @@ function CopyValue({ label, value }: { label: string; value: string }) {
   };
 
   return (
-    <Button
-      variant="ghost"
-      size="xs"
-      className="min-w-0 max-w-full font-mono"
-      title={value}
-      onClick={() => void copy()}
-    >
-      <span className="shrink-0 text-muted-foreground">{label}</span>
-      <span className="truncate">{value}</span>
+    <Button variant="outline" size="xs" onClick={() => void copy()}>
       {copied ? <CheckIcon /> : <CopyIcon />}
+      {copied ? "copied" : "copy"}
     </Button>
   );
 }
@@ -271,13 +264,28 @@ export function TerminalPane({
   const activeTabs = tabs(activeSandbox);
   const activeTab =
     activeTabs.find((tab) => tab.id === selectedTabId) ?? activeTabs.at(-1);
-  const deploymentUrl = apiBase() ||
-    (typeof window === "undefined" ? "<deployment-url>" : window.location.origin);
-  const sandboxCommand = activeSandbox
-    ? `uv run --project backend python backend/diagnostics.py sandbox shell --url ${deploymentUrl} --chat ${chatId} --sandbox ${activeSandbox.id}`
-    : "";
-  const taskCommand = activeTab?.kind === "subagent"
-    ? `uv run --project backend python backend/diagnostics.py task attach --url ${deploymentUrl} --chat ${chatId} --task ${activeTab.task_id}`
+  const context = activeSandbox
+    ? JSON.stringify(
+        {
+          sandbox: {
+            id: activeSandbox.id,
+            name: activeSandbox.sandbox_name,
+            status: activeSandbox.status,
+          },
+          ...(activeTab?.kind === "subagent"
+            ? {
+                task: {
+                  id: activeTab.task_id,
+                  title: activeTab.title,
+                  fx_session_id: activeTab.fx_session_id,
+                  status: activeTab.status,
+                },
+              }
+            : {}),
+        },
+        null,
+        2,
+      )
     : "";
 
   const selectSandbox = (box: SandboxWorkspace) => {
@@ -385,13 +393,6 @@ export function TerminalPane({
           <XIcon />
         </Button>
       </div>
-      {activeSandbox && (
-        <div className="flex shrink-0 flex-wrap items-center gap-1 border-b px-2 py-1">
-          <CopyValue label="sandbox" value={activeSandbox.id} />
-          <CopyValue label="vercel" value={activeSandbox.sandbox_name} />
-          <CopyValue label="shell" value={sandboxCommand} />
-        </div>
-      )}
       <div className="flex h-9 shrink-0 items-center gap-1 overflow-x-auto border-b px-2">
         {activeTabs.map((tab, index) => (
           <div key={tab.id} className="flex shrink-0 items-center">
@@ -428,20 +429,19 @@ export function TerminalPane({
           <PlusIcon />
         </Button>
       </div>
-      {activeTab?.kind === "subagent" && (
-        <div className="flex shrink-0 flex-wrap items-center gap-1 border-b px-2 py-1">
-          <CopyValue label="task" value={activeTab.task_id} />
-          {activeTab.fx_session_id && (
-            <CopyValue label="fx" value={activeTab.fx_session_id} />
-          )}
-          <CopyValue label="attach" value={taskCommand} />
-        </div>
-      )}
       {activeTab ? (
         <TaskTerminal key={activeTab.id} chatId={chatId} tab={activeTab} />
       ) : (
         <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-muted-foreground">
           {activeSandbox?.status === "failed" ? "Sandbox failed" : "Sandbox ready"}
+        </div>
+      )}
+      {activeSandbox && (
+        <div className="flex shrink-0 items-start gap-2 border-t p-2">
+          <pre className="min-w-0 flex-1 overflow-auto text-xs text-muted-foreground">
+            {context}
+          </pre>
+          <CopyContext value={context} />
         </div>
       )}
     </div>
