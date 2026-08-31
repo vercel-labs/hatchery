@@ -15,3 +15,4 @@ async def test_send_uses_worker_topic_and_protocol_id(monkeypatch):
     assert seen["topic"] == protocol.command_topic("wrk_1")
     assert seen["payload"]["version"] == 1
     assert seen["options"]["idempotency_key"] == command.id
+    assert seen["options"]["deployment"] is queue.vercel_queue.ALL_DEPLOYMENTS

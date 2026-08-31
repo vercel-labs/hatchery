@@ -14,7 +14,7 @@ def _now() -> str:
 
 
 async def _send_command(record: models.Worker, command: protocol.Command) -> None:
-    await sandbox.refresh_queue_auth(record)
+    await sandbox.prepare_for_command(record)
     await queue.send(command)
 
 
@@ -119,18 +119,17 @@ async def launch_task(
         payload={"prompt": prompt, "model": model},
         command_id=command_id,
     )
+    try:
+        await _send_command(record, command)
+    except Exception:
+        task.launch_attempts += 1
+        task.updated_at = _now()
+        await store.save_task(task)
+        raise
     if resume_required:
-        try:
-            await sandbox.resume_for_command(record)
-        except Exception:
-            task.launch_attempts += 1
-            task.updated_at = _now()
-            await store.save_task(task)
-            raise
         record.status = "running"
         record.updated_at = _now()
         await store.save(record)
-    await _send_command(record, command)
     return task
 
 

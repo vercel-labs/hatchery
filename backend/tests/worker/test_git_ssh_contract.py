@@ -110,7 +110,7 @@ def test_ssh_websocket_fallback_contract(scenario):
         ("gh_pr_create_and_capture", "run_gh"),
         ("signed_commit_required_repository", "push_with_signing_fallback"),
         ("queue_redelivery_after_handler_crash", "redeliver_command"),
-        ("persist_command_resume_then_consume", "resume_for_command"),
+        ("persist_command_resume_then_consume", "prepare_for_command"),
         ("existing_sandbox_repairs_dead_daemon", "repair_daemon"),
         ("sandbox_snapshot_create_and_restore", "snapshot"),
     ],

@@ -11,5 +11,8 @@ async def send(command: protocol.Command) -> str | None:
         protocol.command_topic(command.worker_id),
         command.model_dump(mode="json"),
         idempotency_key=command.id,
+        # Worker topics must survive control-plane deployments. Omitting the
+        # deployment header selects the shared partition; it is not a wildcard.
+        deployment=vercel_queue.ALL_DEPLOYMENTS,
     )
     return str(message_id) if message_id is not None else None

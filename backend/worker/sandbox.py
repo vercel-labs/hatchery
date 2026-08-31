@@ -22,6 +22,7 @@ SHIM_PATH = "/opt/hatchery/bin"
 AI_GATEWAY_HOST = "ai-gateway.vercel.sh"
 AI_GATEWAY_PLACEHOLDER = "sandbox-network-policy-placeholder"
 QUEUE_TOKEN_PLACEHOLDER = "sandbox-queue-policy-placeholder"
+EXECUTION_TIME_LIMIT = 24 * 60 * 60
 
 # The worker adapter exposes the retained behavioral surface while the shared
 # implementation lives in worker.git and is copied into each sandbox.
@@ -76,10 +77,12 @@ async def provision(
         ports=list(dict.fromkeys([*spec.ports, DAEMON_PORT, SSH_PORT])),
         resources=resources,
         persistent=True,
+        execution_time_limit=EXECUTION_TIME_LIMIT,
         network_policy=network_policy,
         env={"AI_GATEWAY_API_KEY": AI_GATEWAY_PLACEHOLDER},
         tags={"hatchery-worker": worker_id},
     )
+    await box.update(execution_time_limit=EXECUTION_TIME_LIMIT)
     await box.update_network_policy(await _network_policy(credential, box.region))
     process = None
     if created:
@@ -109,16 +112,16 @@ async def resume(name: str, worker_id: str, spec: models.WorkerSpec, token: str)
     await repair_daemon(box, worker_id, spec, token, routes)
 
 
-async def resume_for_command(record: models.Worker) -> None:
-    """Resume and verify a stopped worker before its durable command is published."""
-    await resume(record.sandbox_name, record.id, record.spec, record.daemon_token)
-
-
-async def refresh_queue_auth(record: models.Worker) -> None:
-    """Rotate the Queue credential injected at the sandbox network boundary."""
-    box = await vercel_sandbox.get_sandbox(name=record.sandbox_name)
+async def prepare_for_command(record: models.Worker) -> None:
+    """Acquire a live session, rotate Queue auth, and verify the daemon."""
+    box = await vercel_sandbox.resume_sandbox(name=record.sandbox_name)
+    await box.update(execution_time_limit=EXECUTION_TIME_LIMIT)
     await box.update_network_policy(
         await _network_policy(await git.git_credentials(), box.region)
+    )
+    routes = [models.Route(port=route.port, url=route.url) for route in box.routes]
+    await repair_daemon(
+        box, record.id, record.spec, record.daemon_token, routes
     )
 
 

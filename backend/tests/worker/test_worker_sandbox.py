@@ -29,6 +29,10 @@ async def test_provision_creates_persistent_sandbox_and_checks_daemon(monkeypatc
             types.SimpleNamespace(port=8788, url="https://ssh.example"),
         ]
 
+        async def update(self, **options):
+            calls["update"] = options
+            return self
+
         async def update_network_policy(self, policy):
             calls["network_policy"] = policy
 
@@ -79,6 +83,8 @@ async def test_provision_creates_persistent_sandbox_and_checks_daemon(monkeypatc
 
     assert provisioned.sandbox_name == "hatchery-wrk_1"
     assert calls["options"]["persistent"] is True
+    assert calls["options"]["execution_time_limit"] == sandbox.EXECUTION_TIME_LIMIT
+    assert calls["update"] == {"execution_time_limit": sandbox.EXECUTION_TIME_LIMIT}
     bootstrap = calls["runs"][0][1][1]
     for package in ("vercel-queue", "vercel-connect", "asyncssh", "websockets"):
         assert package in bootstrap
@@ -248,6 +254,55 @@ async def test_existing_sandbox_repairs_dead_daemon(monkeypatch):
     assert "pkill" in calls["process"][1][1]
     assert f"exec python3 {sandbox.DAEMON_PATH}" in calls["process"][1][1]
     assert f">>{sandbox.DAEMON_LOG_PATH} 2>&1" in calls["process"][1][1]
+
+
+async def test_prepare_for_command_resumes_and_repairs_daemon(monkeypatch):
+    calls = []
+
+    class Box:
+        region = "iad1"
+        routes = [types.SimpleNamespace(port=8787, url="https://daemon.example")]
+
+        async def update(self, **options):
+            calls.append(("update", options))
+            return self
+
+        async def update_network_policy(self, policy):
+            calls.append(("policy", policy))
+
+    async def resume_sandbox(name):
+        calls.append(("resume", name))
+        return Box()
+
+    async def credentials():
+        return None
+
+    async def network_policy(credential, region):
+        assert (credential, region) == (None, "iad1")
+        return "queue-policy"
+
+    async def repair(box, worker_id, spec, token, routes):
+        calls.append(("repair", worker_id, token, routes))
+
+    monkeypatch.setattr(sandbox.vercel_sandbox, "resume_sandbox", resume_sandbox)
+    monkeypatch.setattr(sandbox.git, "git_credentials", credentials)
+    monkeypatch.setattr(sandbox, "_network_policy", network_policy)
+    monkeypatch.setattr(sandbox, "repair_daemon", repair)
+    record = models.Worker(
+        id="wrk_1", chat_id="chat_1", sandbox_name="hatchery-wrk_1",
+        command_topic="topic", title="worker", status="running",
+        spec=models.WorkerSpec(), daemon_token="secret",
+        created_at="now", updated_at="now",
+    )
+
+    await sandbox.prepare_for_command(record)
+
+    assert calls == [
+        ("resume", "hatchery-wrk_1"),
+        ("update", {"execution_time_limit": sandbox.EXECUTION_TIME_LIMIT}),
+        ("policy", "queue-policy"),
+        ("repair", "wrk_1", "secret", [models.Route(port=8787, url="https://daemon.example")]),
+    ]
 
 
 async def test_probe_route_rejects_undeclared_port():
