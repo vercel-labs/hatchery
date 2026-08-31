@@ -109,6 +109,7 @@ class Task(pydantic.BaseModel):
     last_agent_words: str | None = None
     launch_attempts: int = 0
     result: dict[str, typing.Any] | None = None
+    telemetry_span: dict[str, typing.Any] | None = None
     completion_delivered: bool = False
     created_at: str
     updated_at: str

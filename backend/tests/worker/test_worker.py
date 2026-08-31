@@ -1,3 +1,4 @@
+import ai.experimental_telemetry
 import pytest
 
 from worker import models, protocol, sandbox, worker
@@ -63,13 +64,16 @@ async def test_launch_and_follow_up_publish_ordered_commands(monkeypatch):
     monkeypatch.setattr(worker.sandbox, "provision", provision)
     created = await worker.create("chat_1", models.WorkerSpec())
 
-    task = await worker.launch_task("chat_1", created.id, "fix it", "openai/test")
-    task.completion_delivered = True
-    await worker.store.save_task(task)
-    task = await worker.send_task_input("chat_1", task.id, "also test it")
+    async with ai.experimental_telemetry.use_sink(ai.experimental_telemetry.DictSink()):
+        task = await worker.launch_task("chat_1", created.id, "fix it", "openai/test")
+        task.completion_delivered = True
+        await worker.store.save_task(task)
+        task = await worker.send_task_input("chat_1", task.id, "also test it")
 
     assert [command.type for command in sent] == ["task.launch", "task.input"]
     assert [command.sequence for command in sent] == [0, 1]
+    assert task.telemetry_span is not None
+    assert task.telemetry_span["name"] == "hatchery.agent_run"
     assert task.command_sequence == 1
     assert task.completion_delivered is False
     with pytest.raises(ValueError, match="does not belong"):

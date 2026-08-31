@@ -9,6 +9,7 @@ from websockets.frames import Close
 from websockets.http11 import Response
 
 import ai
+import ai.experimental_telemetry
 import channels
 from app import server
 from store import chats, events
@@ -788,6 +789,56 @@ async def test_task_readiness_requires_actual_daemon_session(monkeypatch):
     readiness = await server.task_readiness("chat_1", "task_1")
 
     assert readiness["session_ready"] is True
+
+
+async def test_worker_event_continues_and_closes_agent_run(monkeypatch):
+    seen = []
+
+    @ai.experimental_telemetry.adapter
+    async def capture(span):
+        yield
+        seen.append(span)
+
+    ai.experimental_telemetry.register(capture)
+    parent = ai.experimental_telemetry.create_span("hatchery.agent_run").stamp_start()
+    task = server.worker.Task(
+        id="task_trace",
+        chat_id="chat_trace",
+        worker_id="wrk_trace",
+        title="trace",
+        prompt="trace it",
+        model="openai/test",
+        telemetry_span=parent.model_dump(mode="json"),
+        created_at="2026-08-31T00:00:00+00:00",
+        updated_at="2026-08-31T00:00:00+00:00",
+    )
+    await server.worker.store.save_task(task)
+
+    async def complete(task):
+        pass
+
+    monkeypatch.setattr(server, "complete_worker_task", complete)
+    try:
+        await server.worker_event(
+            server.worker_protocol.Event(
+                id="evt_trace",
+                worker_id=task.worker_id,
+                task_id=task.id,
+                sequence=0,
+                type="task.completed",
+                created_at="2026-08-31T00:00:01+00:00",
+                payload={"summary": "done"},
+            )
+        )
+    finally:
+        ai.experimental_telemetry.unregister(capture)
+
+    ingest = next(span for span in seen if span.name == "worker.event.ingest")
+    assert ingest.trace_id == parent.trace_id
+    assert ingest.parent_id == parent.id
+    stored = await server.worker.store.get_task(task.id)
+    assert stored is not None
+    assert stored.telemetry_span["ended_at"] is not None
 
 
 def test_worker_event_subscriber_is_serialized():

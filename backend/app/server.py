@@ -810,23 +810,48 @@ async def manual_tty(ws: fastapi.WebSocket, chat_id: str, terminal_id: str) -> N
 )
 async def worker_event(event: worker_protocol.Event) -> None:
     """Persist one at-least-once worker event and wake the owning chat."""
+    task = await worker.store.get_task(event.task_id) if event.task_id else None
+    parent = (
+        ai.experimental_telemetry.Span[
+            ai.experimental_telemetry.CustomSpanData
+        ].model_validate(task.telemetry_span)
+        if task is not None and task.telemetry_span
+        else None
+    )
+    terminal = False
     try:
-        async with ai.experimental_telemetry.span("worker.event.ingest") as span:
-            span.set_attrs(
-                {
-                    "worker.id": event.worker_id,
-                    "task.id": event.task_id or "",
-                    "event.id": event.id,
-                },
-                event_type=event.type,
-                sequence=event.sequence,
-            )
-            task, changed = await worker.ingest(event)
-            span.set_attrs(applied=changed)
-            if task is not None:
-                span.set_attrs({"chat.id": task.chat_id}, task_state=task.status)
-            if changed and task is not None and task.status in ("attention", "complete", "errored"):
-                await complete_worker_task(task)
+        async with ai.experimental_telemetry.use_span(parent):
+            async with ai.experimental_telemetry.span("worker.event.ingest") as span:
+                span.set_attrs(
+                    {
+                        "worker.id": event.worker_id,
+                        "task.id": event.task_id or "",
+                        "event.id": event.id,
+                    },
+                    event_type=event.type,
+                    sequence=event.sequence,
+                )
+                task, changed = await worker.ingest(event)
+                span.set_attrs(applied=changed)
+                if task is not None:
+                    span.set_attrs({"chat.id": task.chat_id}, task_state=task.status)
+                terminal = bool(
+                    changed
+                    and task is not None
+                    and task.status in ("complete", "errored")
+                )
+                if changed and task is not None and task.status in ("attention", "complete", "errored"):
+                    await complete_worker_task(task)
+        if terminal and task is not None and parent is not None:
+            parent.set_attrs(task_state=task.status)
+            parent.stamp_end()
+
+            def close_run(current: worker.Task) -> worker.Task:
+                current.telemetry_span = parent.model_dump(mode="json")
+                return current
+
+            await worker.store.mutate_task(task.id, close_run)
+            await parent.push()
     finally:
         telemetry.flush()
 

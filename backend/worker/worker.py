@@ -15,22 +15,27 @@ def _now() -> str:
     return datetime.datetime.now(datetime.UTC).isoformat()
 
 
-async def _send_command(record: models.Worker, command: protocol.Command) -> None:
-    async with ai.experimental_telemetry.span("worker.command") as span:
-        span.set_attrs(
-            {
-                "chat.id": record.chat_id,
-                "worker.id": record.id,
-                "task.id": command.task_id or "",
-                "command.id": command.id,
-            },
-            command_type=command.type,
-            sequence=command.sequence,
-            worker_state=record.status,
-        )
-        await sandbox.prepare_for_command(record)
-        message_id = await queue.send(command)
-        span.set_attrs({"queue.message_id": message_id or ""})
+async def _send_command(
+    record: models.Worker,
+    command: protocol.Command,
+    parent: ai.experimental_telemetry.Span | None = None,
+) -> None:
+    async with ai.experimental_telemetry.use_span(parent):
+        async with ai.experimental_telemetry.span("worker.command") as span:
+            span.set_attrs(
+                {
+                    "chat.id": record.chat_id,
+                    "worker.id": record.id,
+                    "task.id": command.task_id or "",
+                    "command.id": command.id,
+                },
+                command_type=command.type,
+                sequence=command.sequence,
+                worker_state=record.status,
+            )
+            await sandbox.prepare_for_command(record)
+            message_id = await queue.send(command)
+            span.set_attrs({"queue.message_id": message_id or ""})
 
 
 async def create(chat_id: str, spec: models.WorkerSpec) -> models.Worker:
@@ -115,13 +120,24 @@ async def launch_task(
         raise RuntimeError("sandbox is not available")
     resume_required = record.status == "stopped"
     now = _now()
+    resolved_task_id = task_id or f"task_{uuid.uuid4().hex[:12]}"
+    run_span = ai.experimental_telemetry.create_span("hatchery.agent_run").stamp_start()
+    if run_span.id:
+        run_span.trace_id = f"trace_{uuid.uuid4().hex}"
+        run_span.parent_id = None
+        run_span.trace_attrs = {}
+    run_span.set_attrs(
+        {"chat.id": chat_id, "worker.id": worker_id, "task.id": resolved_task_id},
+        model=model,
+    )
     task = models.Task(
-        id=task_id or f"task_{uuid.uuid4().hex[:12]}",
+        id=resolved_task_id,
         chat_id=chat_id,
         worker_id=worker_id,
         title=prompt.strip().splitlines()[0][:80] or "subagent",
         prompt=prompt,
         model=model,
+        telemetry_span=run_span.model_dump(mode="json") if run_span.id else None,
         inputs=[models.TaskInput(
             id=f"input_{uuid.uuid4().hex}",
             sequence=0,
@@ -142,10 +158,15 @@ async def launch_task(
         command_id=command_id,
     )
     try:
-        await _send_command(record, command)
-    except Exception:
+        await _send_command(record, command, run_span)
+    except Exception as error:
         task.launch_attempts += 1
         task.updated_at = _now()
+        if run_span.id:
+            run_span.set_attrs(task_state="launch_failed")
+            run_span.stamp_end(error=error)
+            task.telemetry_span = run_span.model_dump(mode="json")
+            await run_span.push()
         await store.save_task(task)
         raise
     if resume_required:
@@ -181,6 +202,13 @@ async def send_task_input(chat_id: str, task_id: str, prompt: str) -> models.Tas
     if task is None:
         raise KeyError(task_id)
     record = await _required(task.worker_id)
+    parent = (
+        ai.experimental_telemetry.Span[
+            ai.experimental_telemetry.CustomSpanData
+        ].model_validate(task.telemetry_span)
+        if task.telemetry_span
+        else None
+    )
     await _send_command(
         record,
         protocol.command(
@@ -190,6 +218,7 @@ async def send_task_input(chat_id: str, task_id: str, prompt: str) -> models.Tas
             task_id=task.id,
             payload={"prompt": prompt},
         ),
+        parent,
     )
     return task
 
@@ -236,6 +265,13 @@ async def cancel_task(chat_id: str, task_id: str) -> models.Task:
     task.command_sequence += 1
     task.status = "cancelled"
     task.updated_at = _now()
+    parent = (
+        ai.experimental_telemetry.Span[
+            ai.experimental_telemetry.CustomSpanData
+        ].model_validate(task.telemetry_span)
+        if task.telemetry_span
+        else None
+    )
     await store.save_task(task)
     record = await _required(task.worker_id)
     await _send_command(
@@ -246,7 +282,14 @@ async def cancel_task(chat_id: str, task_id: str) -> models.Task:
             "task.cancel",
             task_id=task.id,
         ),
+        parent,
     )
+    if parent is not None and parent.ended_at is None:
+        parent.set_attrs(task_state=task.status)
+        parent.stamp_end()
+        task.telemetry_span = parent.model_dump(mode="json")
+        await store.save_task(task)
+        await parent.push()
     return task
 
 
