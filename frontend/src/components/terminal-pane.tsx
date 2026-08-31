@@ -59,9 +59,10 @@ function tabs(box: SandboxWorkspace | undefined): TerminalTab[] {
 
 function TaskTerminal({ chatId, tab }: { chatId: string; tab: TerminalTab }) {
   const hostRef = useRef<HTMLDivElement>(null);
-  const [status, setStatus] = useState<"connecting" | "live" | "exited">(
-    "connecting",
-  );
+  const [status, setStatus] = useState<
+    "waiting" | "connecting" | "live" | "exited" | "error"
+  >(tab.kind === "subagent" && tab.status === "pending" ? "waiting" : "connecting");
+  const [detail, setDetail] = useState("");
 
   useEffect(() => {
     const host = hostRef.current;
@@ -72,6 +73,8 @@ function TaskTerminal({ chatId, tab }: { chatId: string; tab: TerminalTab }) {
     let disposed = false;
     let offset = 0;
     let exited = false;
+    let sessionReady = tab.kind === "manual" || tab.status !== "pending";
+    let waitingDetail = "waiting for sandbox queue";
 
     const boot = async () => {
       const [{ Terminal }, { FitAddon }] = await Promise.all([
@@ -110,6 +113,33 @@ function TaskTerminal({ chatId, tab }: { chatId: string; tab: TerminalTab }) {
 
       const connect = () => {
         if (disposed || exited) return;
+        if (!sessionReady) {
+          setStatus("waiting");
+          setDetail(waitingDetail);
+          retry = setTimeout(async () => {
+            try {
+              const response = await fetch(
+                `${apiBase()}/api/chats/${chatId}/subagents/${tab.id}/readiness`,
+              );
+              if (response.ok) {
+                const readiness = await response.json();
+                sessionReady = readiness.session_ready;
+                waitingDetail =
+                  readiness.daemon?.queue_error ||
+                  (readiness.daemon?.queue_connected === false
+                    ? "sandbox queue is disconnected"
+                    : "waiting for sandbox queue");
+                setDetail(waitingDetail);
+              }
+            } catch {
+              setDetail("readiness check failed");
+            }
+            connect();
+          }, 1500);
+          return;
+        }
+        setStatus("connecting");
+        setDetail("");
         const path =
           tab.kind === "manual"
             ? `terminals/${tab.id}`
@@ -122,6 +152,7 @@ function TaskTerminal({ chatId, tab }: { chatId: string; tab: TerminalTab }) {
           if (frame.type === "handshake") {
             offset = frame.body.offset;
             setStatus("live");
+            setDetail("");
           } else if (frame.type === "tty-output") {
             const bytes = Uint8Array.from(atob(frame.body.data), (c) =>
               c.charCodeAt(0),
@@ -134,9 +165,15 @@ function TaskTerminal({ chatId, tab }: { chatId: string; tab: TerminalTab }) {
             term.write(`\r\n[session exited: ${frame.body.code}]\r\n`);
           }
         };
-        ws.onclose = () => {
+        ws.onclose = (event) => {
           if (disposed || exited) return;
-          setStatus("connecting");
+          const reason = event.reason || `connection closed (${event.code})`;
+          setDetail(reason);
+          if (event.code === 4404 || event.code === 4409) {
+            setStatus("waiting");
+          } else {
+            setStatus("error");
+          }
           retry = setTimeout(connect, 1500);
         };
       };
@@ -155,7 +192,7 @@ function TaskTerminal({ chatId, tab }: { chatId: string; tab: TerminalTab }) {
       ws?.close();
       void cleanup.then((dispose) => dispose?.());
     };
-  }, [chatId, tab.id, tab.kind]);
+  }, [chatId, tab.id, tab.kind, tab.status]);
 
   return (
     <>
@@ -166,11 +203,13 @@ function TaskTerminal({ chatId, tab }: { chatId: string; tab: TerminalTab }) {
               ? "size-2 rounded-full bg-emerald-500"
               : status === "exited"
                 ? "size-2 rounded-full bg-muted-foreground"
-                : "size-2 animate-pulse rounded-full bg-amber-500"
+                : status === "error"
+                  ? "size-2 rounded-full bg-destructive"
+                  : "size-2 animate-pulse rounded-full bg-amber-500"
           }
         />
         <span className="truncate text-xs text-muted-foreground">
-          {tab.title} — {status}
+          {tab.title} — {status}{detail ? `: ${detail}` : ""}
         </span>
       </div>
       <div ref={hostRef} className="min-h-0 flex-1 bg-[#0a0a0a] p-2" />

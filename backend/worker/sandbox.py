@@ -16,6 +16,7 @@ DAEMON_PORT = 8787
 SSH_PORT = 8788
 DAEMON_PATH = "/opt/hatchery/daemon.py"
 DAEMON_STATE_PATH = "/opt/hatchery/daemon-state.json"
+DAEMON_LOG_PATH = "/opt/hatchery/daemon.log"
 GIT_RUNTIME_PATH = "/opt/hatchery/git_runtime.py"
 SHIM_PATH = "/opt/hatchery/bin"
 AI_GATEWAY_HOST = "ai-gateway.vercel.sh"
@@ -130,7 +131,7 @@ async def repair_daemon(
     if process is None:
         try:
             health = await _daemon_health(daemon_route.url, token)
-            if health == {"ok": True, "version": daemon_main.VERSION}:
+            if health.get("ok") is True and health.get("version") == daemon_main.VERSION:
                 return
         except (httpx.HTTPError, ValueError):
             pass
@@ -138,7 +139,7 @@ async def repair_daemon(
         await box.fs.write_text(DAEMON_PATH, daemon_main.source(), mode=0o755)
         process = await _start_daemon(box, worker_id, spec, token)
     health = await _wait_for_daemon(daemon_route.url, token, process)
-    if health != {"ok": True, "version": daemon_main.VERSION}:
+    if health.get("ok") is not True or health.get("version") != daemon_main.VERSION:
         raise RuntimeError("sandbox daemon returned an incompatible health response")
 
 
@@ -194,7 +195,8 @@ async def _start_daemon(box, worker_id: str, spec: models.WorkerSpec, token: str
         "/bin/sh",
         [
             "-lc",
-            f"pkill -f '^python3 {DAEMON_PATH}( |$)' 2>/dev/null || true; {command}",
+            f"pkill -f '^python3 {DAEMON_PATH}( |$)' 2>/dev/null || true; "
+            f"{command} >>{DAEMON_LOG_PATH} 2>&1",
         ],
         env=_daemon_env(worker_id, spec, token),
     )
@@ -277,6 +279,25 @@ def tty(record: models.Worker) -> tuple[str, dict[str, str]]:
     """Return the daemon's authenticated streaming TTY endpoint."""
     url, headers = ssh(record)
     return url + "/tty", headers
+
+
+async def daemon_health(record: models.Worker) -> dict:
+    return await _daemon_get(record, "/health")
+
+
+async def tty_sessions(record: models.Worker) -> list[dict]:
+    response = await _daemon_get(record, "/tty")
+    return list(response.get("sessions") or [])
+
+
+async def _daemon_get(record: models.Worker, path: str) -> dict:
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.get(
+            f"{daemon_url(record)}{path}",
+            headers={"authorization": f"Bearer {record.daemon_token}"},
+        )
+        response.raise_for_status()
+        return response.json()
 
 
 async def _daemon_health(url: str, token: str) -> dict:

@@ -708,6 +708,116 @@ async def test_worker_completion_persists_and_delivers_message(monkeypatch):
     assert (await chats.get(chat.id)).status == "done"
 
 
+async def test_task_readiness_reports_queue_state(monkeypatch):
+    task = server.worker.Task(
+        id="task_1", chat_id="chat_1", worker_id="wrk_1", title="fix",
+        prompt="fix it", model="openai/test",
+        created_at="2026-08-31T00:00:00+00:00",
+        updated_at="2026-08-31T00:00:00+00:00",
+    )
+    record = type("Worker", (), {"id": "wrk_1"})()
+
+    async def get_task(chat_id, task_id):
+        return task
+
+    async def get_worker(worker_id):
+        return record
+
+    async def daemon_health(found):
+        assert found is record
+        return {
+            "ok": True,
+            "version": 6,
+            "queue_connected": False,
+            "queue_error": "HTTP 502: tunnel offline",
+        }
+
+    async def tty_sessions(found):
+        assert found is record
+        return []
+
+    monkeypatch.setattr(server.worker, "get_task", get_task)
+    monkeypatch.setattr(server.worker, "get", get_worker)
+    monkeypatch.setattr(server.worker.sandbox, "daemon_health", daemon_health)
+    monkeypatch.setattr(server.worker.sandbox, "tty_sessions", tty_sessions)
+
+    readiness = await server.task_readiness("chat_1", "task_1")
+
+    assert readiness == {
+        "state": "pending",
+        "session_ready": False,
+        "daemon": {
+            "ok": True,
+            "version": 6,
+            "queue_connected": False,
+            "queue_error": "HTTP 502: tunnel offline",
+        },
+    }
+
+
+async def test_task_readiness_requires_actual_daemon_session(monkeypatch):
+    task = server.worker.Task(
+        id="task_1", chat_id="chat_1", worker_id="wrk_1", title="fix",
+        prompt="fix it", model="openai/test", status="running",
+        created_at="2026-08-31T00:00:00+00:00",
+        updated_at="2026-08-31T00:00:00+00:00",
+    )
+    record = type("Worker", (), {"id": "wrk_1"})()
+
+    async def get_task(chat_id, task_id):
+        return task
+
+    async def get_worker(worker_id):
+        return record
+
+    async def daemon_health(found):
+        return {"ok": True, "queue_connected": True, "queue_error": None}
+
+    async def tty_sessions(found):
+        return [{"id": "task_1", "running": True}]
+
+    monkeypatch.setattr(server.worker, "get_task", get_task)
+    monkeypatch.setattr(server.worker, "get", get_worker)
+    monkeypatch.setattr(server.worker.sandbox, "daemon_health", daemon_health)
+    monkeypatch.setattr(server.worker.sandbox, "tty_sessions", tty_sessions)
+
+    readiness = await server.task_readiness("chat_1", "task_1")
+
+    assert readiness["session_ready"] is True
+
+
+async def test_task_tty_rejects_pending_subagent(monkeypatch):
+    task = server.worker.Task(
+        id="task_1", chat_id="chat_1", worker_id="wrk_1", title="fix",
+        prompt="fix it", model="openai/test",
+        created_at="2026-08-31T00:00:00+00:00",
+        updated_at="2026-08-31T00:00:00+00:00",
+    )
+
+    async def get_task(chat_id, task_id):
+        return task
+
+    monkeypatch.setattr(server.worker, "get_task", get_task)
+    ws = FakeWebSocket()
+
+    await server.task_tty(ws, "chat_1", "task_1")
+
+    assert ws.closed == (4409, "subagent is waiting for the sandbox queue")
+
+
+class FakeWebSocket:
+    def __init__(self):
+        self.accepted = False
+        self.closed = None
+
+    async def accept(self):
+        self.accepted = True
+
+    async def close(self, code=1000, reason=None):
+        assert self.accepted
+        self.closed = (code, reason)
+
+
 async def test_task_tty_rejects_unknown_subagent():
     class FakeWebSocket:
         def __init__(self):

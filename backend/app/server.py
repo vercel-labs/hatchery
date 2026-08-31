@@ -712,12 +712,44 @@ async def sandbox_ssh(ws: fastapi.WebSocket, chat_id: str, sandbox_id: str) -> N
             await ws.close()
 
 
+@app.get("/api/chats/{chat_id}/subagents/{subagent_id}/readiness")
+async def task_readiness(chat_id: str, subagent_id: str) -> dict:
+    task = await worker.get_task(chat_id, subagent_id)
+    if task is None:
+        raise fastapi.HTTPException(404, "unknown subagent")
+    record = await worker.get(task.worker_id)
+    if record is None:
+        raise fastapi.HTTPException(404, "unknown sandbox")
+    try:
+        daemon, sessions = await asyncio.gather(
+            worker.sandbox.daemon_health(record),
+            worker.sandbox.tty_sessions(record),
+        )
+    except Exception as error:
+        log.warning("daemon readiness failed for sandbox %s: %s", record.id, error)
+        daemon = {
+            "ok": False,
+            "queue_connected": False,
+            "queue_error": "sandbox daemon is unreachable",
+        }
+        sessions = []
+    return {
+        "state": task.status,
+        "session_ready": any(session.get("id") == task.id for session in sessions),
+        "daemon": daemon,
+    }
+
+
 @app.websocket("/api/chats/{chat_id}/subagents/{subagent_id}/tty")
 async def task_tty(ws: fastapi.WebSocket, chat_id: str, subagent_id: str) -> None:
     task = await worker.get_task(chat_id, subagent_id)
     if task is None:
         await ws.accept()
         await ws.close(code=4404, reason="unknown subagent")
+        return
+    if task.status == "pending":
+        await ws.accept()
+        await ws.close(code=4409, reason="subagent is waiting for the sandbox queue")
         return
     record = await worker.get(task.worker_id)
     if record is None:

@@ -17,7 +17,12 @@ def test_health_is_authenticated(monkeypatch):
         with urllib.request.urlopen(
             urllib.request.Request(url, headers={"authorization": "Bearer secret"})
         ) as response:
-            assert response.read() == b'{"ok": true, "version": 5}'
+            assert json.loads(response.read()) == {
+                "ok": True,
+                "version": main.VERSION,
+                "queue_connected": False,
+                "queue_error": None,
+            }
         try:
             urllib.request.urlopen(url)
         except urllib.error.HTTPError as error:
@@ -87,6 +92,38 @@ async def test_runtime_runs_interactive_fx_and_reuses_it_for_follow_up(monkeypat
     ]
     assert [event["type"] for event in emitted] == ["task.started", "task.started"]
     assert [event["sequence"] for event in emitted] == [0, 1]
+    assert main.Handler.sessions["task_1"] is session
+
+
+async def test_queue_poll_failure_is_reported_and_retried():
+    attempts = 0
+    sleeps = []
+
+    class Queue:
+        def poll(self, *args, **kwargs):
+            async def deliveries():
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise RuntimeError("tunnel offline")
+                raise asyncio.CancelledError
+                yield
+            return deliveries()
+
+    async def sleep(delay):
+        sleeps.append(delay)
+
+    main.Handler.queue_connected = False
+    main.Handler.queue_error = None
+    try:
+        await main.poll_commands(Queue(), object(), "wrk_1", sleep)
+    except asyncio.CancelledError:
+        pass
+
+    assert attempts == 2
+    assert sleeps == [2]
+    assert main.Handler.queue_connected is False
+    assert main.Handler.queue_error == "RuntimeError: tunnel offline"
 
 
 async def test_command_is_not_acknowledged_when_process_handoff_fails(monkeypatch, tmp_path):

@@ -44,7 +44,7 @@ async def test_provision_creates_persistent_sandbox_and_checks_daemon(monkeypatc
             pass
 
         def json(self):
-            return {"ok": True, "version": 5}
+            return {"ok": True, "version": sandbox.daemon_main.VERSION}
 
     class Client:
         def __init__(self, timeout):
@@ -115,7 +115,7 @@ async def test_wait_for_daemon_retries_route_warmup(monkeypatch):
                 )
 
         def json(self):
-            return {"ok": True, "version": 5}
+            return {"ok": True, "version": sandbox.daemon_main.VERSION}
 
     class Client:
         def __init__(self, timeout):
@@ -138,7 +138,7 @@ async def test_wait_for_daemon_retries_route_warmup(monkeypatch):
 
     health = await sandbox._wait_for_daemon("https://daemon.example", "secret")
 
-    assert health == {"ok": True, "version": 5}
+    assert health == {"ok": True, "version": sandbox.daemon_main.VERSION}
     assert calls == 2
 
 
@@ -192,7 +192,7 @@ async def test_existing_sandbox_repairs_dead_daemon(monkeypatch):
             calls["process"] = (command, args, env)
             return Process()
 
-    health = iter([httpx.ConnectError("down"), {"ok": True, "version": 5}])
+    health = iter([httpx.ConnectError("down"), {"ok": True, "version": sandbox.daemon_main.VERSION}])
 
     async def daemon_health(url, token):
         result = next(health)
@@ -212,6 +212,7 @@ async def test_existing_sandbox_repairs_dead_daemon(monkeypatch):
     assert calls["process"][0] == "/bin/sh"
     assert "pkill" in calls["process"][1][1]
     assert f"exec python3 {sandbox.DAEMON_PATH}" in calls["process"][1][1]
+    assert f">>{sandbox.DAEMON_LOG_PATH} 2>&1" in calls["process"][1][1]
 
 
 async def test_probe_route_rejects_undeclared_port():

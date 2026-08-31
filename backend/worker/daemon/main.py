@@ -20,6 +20,7 @@ import re
 import signal
 import struct
 import subprocess
+import sys
 import termios
 import threading
 import time
@@ -29,7 +30,7 @@ import uuid
 import asyncssh
 import websockets.asyncio.server
 
-VERSION = 5
+VERSION = 6
 REPLAY_LIMIT = 1024 * 1024
 SSH_PORT = 8788
 SSH_INTERNAL_PORT = 8022
@@ -124,7 +125,6 @@ class Runtime:
             self._save_state()
 
     async def _launch(self, task_id: str, prompt: str, model: str, *, resume: bool) -> None:
-        await self._emit(task_id, "task.started", {})
         try:
             self.configure_fx(model=model)
             self.prepare_workspace(self.workspace)
@@ -138,6 +138,7 @@ class Runtime:
             self._save_state()
             with Handler.sessions_lock:
                 Handler.sessions[task_id] = session
+            await self._emit(task_id, "task.started", {})
             stream = asyncio.create_task(self._stream_task(task_id, session))
             self.streams.add(stream)
             stream.add_done_callback(self.streams.discard)
@@ -1087,6 +1088,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
     sessions_lock = threading.Lock()
     workspace = "/vercel"
     runtime: Runtime | None = None
+    queue_connected = False
+    queue_error: str | None = None
 
     @classmethod
     def list_sessions(cls) -> list[dict]:
@@ -1117,7 +1120,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not self._authorized():
             return
         if self.path == "/health":
-            self._send_json({"ok": True, "version": VERSION})
+            self._send_json({
+                "ok": True,
+                "version": VERSION,
+                "queue_connected": self.queue_connected,
+                "queue_error": self.queue_error,
+            })
             return
         if self.path == "/tty":
             self._send_json({"sessions": self.list_sessions()})
@@ -1259,6 +1267,34 @@ async def _sign_commits(connect, connector: str, request: dict) -> list[str]:
     return signed
 
 
+async def poll_commands(queue, runtime: Runtime, worker_id: str, sleep=asyncio.sleep) -> None:
+    while True:
+        delivered = False
+        try:
+            async for delivery in queue.poll(
+                f"hatchery-worker-{worker_id}-commands-v1",
+                f"hatchery-daemon-{worker_id}",
+                limit=10,
+                lease_duration=300,
+            ):
+                Handler.queue_connected = True
+                Handler.queue_error = None
+                delivered = True
+                await redeliver_command(delivery, runtime)
+            Handler.queue_connected = True
+            Handler.queue_error = None
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            Handler.queue_connected = False
+            Handler.queue_error = f"{type(error).__name__}: {error}"[:500]
+            print(f"queue poll failed: {Handler.queue_error}", file=sys.stderr, flush=True)
+            await sleep(2)
+            continue
+        if not delivered:
+            await sleep(1)
+
+
 async def redeliver_command(delivery, runtime: Runtime) -> None:
     """Acknowledge a Queue command only after durable runtime acceptance."""
     async with delivery as message:
@@ -1290,18 +1326,7 @@ async def run(worker_id: str, workspace: str, port: int, state_path: str) -> Non
     ssh = SSHService(workspace)
     await ssh.start()
     try:
-        while True:
-            delivered = False
-            async for delivery in queue.poll(
-                f"hatchery-worker-{worker_id}-commands-v1",
-                f"hatchery-daemon-{worker_id}",
-                limit=10,
-                lease_duration=300,
-            ):
-                delivered = True
-                await redeliver_command(delivery, runtime)
-            if not delivered:
-                await asyncio.sleep(1)
+        await poll_commands(queue, runtime, worker_id)
     finally:
         await ssh.stop()
         server.shutdown()
