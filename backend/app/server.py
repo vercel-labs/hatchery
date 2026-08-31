@@ -564,6 +564,7 @@ async def chat_sandboxes(chat_id: str) -> list[dict]:
             {
                 **task.model_dump(),
                 "sandbox_id": task.worker_id,
+                "task_id": task.id,
                 "session_id": task.id,
             }
             for task in tasks

@@ -81,7 +81,12 @@ def agent_for(chat: dict) -> ai.Agent:
         """Start an fx subagent in a sandbox."""
         yield "dispatching subagent…"
         created = await sandbox.launch_task(chat_id, sandbox_id, task, model)
-        yield {"subagent_id": created.id, "sandbox_id": created.worker_id, "state": created.status}
+        yield {
+            "subagent_id": created.id,
+            "task_id": created.id,
+            "sandbox_id": created.worker_id,
+            "state": created.status,
+        }
 
     @ai.tool
     async def message_subagent(

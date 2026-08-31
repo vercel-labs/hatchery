@@ -2,7 +2,7 @@
 
 import "@xterm/xterm/css/xterm.css";
 
-import { PlusIcon, XIcon } from "lucide-react";
+import { CheckIcon, CopyIcon, PlusIcon, XIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -12,8 +12,9 @@ export type SubagentTask = {
   id: string;
   sandbox_id: string;
   title: string;
-  task_id?: string;
-  session_id?: string;
+  task_id: string;
+  session_id: string;
+  fx_session_id?: string;
   status: string;
   created_at: string;
 };
@@ -29,6 +30,7 @@ export type ManualTerminal = {
 
 export type SandboxWorkspace = {
   id: string;
+  sandbox_name: string;
   title: string;
   status: string;
   created_at: string;
@@ -55,6 +57,30 @@ function tabs(box: SandboxWorkspace | undefined): TerminalTab[] {
     })),
     ...box.terminals.map((terminal) => ({ ...terminal, kind: "manual" as const })),
   ].sort((left, right) => left.created_at.localeCompare(right.created_at));
+}
+
+function CopyValue({ label, value }: { label: string; value: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const copy = async () => {
+    await navigator.clipboard.writeText(value);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1500);
+  };
+
+  return (
+    <Button
+      variant="ghost"
+      size="xs"
+      className="min-w-0 max-w-full font-mono"
+      title={value}
+      onClick={() => void copy()}
+    >
+      <span className="shrink-0 text-muted-foreground">{label}</span>
+      <span className="truncate">{value}</span>
+      {copied ? <CheckIcon /> : <CopyIcon />}
+    </Button>
+  );
 }
 
 function TaskTerminal({ chatId, tab }: { chatId: string; tab: TerminalTab }) {
@@ -245,6 +271,14 @@ export function TerminalPane({
   const activeTabs = tabs(activeSandbox);
   const activeTab =
     activeTabs.find((tab) => tab.id === selectedTabId) ?? activeTabs.at(-1);
+  const deploymentUrl = apiBase() ||
+    (typeof window === "undefined" ? "<deployment-url>" : window.location.origin);
+  const sandboxCommand = activeSandbox
+    ? `uv run --project backend python backend/diagnostics.py sandbox shell --url ${deploymentUrl} --chat ${chatId} --sandbox ${activeSandbox.id}`
+    : "";
+  const taskCommand = activeTab?.kind === "subagent"
+    ? `uv run --project backend python backend/diagnostics.py task attach --url ${deploymentUrl} --chat ${chatId} --task ${activeTab.task_id}`
+    : "";
 
   const selectSandbox = (box: SandboxWorkspace) => {
     setSelectedSandboxId(box.id);
@@ -351,6 +385,13 @@ export function TerminalPane({
           <XIcon />
         </Button>
       </div>
+      {activeSandbox && (
+        <div className="flex shrink-0 flex-wrap items-center gap-1 border-b px-2 py-1">
+          <CopyValue label="sandbox" value={activeSandbox.id} />
+          <CopyValue label="vercel" value={activeSandbox.sandbox_name} />
+          <CopyValue label="shell" value={sandboxCommand} />
+        </div>
+      )}
       <div className="flex h-9 shrink-0 items-center gap-1 overflow-x-auto border-b px-2">
         {activeTabs.map((tab, index) => (
           <div key={tab.id} className="flex shrink-0 items-center">
@@ -387,6 +428,15 @@ export function TerminalPane({
           <PlusIcon />
         </Button>
       </div>
+      {activeTab?.kind === "subagent" && (
+        <div className="flex shrink-0 flex-wrap items-center gap-1 border-b px-2 py-1">
+          <CopyValue label="task" value={activeTab.task_id} />
+          {activeTab.fx_session_id && (
+            <CopyValue label="fx" value={activeTab.fx_session_id} />
+          )}
+          <CopyValue label="attach" value={taskCommand} />
+        </div>
+      )}
       {activeTab ? (
         <TaskTerminal key={activeTab.id} chatId={chatId} tab={activeTab} />
       ) : (

@@ -645,9 +645,11 @@ async def test_sandbox_routes_use_chat_scoped_control_plane(monkeypatch):
     seen = {}
 
     class Record:
+        id = "wrk_1"
+
         def model_dump(self, exclude=None):
             assert exclude == {"daemon_token"}
-            return {"id": "wrk_1", "chat_id": chat.id, "title": "sandbox"}
+            return {"id": self.id, "chat_id": chat.id, "title": "sandbox"}
 
     async def list_all(chat_id):
         seen["listed"] = chat_id
@@ -657,6 +659,13 @@ async def test_sandbox_routes_use_chat_scoped_control_plane(monkeypatch):
         seen["created"] = (chat_id, launch)
         return Record()
 
+    task = server.worker.Task(
+        id="task_1", chat_id=chat.id, worker_id="wrk_1", title="fix",
+        prompt="fix it", model="openai/test", fx_session_id="fx_1",
+        created_at="2026-08-31T00:00:00+00:00",
+        updated_at="2026-08-31T00:00:00+00:00",
+    )
+    await server.worker.store.save_task(task)
     monkeypatch.setattr(server.sandbox, "list_all", list_all)
     monkeypatch.setattr(server.sandbox, "create", create)
 
@@ -674,6 +683,8 @@ async def test_sandbox_routes_use_chat_scoped_control_plane(monkeypatch):
     assert listed.status_code == 200
     assert created.status_code == 200
     assert listed.json()[0]["id"] == "wrk_1"
+    assert listed.json()[0]["subagents"][0]["task_id"] == "task_1"
+    assert listed.json()[0]["subagents"][0]["fx_session_id"] == "fx_1"
     assert created.json()["id"] == "wrk_1"
     assert seen["listed"] == chat.id
     assert seen["created"][0] == chat.id
