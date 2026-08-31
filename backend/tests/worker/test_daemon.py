@@ -97,6 +97,38 @@ async def test_runtime_runs_interactive_fx_and_reuses_it_for_follow_up(monkeypat
     assert main.Handler.sessions["task_1"] is session
 
 
+async def test_stream_drains_completion_buffered_after_process_exit(monkeypatch, tmp_path):
+    emitted = []
+
+    class Session:
+        exit_code = None
+
+        def wait(self):
+            return 0
+
+    session = Session()
+
+    async def publish(event):
+        emitted.append(event)
+
+    runtime = main.Runtime("wrk_1", str(tmp_path), publish)
+
+    def stream(*args, **kwargs):
+        yield {"type": "assistant", "text": "done", "session_id": "fx_1"}
+        session.exit_code = 0
+        yield {"type": "turn.completed", "session_id": "fx_1"}
+
+    monkeypatch.setattr(runtime, "stream_fx_events", stream)
+    runtime.processes["task_1"] = session
+    runtime.active["task_1"] = {"model": "openai/test"}
+
+    await runtime._stream_task("task_1", session)
+
+    assert [event["type"] for event in emitted] == ["task.output", "task.completed"]
+    assert emitted[-1]["payload"]["result"]["summary"] == "done"
+    assert "task_1" not in runtime.active
+
+
 async def test_queue_poll_failure_is_reported_and_retried():
     attempts = 0
     sleeps = []
