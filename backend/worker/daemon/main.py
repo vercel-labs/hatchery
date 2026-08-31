@@ -30,9 +30,11 @@ import uuid
 import asyncssh
 import websockets.asyncio.server
 
-VERSION = 9
+VERSION = 10
 REPLAY_LIMIT = 1024 * 1024
 FX_INPUT_READY = b"\x1b[?2004h"
+FX_INTERRUPT_SETTLE = 0.75
+FX_SUBMIT_BEAT = 1.0
 SSH_PORT = 8788
 SSH_INTERNAL_PORT = 8022
 SSH_STREAM_GRACE = 300
@@ -308,7 +310,9 @@ class Runtime:
                     return
             if not first:
                 session.write(b"\x03")
+                time.sleep(FX_INTERRUPT_SETTLE)
             session.write(b"\x1b[200~" + text.encode() + b"\x1b[201~")
+            time.sleep(FX_SUBMIT_BEAT)
             session.write(b"\r")
 
     def discover_fx_session(self, workspace: str) -> str | None:

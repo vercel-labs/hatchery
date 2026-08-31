@@ -149,24 +149,30 @@ def test_first_fx_delivery_waits_for_bracketed_paste_readiness():
     with session.condition:
         session.output.extend(main.FX_INPUT_READY)
         session.condition.notify_all()
-    thread.join(1)
+    thread.join(main.FX_SUBMIT_BEAT + 1)
     assert done.is_set()
 
 
-def test_first_fx_delivery_is_bracketed_paste_then_enter_without_interrupt():
+def test_first_fx_delivery_is_bracketed_paste_then_delayed_enter(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(main.time, "sleep", sleeps.append)
     runtime = main.Runtime("wrk", "/tmp", lambda event: None)
     session = _RecordedSession()
     session.output.extend(main.FX_INPUT_READY)
     _delivery(runtime, session, "first\nsecond", first=True)
     assert session.writes == [b"\x1b[200~first\nsecond\x1b[201~", b"\r"]
+    assert sleeps == [main.FX_SUBMIT_BEAT]
 
 
-def test_follow_up_interrupts_then_pastes_then_enters():
+def test_follow_up_settles_interrupt_and_paste_before_enter(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(main.time, "sleep", sleeps.append)
     runtime = main.Runtime("wrk", "/tmp", lambda event: None)
     session = _RecordedSession()
     session.output.extend(b"drawn")
     _delivery(runtime, session, "answer", first=False)
     assert session.writes == [b"\x03", b"\x1b[200~answer\x1b[201~", b"\r"]
+    assert sleeps == [main.FX_INTERRUPT_SETTLE, main.FX_SUBMIT_BEAT]
 
 
 def test_empty_fx_input_is_refused():
@@ -183,7 +189,8 @@ def test_input_to_exited_fx_session_reports_no_session():
         _delivery(runtime, session, "hello", first=False)
 
 
-def test_concurrent_fx_deliveries_do_not_interleave():
+def test_concurrent_fx_deliveries_do_not_interleave(monkeypatch):
+    monkeypatch.setattr(main.time, "sleep", lambda delay: None)
     runtime = main.Runtime("wrk", "/tmp", lambda event: None)
     session = _RecordedSession()
     session.output.extend(b"drawn")
@@ -197,7 +204,8 @@ def test_concurrent_fx_deliveries_do_not_interleave():
     assert session.writes[2::3] == [b"\r", b"\r"]
 
 
-def test_readiness_wait_is_paid_only_for_first_delivery():
+def test_readiness_wait_is_paid_only_for_first_delivery(monkeypatch):
+    monkeypatch.setattr(main.time, "sleep", lambda delay: None)
     runtime = main.Runtime("wrk", "/tmp", lambda event: None)
     session = _RecordedSession()
     session.output.extend(main.FX_INPUT_READY)
