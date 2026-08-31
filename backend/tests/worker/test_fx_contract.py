@@ -46,6 +46,29 @@ def test_fx_runtime_contract(scenario, capability):
     _require(main.Runtime, capability)
 
 
+def test_fx_session_discovery_skips_pointer_with_null_timestamp(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    latest = tmp_path / ".fx" / "sessions" / "latest"
+    latest.mkdir(parents=True)
+    (latest / "pointer.json").write_text(json.dumps({
+        "workspace_root": str(workspace),
+        "session_id": "session-initializing",
+        "updated_at_ms": None,
+    }))
+    runtime = main.Runtime("wrk", str(workspace), lambda event: None)
+
+    assert runtime.discover_fx_session(str(workspace)) is None
+
+    (latest / "pointer.json").write_text(json.dumps({
+        "workspace_root": str(workspace),
+        "session_id": "session-ready",
+        "updated_at_ms": 123,
+    }))
+    assert runtime.discover_fx_session(str(workspace)) == "session-ready"
+
+
 def test_fx_gateway_key_is_process_environment_only(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     runtime = main.Runtime("wrk", str(tmp_path), lambda event: None)

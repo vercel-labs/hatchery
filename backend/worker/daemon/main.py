@@ -30,7 +30,7 @@ import uuid
 import asyncssh
 import websockets.asyncio.server
 
-VERSION = 8
+VERSION = 9
 REPLAY_LIMIT = 1024 * 1024
 FX_INPUT_READY = b"\x1b[?2004h"
 SSH_PORT = 8788
@@ -326,7 +326,11 @@ class Runtime:
                 pointer = json.loads(path.read_text(encoding="utf-8"))
                 if str(pathlib.Path(pointer.get("workspace_root", "")).resolve()) != canonical:
                     continue
-                candidate = (int(pointer.get("updated_at_ms", 0)), str(pointer["session_id"]))
+                updated_at_ms = pointer.get("updated_at_ms")
+                session_id = pointer.get("session_id")
+                if not isinstance(updated_at_ms, int) or not isinstance(session_id, str):
+                    continue
+                candidate = (updated_at_ms, session_id)
                 if best is None or candidate[0] > best[0]:
                     best = candidate
             except (OSError, ValueError, KeyError, json.JSONDecodeError):
