@@ -204,26 +204,30 @@ async def delete_terminal(terminal_id: str) -> bool:
 
 
 async def apply_event(event) -> tuple[models.Task | None, bool]:
-    """Apply one ordered event atomically. Duplicate IDs and stale sequences are inert."""
+    """Apply one event atomically. Late transcript events remain observable."""
     if event.task_id is None:
         return None, False
     changed = False
 
     def apply(task: models.Task) -> models.Task | None:
         nonlocal changed
-        if event.id in task.event_ids or event.sequence <= task.event_sequence:
+        if event.id in task.event_ids:
             return None
-        changed = True
+        stale = event.sequence <= task.event_sequence
         task.event_ids.append(event.id)
-        task.event_sequence = event.sequence
-        task.last_agent_event_at = event.created_at
+        if stale and event.type not in ("task.output", "task.transcript"):
+            return task
+        changed = True
+        task.event_sequence = max(task.event_sequence, event.sequence)
+        task.last_agent_event_at = max(task.last_agent_event_at or "", event.created_at)
         if event.type == "task.started":
             task.status = "running"
             task.launch_attempts = 0
         elif event.type == "task.output":
             text = str(event.payload.get("text") or "").strip()
             if text:
-                task.last_agent_words = text
+                if not stale:
+                    task.last_agent_words = text
                 task.transcript_event_count += 1
                 if len(text) > 8 * 1024:
                     task.transcript_truncated_count += 1
@@ -265,7 +269,7 @@ async def apply_event(event) -> tuple[models.Task | None, bool]:
         elif event.type == "task.failed":
             task.status = "errored"
             task.result = {"error": event.payload.get("error") or "worker task failed"}
-        task.updated_at = event.created_at
+        task.updated_at = max(task.updated_at, event.created_at)
         return task
 
     task = await mutate_task(event.task_id, apply)

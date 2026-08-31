@@ -850,9 +850,12 @@ async def test_worker_event_continues_and_closes_agent_run(monkeypatch):
     finally:
         ai.experimental_telemetry.unregister(capture)
 
-    ingest = next(span for span in seen if span.name == "worker.event.ingest")
-    assert ingest.trace_id == parent.trace_id
-    assert ingest.parent_id == parent.id
+    transcript = next(span for span in seen if span.name == "fx.tool.call")
+    completed = next(span for span in seen if span.name == "fx.task.completed")
+    assert transcript.trace_id == parent.trace_id
+    assert transcript.parent_id == parent.id
+    assert completed.trace_id == parent.trace_id
+    assert completed.parent_id == parent.id
     stored = await server.worker.store.get_task(task.id)
     assert stored is not None
     assert stored.telemetry_span["ended_at"] is not None
@@ -860,6 +863,57 @@ async def test_worker_event_continues_and_closes_agent_run(monkeypatch):
     assert stored.telemetry_span["data"]["attrs"]["fx.tool_call_count"] == 1
     assert stored.telemetry_span["events"][0]["name"] == "fx.tool.call"
     assert stored.telemetry_span["events"][0]["attrs"]["tool_name"] == "read_file"
+
+
+async def test_worker_event_pushes_late_transcript_without_extending_run(monkeypatch):
+    seen = []
+
+    @ai.experimental_telemetry.adapter
+    async def capture(span):
+        yield
+        seen.append(span)
+
+    ai.experimental_telemetry.register(capture)
+    parent = ai.experimental_telemetry.create_span("hatchery.agent_run").stamp_start()
+    parent.stamp_end()
+    ended_at = parent.ended_at
+    task = server.worker.Task(
+        id="task_late",
+        chat_id="chat_late",
+        worker_id="wrk_late",
+        title="late",
+        prompt="trace it",
+        model="openai/test",
+        status="complete",
+        event_sequence=3,
+        event_ids=["evt_completed"],
+        telemetry_span=parent.model_dump(mode="json"),
+        created_at="2026-08-31T00:00:00+00:00",
+        updated_at="2026-08-31T00:00:03+00:00",
+    )
+    await server.worker.store.save_task(task)
+    try:
+        await server.worker_event(
+            server.worker_protocol.Event(
+                id="evt_late",
+                worker_id=task.worker_id,
+                task_id=task.id,
+                sequence=1,
+                type="task.transcript",
+                created_at="2026-08-31T00:00:01+00:00",
+                payload={"kind": "tool.result", "output": "done", "truncated": False},
+            )
+        )
+    finally:
+        ai.experimental_telemetry.unregister(capture)
+
+    run = next(span for span in seen if span.name == "hatchery.agent_run")
+    assert run.ended_at == ended_at
+    assert run.events[-1].name == "fx.tool.result"
+    stored = await server.worker.store.get_task(task.id)
+    assert stored is not None
+    assert stored.status == "complete"
+    assert stored.transcript_event_count == 1
 
 
 def test_worker_event_subscriber_is_serialized():

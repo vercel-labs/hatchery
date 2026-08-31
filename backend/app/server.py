@@ -819,9 +819,18 @@ async def worker_event(event: worker_protocol.Event) -> None:
         else None
     )
     terminal = False
+    span_name = (
+        f"fx.{event.payload.get('kind') or 'event'}"
+        if event.type == "task.transcript"
+        else "fx.assistant"
+        if event.type == "task.output"
+        else "fx.attention"
+        if event.type == "task.question"
+        else f"fx.{event.type}"
+    )
     try:
         async with ai.experimental_telemetry.use_span(parent):
-            async with ai.experimental_telemetry.span("worker.event.ingest") as span:
+            async with ai.experimental_telemetry.span(span_name) as span:
                 span.set_attrs(
                     {
                         "worker.id": event.worker_id,
@@ -871,7 +880,7 @@ async def worker_event(event: worker_protocol.Event) -> None:
                 terminal = bool(
                     changed
                     and task is not None
-                    and task.status in ("complete", "errored")
+                    and event.type in ("task.completed", "task.failed")
                 )
                 if changed and task is not None and task.status in ("attention", "complete", "errored"):
                     await complete_worker_task(task)
@@ -884,6 +893,8 @@ async def worker_event(event: worker_protocol.Event) -> None:
                 return current
 
             await worker.store.mutate_task(task.id, close_run)
+            await parent.push()
+        elif changed and parent is not None and parent.ended_at is not None:
             await parent.push()
     finally:
         telemetry.flush()
