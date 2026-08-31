@@ -150,9 +150,9 @@ async def _bootstrap(box, worker_id: str, spec: models.WorkerSpec, token: str):
         "/bin/sh",
         [
             "-lc",
-            "set -e; python3 -c 'from vercel import queue; import asyncssh, websockets' 2>/dev/null || "
+            "set -e; python3 -c 'from vercel import connect, queue; import asyncssh, websockets' 2>/dev/null || "
             "python3 -m pip install --disable-pip-version-check 'vercel-queue==0.7.3' "
-            "'asyncssh>=2.21,<3' 'websockets>=15,<17'; "
+            "'vercel-connect' 'asyncssh>=2.21,<3' 'websockets>=15,<17'; "
             "command -v gh >/dev/null || true; "
             "command -v fx >/dev/null || curl -fsSL https://fx.sh/setup.sh | bash",
         ],

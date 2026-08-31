@@ -15,6 +15,12 @@ async def test_provision_creates_persistent_sandbox_and_checks_daemon(monkeypatc
         async def write_text(self, path, text, mode):
             calls["write"] = (path, text, mode)
 
+    class Process:
+        returncode = None
+
+        async def refresh(self):
+            pass
+
     class Box:
         fs = Files()
         routes = [
@@ -27,6 +33,7 @@ async def test_provision_creates_persistent_sandbox_and_checks_daemon(monkeypatc
 
         async def create_process(self, command, args, env):
             calls["process"] = (command, args, env)
+            return Process()
 
     async def get_or_create_sandbox(**options):
         calls["options"] = options
@@ -60,8 +67,11 @@ async def test_provision_creates_persistent_sandbox_and_checks_daemon(monkeypatc
 
     assert provisioned.sandbox_name == "hatchery-wrk_1"
     assert calls["options"]["persistent"] is True
-    assert "vercel-queue==0.7.3" in calls["runs"][0][1][1]
-    assert "fx.sh/setup.sh" in calls["runs"][0][1][1]
+    bootstrap = calls["runs"][0][1][1]
+    for package in ("vercel-queue", "vercel-connect", "asyncssh", "websockets"):
+        assert package in bootstrap
+    assert "from vercel import connect, queue; import asyncssh, websockets" in bootstrap
+    assert "fx.sh/setup.sh" in bootstrap
     assert calls["options"]["ports"] == [8787, 8788]
     assert calls["process"][2]["HATCHERY_DAEMON_TOKEN"] == "secret"
     assert calls["process"][2]["HATCHERY_WORKER_ID"] == "wrk_1"
@@ -112,6 +122,32 @@ async def test_wait_for_daemon_retries_route_warmup(monkeypatch):
 
     assert health == {"ok": True, "version": 4}
     assert calls == 2
+
+
+async def test_wait_for_daemon_reports_process_failure(monkeypatch):
+    class Process:
+        returncode = 1
+
+        async def refresh(self):
+            pass
+
+        async def communicate(self):
+            return "", "ImportError: cannot import name 'connect' from 'vercel'"
+
+    async def daemon_health(url, token):
+        raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(sandbox, "_daemon_health", daemon_health)
+
+    try:
+        await sandbox._wait_for_daemon("https://daemon.example", "secret", Process())
+    except RuntimeError as error:
+        assert str(error) == (
+            "sandbox daemon exited with 1: "
+            "ImportError: cannot import name 'connect' from 'vercel'"
+        )
+    else:
+        raise AssertionError("exited daemon should fail with its stderr")
 
 
 async def test_existing_sandbox_repairs_dead_daemon(monkeypatch):
