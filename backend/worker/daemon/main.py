@@ -175,7 +175,7 @@ class Runtime:
             )
         )
         try:
-            while session.exit_code is None:
+            while True:
                 event = await asyncio.to_thread(next, stream, None)
                 if event is None:
                     break

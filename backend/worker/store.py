@@ -257,6 +257,9 @@ async def apply_event(event) -> tuple[models.Task | None, bool]:
             task.active_question = question
             task.active_question_id = event.id
             task.result = {"question": question}
+            task.completion_sequence = None
+            task.completion_message = None
+            task.completion_delivered = False
         elif event.type == "task.completed":
             task.status = "complete"
             task.active_question = None
@@ -266,9 +269,15 @@ async def apply_event(event) -> tuple[models.Task | None, bool]:
             }
             if task.pull_requests:
                 task.result["pull_requests"] = task.pull_requests
+            task.completion_sequence = None
+            task.completion_message = None
+            task.completion_delivered = False
         elif event.type == "task.failed":
             task.status = "errored"
             task.result = {"error": event.payload.get("error") or "worker task failed"}
+            task.completion_sequence = None
+            task.completion_message = None
+            task.completion_delivered = False
         task.updated_at = max(task.updated_at, event.created_at)
         return task
 

@@ -362,8 +362,14 @@ async def chat_events(
 
 @app.get("/api/chats/{chat_id}/messages")
 async def chat_messages(chat_id: str) -> list[ai.ui.ai_sdk.UIMessage]:
-    """The stored transcript as UI messages, with channel envelopes hidden."""
-    messages = ai.ui.ai_sdk.to_ui_messages(await _transcript(chat_id))
+    """The stored transcript as UI messages, with internal messages hidden."""
+    transcript = [
+        message
+        for message in await _transcript(chat_id)
+        if (message.provider_metadata or {}).get("hatchery", {}).get("kind")
+        != "subagent_result"
+    ]
+    messages = ai.ui.ai_sdk.to_ui_messages(transcript)
     for message in messages:
         if message.role != "user":
             continue
@@ -923,7 +929,11 @@ async def worker_event(event: worker_protocol.Event) -> None:
                     and task is not None
                     and event.type in ("task.completed", "task.failed")
                 )
-                if changed and task is not None and task.status in ("attention", "complete", "errored"):
+                if task is not None and event.type in (
+                    "task.question",
+                    "task.completed",
+                    "task.failed",
+                ):
                     await complete_worker_task(task)
         if terminal and task is not None and parent is not None:
             parent.set_attrs(
@@ -945,33 +955,85 @@ async def worker_event(event: worker_protocol.Event) -> None:
 
 
 async def complete_worker_task(task: worker.Task) -> None:
-    """Record and deliver one actionable subagent result."""
-    current = await worker.get_task(task.chat_id, task.id)
-    if current is None or current.completion_delivered:
-        return
-    result = current.result or {}
-    if current.status == "attention":
-        message = str(result.get("question") or "subagent needs input")
-    elif current.status == "errored":
-        message = f"Subagent failed: {result.get('error') or 'unknown error'}"
-    else:
-        message = str(result.get("summary") or "subagent completed")
-    await events.append(
-        current.chat_id,
-        "messages",
-        ai.assistant_message(message).model_dump(mode="json"),
-    )
-    failures = await _deliver(current.chat_id, message)
-    if not failures:
+    """Persist one internal result, then let the dispatcher continue the chat."""
+    async with turns.run(task.chat_id):
+        current = await worker.get_task(task.chat_id, task.id)
+        if current is None or current.completion_delivered:
+            return
+        if current.completion_sequence != current.event_sequence:
+            result_message = ai.user_message(
+                "<subagent_result>\n"
+                + json.dumps(
+                    {
+                        "subagent_id": current.id,
+                        "status": current.status,
+                        "result": current.result or {},
+                    },
+                    separators=(",", ":"),
+                )
+                + "\n</subagent_result>"
+            )
+            result_message.id = f"subagent_result_{current.id}_{current.event_sequence}"
+            result_message.provider_metadata = {
+                "hatchery": {"kind": "subagent_result", "subagent_id": current.id}
+            }
+            transcript = await _transcript(current.chat_id)
+            if all(message.id != result_message.id for message in transcript):
+                await events.append(
+                    current.chat_id,
+                    "messages",
+                    result_message.model_dump(mode="json"),
+                )
+            current.completion_sequence = current.event_sequence
+            current.completion_message = None
+            await worker.store.save_task(current)
+
+        message = current.completion_message
+        if not message:
+            transcript = await _transcript(current.chat_id)
+            result_index = next(
+                (
+                    index
+                    for index, item in enumerate(transcript)
+                    if item.id
+                    == f"subagent_result_{current.id}_{current.completion_sequence}"
+                ),
+                -1,
+            )
+            message = next(
+                (
+                    item.text
+                    for item in reversed(transcript[result_index + 1 :])
+                    if item.role == "assistant" and item.text
+                ),
+                "",
+            )
+        if not message:
+            message = await _run_dispatcher_turn(current.chat_id, {"id": current.chat_id})
+        if current.completion_message != message:
+            current = await worker.get_task(current.chat_id, current.id) or current
+            current.completion_message = message
+            await worker.store.save_task(current)
+
+        failures = await _deliver(current.chat_id, message)
+        if failures:
+            return
         current.completion_delivered = True
         await worker.store.save_task(current)
-    await chats.finish(
-        current.chat_id,
-        "failed" if current.status == "errored" else "done",
-        message,
-    )
-    await events.append(current.chat_id, "ui", {"type": "messages.changed"})
-    await events.append(current.chat_id, "ui", {"type": "chat.changed"})
+        if current.status in ("complete", "errored"):
+            siblings = await worker.store.list_tasks(current.chat_id)
+            if not any(
+                sibling.id != current.id
+                and sibling.status in ("pending", "running", "attention")
+                for sibling in siblings
+            ):
+                await chats.finish(
+                    current.chat_id,
+                    "failed" if current.status == "errored" else "done",
+                    message,
+                )
+        await events.append(current.chat_id, "ui", {"type": "messages.changed"})
+        await events.append(current.chat_id, "ui", {"type": "chat.changed"})
 
 
 async def _emit(chat_id: str, event: channels.Event) -> list[str]:
