@@ -5,6 +5,7 @@ import dataclasses
 import os
 import pathlib
 
+import ai.experimental_telemetry
 import httpx
 from vercel import sandbox as vercel_sandbox
 from vercel.oidc import aio as vercel_oidc
@@ -114,15 +115,26 @@ async def resume(name: str, worker_id: str, spec: models.WorkerSpec, token: str)
 
 async def prepare_for_command(record: models.Worker) -> None:
     """Acquire a live session, rotate Queue auth, and verify the daemon."""
-    box = await vercel_sandbox.resume_sandbox(name=record.sandbox_name)
-    await box.update(execution_time_limit=EXECUTION_TIME_LIMIT)
-    await box.update_network_policy(
-        await _network_policy(await git.git_credentials(), box.region)
-    )
-    routes = [models.Route(port=route.port, url=route.url) for route in box.routes]
-    await repair_daemon(
-        box, record.id, record.spec, record.daemon_token, routes
-    )
+    async with ai.experimental_telemetry.span("sandbox.prepare") as span:
+        span.set_attrs(
+            {"chat.id": record.chat_id, "worker.id": record.id},
+            sandbox_name=record.sandbox_name,
+            worker_state=record.status,
+        )
+        box = await vercel_sandbox.resume_sandbox(name=record.sandbox_name)
+        span.set_attrs(region=box.region or "")
+        await box.update(execution_time_limit=EXECUTION_TIME_LIMIT)
+        await box.update_network_policy(
+            await _network_policy(await git.git_credentials(), box.region)
+        )
+        routes = [models.Route(port=route.port, url=route.url) for route in box.routes]
+        async with ai.experimental_telemetry.span("sandbox.daemon.repair") as repair:
+            repair.set_attrs(
+                {"worker.id": record.id}, daemon_version=daemon_main.VERSION
+            )
+            await repair_daemon(
+                box, record.id, record.spec, record.daemon_token, routes
+            )
 
 
 async def recover_daemon(record: models.Worker) -> None:

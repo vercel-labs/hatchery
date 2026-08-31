@@ -1,3 +1,4 @@
+import ai.experimental_telemetry
 import pytest
 
 from worker import models, protocol, sandbox, worker
@@ -63,13 +64,22 @@ async def test_launch_and_follow_up_publish_ordered_commands(monkeypatch):
     monkeypatch.setattr(worker.sandbox, "provision", provision)
     created = await worker.create("chat_1", models.WorkerSpec())
 
-    task = await worker.launch_task("chat_1", created.id, "fix it", "openai/test")
-    task.completion_delivered = True
-    await worker.store.save_task(task)
-    task = await worker.send_task_input("chat_1", task.id, "also test it")
+    sink = ai.experimental_telemetry.DictSink()
+    async with ai.experimental_telemetry.use_sink(sink):
+        async with ai.experimental_telemetry.span("hatchery.turn") as turn_span:
+            task = await worker.launch_task("chat_1", created.id, "fix it", "openai/test")
+        task.completion_delivered = True
+        await worker.store.save_task(task)
+        task = await worker.send_task_input("chat_1", task.id, "also test it")
 
     assert [command.type for command in sent] == ["task.launch", "task.input"]
     assert [command.sequence for command in sent] == [0, 1]
+    assert task.telemetry_span is not None
+    assert task.telemetry_span["name"] == "hatchery.agent_run"
+    assert task.telemetry_span["trace_id"] == turn_span.trace_id
+    assert task.telemetry_span["parent_id"] == turn_span.id
+    assert task.telemetry_span["data"]["attrs"]["braintrust.input_json"] == '{"prompt": "fix it"}'
+    assert task.telemetry_span["data"]["attrs"]["braintrust.span_attributes"] == '{"type": "task"}'
     assert task.command_sequence == 1
     assert task.completion_delivered is False
     with pytest.raises(ValueError, match="does not belong"):
@@ -131,3 +141,47 @@ async def test_ingest_is_idempotent_and_ordered(monkeypatch):
     assert applied == duplicate
     assert applied.status == "complete"
     assert applied.result == {"summary": "done"}
+
+
+async def test_ingest_accepts_late_transcript_without_reopening_task(monkeypatch):
+    async def send(command):
+        pass
+
+    async def prepare_for_command(record):
+        pass
+
+    monkeypatch.setattr(worker.queue, "send", send)
+    monkeypatch.setattr(worker.sandbox, "prepare_for_command", prepare_for_command)
+
+    async def provision(worker_id, spec, daemon_token):
+        return sandbox.Provisioned(f"hatchery-{worker_id}", [])
+
+    monkeypatch.setattr(worker.sandbox, "provision", provision)
+    created = await worker.create("chat_1", models.WorkerSpec())
+    task = await worker.launch_task("chat_1", created.id, "fix it", "openai/test")
+    completed = protocol.Event(
+        id="evt_completed", worker_id=created.id, task_id=task.id, sequence=3,
+        type="task.completed", created_at="2026-08-28T00:00:03+00:00",
+        payload={"summary": "done"},
+    )
+    late = protocol.Event(
+        id="evt_late", worker_id=created.id, task_id=task.id, sequence=1,
+        type="task.transcript", created_at="2026-08-28T00:00:01+00:00",
+        payload={"kind": "tool.call", "tool_name": "read_file"},
+    )
+    stale_started = protocol.Event(
+        id="evt_started", worker_id=created.id, task_id=task.id, sequence=0,
+        type="task.started", created_at="2026-08-28T00:00:00+00:00",
+    )
+
+    await worker.ingest(completed)
+    applied, changed = await worker.ingest(late)
+    unchanged, stale_changed = await worker.ingest(stale_started)
+
+    assert changed is True
+    assert stale_changed is False
+    assert applied.status == "complete"
+    assert unchanged.status == "complete"
+    assert unchanged.event_sequence == 3
+    assert unchanged.transcript_event_count == 1
+    assert unchanged.transcript_tool_call_count == 1

@@ -29,6 +29,7 @@ bindings is the hub side's job.
 import dataclasses
 import typing
 
+import ai.experimental_telemetry
 import fastapi
 
 from channels import protocol
@@ -106,14 +107,18 @@ class App:
     async def _endpoint(
         self, channel_name: str, request: fastapi.Request, background: fastapi.BackgroundTasks
     ) -> fastapi.Response:
-        channel = self.channels.get(channel_name)
-        if channel is None:
-            return fastapi.Response('{"error": "unknown channel"}', 404, media_type="application/json")
-        webhook = Webhook(body=await request.body(), headers=request.headers)
-        ack = await channel.handle(webhook, _Bus(self.hub, channel.name))
-        if ack.work is not None:
-            background.add_task(_await, ack.work)
-        return fastapi.Response(ack.body, ack.status, media_type=ack.content_type)
+        async with ai.experimental_telemetry.span("channel.webhook") as span:
+            span.set_attrs(channel=channel_name)
+            channel = self.channels.get(channel_name)
+            if channel is None:
+                span.set_attrs(status_code=404)
+                return fastapi.Response('{"error": "unknown channel"}', 404, media_type="application/json")
+            webhook = Webhook(body=await request.body(), headers=request.headers)
+            ack = await channel.handle(webhook, _Bus(self.hub, channel.name))
+            span.set_attrs(status_code=ack.status, dispatched=ack.work is not None)
+            if ack.work is not None:
+                background.add_task(_await, ack.work)
+            return fastapi.Response(ack.body, ack.status, media_type=ack.content_type)
 
 
 class _Bus:

@@ -33,7 +33,7 @@ import models
 import store
 import vercel.functions
 import vercel.queue
-from agent import classifier, dispatcher, sandbox, topic
+from agent import classifier, dispatcher, sandbox, telemetry, topic
 import worker
 from worker import protocol as worker_protocol
 from channels import github, slack
@@ -41,6 +41,10 @@ from store import chats, events, spaces, turns
 
 log = logging.getLogger("app")
 _background: set[asyncio.Task] = set()
+
+# This module is also the queue subscriber entrypoint, where FastAPI's lifespan
+# does not run.
+telemetry.install()
 
 
 def _spawn(coro) -> None:
@@ -66,51 +70,58 @@ class _StoreHub:
     """
 
     async def dispatch(self, channel: str, inbound: channels.Inbound) -> None:
-        found = await spaces.list_all() or [await spaces.default()]
-        title = inbound.title or inbound.text.strip().splitlines()[0][:80]
-        chat, created = await chats.claim(
-            f"{channel}:{inbound.token}",
-            channel,
-            None,
-            title,
-            inbound.state,
-        )
-        if created:
-            await events.append(
-                chat.id, "messages", ai.user_message(inbound.text).model_dump(mode="json")
+        async with ai.experimental_telemetry.span("channel.dispatch") as span:
+            span.set_attrs(channel=channel)
+            found = await spaces.list_all() or [await spaces.default()]
+            title = inbound.title or inbound.text.strip().splitlines()[0][:80]
+            chat, created = await chats.claim(
+                f"{channel}:{inbound.token}",
+                channel,
+                None,
+                title,
+                inbound.state,
             )
-            await _classify_chat(
-                chat.id,
-                inbound.text,
-                {
-                    "origin": channel,
-                    "author": _inbound_author(inbound),
-                    "repo": inbound.repo,
-                    "channel_state": inbound.state,
-                },
-                found,
+            span.set_attrs(
+                {"chat.id": chat.id, "space.id": chat.space_id or ""},
+                created=created,
             )
-            chat = await chats.get(chat.id) or chat
-            _spawn(_name_chat(chat.id, inbound.text))
-        elif chat.space_id is None:
-            await _classify_chat(
-                chat.id,
-                inbound.text,
-                {
-                    "origin": channel,
-                    "author": _inbound_author(inbound),
-                    "repo": inbound.repo,
-                    "channel_state": inbound.state,
-                },
-                found,
-            )
-            chat = await chats.get(chat.id) or chat
-        else:
-            await events.append(
-                chat.id, "messages", ai.user_message(inbound.text).model_dump(mode="json")
-            )
-        log.info("inbound %s -> %s chat %s", channel, "new" if created else "existing", chat.id)
-        await _run_inbound_turn(chat.id)
+            if created:
+                await events.append(
+                    chat.id, "messages", ai.user_message(inbound.text).model_dump(mode="json")
+                )
+                await _classify_chat(
+                    chat.id,
+                    inbound.text,
+                    {
+                        "origin": channel,
+                        "author": _inbound_author(inbound),
+                        "repo": inbound.repo,
+                        "channel_state": inbound.state,
+                    },
+                    found,
+                )
+                chat = await chats.get(chat.id) or chat
+                _spawn(_name_chat(chat.id, inbound.text))
+            elif chat.space_id is None:
+                await _classify_chat(
+                    chat.id,
+                    inbound.text,
+                    {
+                        "origin": channel,
+                        "author": _inbound_author(inbound),
+                        "repo": inbound.repo,
+                        "channel_state": inbound.state,
+                    },
+                    found,
+                )
+                chat = await chats.get(chat.id) or chat
+            else:
+                await events.append(
+                    chat.id, "messages", ai.user_message(inbound.text).model_dump(mode="json")
+                )
+            span.set_attrs({"space.id": chat.space_id or ""})
+            log.info("inbound %s -> %s chat %s", channel, "new" if created else "existing", chat.id)
+            await _run_inbound_turn(chat.id)
 
     async def dedupe(self, key: str) -> bool:
         return await chats.dedupe(key)
@@ -134,19 +145,26 @@ async def _name_chat(chat_id: str, prompt: str) -> None:
 async def _classify_chat(
     chat_id: str, prompt: str, metadata: dict, candidates: list[models.Space]
 ) -> models.Space:
-    await _emit(chat_id, channels.event(channels.protocol.SPACE_ASSIGNING))
-    selected = await classifier.classify(prompt, metadata, candidates)
-    assigned = await chats.assign_space(chat_id, selected.id)
-    if assigned is None:
-        raise fastapi.HTTPException(404, "unknown chat")
-    await _emit(
-        chat_id,
-        channels.event(
-            channels.protocol.SPACE_ASSIGNED,
-            space={"id": selected.id, "name": selected.name, "color": selected.color},
-        ),
-    )
-    return selected
+    async with ai.experimental_telemetry.span("hatchery.classify") as span:
+        span.set_attrs(
+            {"chat.id": chat_id},
+            origin=str(metadata.get("origin", "unknown")),
+            candidate_count=len(candidates),
+        )
+        await _emit(chat_id, channels.event(channels.protocol.SPACE_ASSIGNING))
+        selected = await classifier.classify(prompt, metadata, candidates)
+        span.set_attrs({"space.id": selected.id})
+        assigned = await chats.assign_space(chat_id, selected.id)
+        if assigned is None:
+            raise fastapi.HTTPException(404, "unknown chat")
+        await _emit(
+            chat_id,
+            channels.event(
+                channels.protocol.SPACE_ASSIGNED,
+                space={"id": selected.id, "name": selected.name, "color": selected.color},
+            ),
+        )
+        return selected
 
 
 bot = channels.App(_StoreHub())
@@ -156,9 +174,11 @@ bot.add(github.channel())
 
 @contextlib.asynccontextmanager
 async def lifespan(_: fastapi.FastAPI):
+    telemetry.install()
     await store.ensure_ready()
     await spaces.default()
     yield
+    telemetry.flush()
 
 
 app = fastapi.FastAPI(title="hatchery", lifespan=lifespan)
@@ -374,8 +394,12 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
     incoming, _ = ai.ui.ai_sdk.to_messages(request.messages)
 
     async def stream():
-        async with turns.run(request.chat_id):
+        async with turns.run(request.chat_id), ai.experimental_telemetry.span(
+            "hatchery.turn"
+        ) as span:
+            span.set_attrs({"chat.id": request.chat_id}, origin="ui")
             stored = await _transcript(request.chat_id)
+            span.set_attrs(stored_message_count=len(stored))
             known = {message.id for message in stored}
             received = []
             for message in incoming:
@@ -386,6 +410,7 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                     await events.append(request.chat_id, "messages", message.model_dump(mode="json"))
                     stored.append(message)
                     received.append(message)
+            span.set_attrs(received_message_count=len(received))
             for message in received:
                 await _emit(
                     request.chat_id,
@@ -413,6 +438,7 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                         data={"state": "assigning"},
                     )
                 )
+                span.set_attrs(classification_required=True)
                 selected = await _classify_chat(
                     request.chat_id,
                     first.text,
@@ -430,6 +456,7 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                     )
                 )
             space = await _space_for_chat(request.chat_id)
+            span.set_attrs({"space.id": space.id})
             history = [ai.system_message(dispatcher.system_prompt(space)), *stored]
             agent = dispatcher.agent_for({"id": request.chat_id})
             await _emit(request.chat_id, channels.event(channels.protocol.TURN_STARTED))
@@ -454,6 +481,8 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                     channels.event(channels.protocol.TURN_FAILED, error=str(error)),
                 )
                 raise
+            finally:
+                telemetry.flush()
 
     return fastapi.responses.StreamingResponse(
         stream(), headers=ai.ui.ai_sdk.UI_MESSAGE_STREAM_HEADERS
@@ -535,6 +564,7 @@ async def chat_sandboxes(chat_id: str) -> list[dict]:
             {
                 **task.model_dump(),
                 "sandbox_id": task.worker_id,
+                "task_id": task.id,
                 "session_id": task.id,
             }
             for task in tasks
@@ -781,9 +811,137 @@ async def manual_tty(ws: fastapi.WebSocket, chat_id: str, terminal_id: str) -> N
 )
 async def worker_event(event: worker_protocol.Event) -> None:
     """Persist one at-least-once worker event and wake the owning chat."""
-    task, changed = await worker.ingest(event)
-    if changed and task is not None and task.status in ("attention", "complete", "errored"):
-        await complete_worker_task(task)
+    task = await worker.store.get_task(event.task_id) if event.task_id else None
+    parent = (
+        ai.experimental_telemetry.Span[
+            ai.experimental_telemetry.CustomSpanData
+        ].model_validate(task.telemetry_span)
+        if task is not None and task.telemetry_span
+        else None
+    )
+    terminal = False
+    span_name = (
+        f"fx.{event.payload.get('kind') or 'event'}"
+        if event.type == "task.transcript"
+        else "fx.assistant"
+        if event.type == "task.output"
+        else "fx.attention"
+        if event.type == "task.question"
+        else f"fx.{event.type}"
+    )
+    try:
+        async with ai.experimental_telemetry.use_span(parent):
+            async with ai.experimental_telemetry.span(span_name) as span:
+                span.set_attrs(
+                    {
+                        "worker.id": event.worker_id,
+                        "task.id": event.task_id or "",
+                        "event.id": event.id,
+                    },
+                    event_type=event.type,
+                    sequence=event.sequence,
+                )
+                kind = str(event.payload.get("kind") or "event")
+                if event.type == "task.transcript" and kind == "tool.call":
+                    arguments = str(event.payload.get("arguments") or "{}")
+                    try:
+                        tool_input = json.loads(arguments)
+                    except json.JSONDecodeError:
+                        tool_input = arguments
+                    span.set_attrs(
+                        {
+                            "braintrust.input_json": json.dumps(tool_input),
+                            "braintrust.span_attributes": json.dumps({"type": "tool"}),
+                            "gen_ai.operation.name": "execute_tool",
+                            "gen_ai.tool.name": str(event.payload.get("tool_name") or "fx"),
+                            "gen_ai.tool.type": "function",
+                            "gen_ai.tool.call.id": str(event.payload.get("tool_call_id") or ""),
+                            "gen_ai.tool.call.arguments": arguments,
+                        }
+                    )
+                elif event.type == "task.transcript" and kind == "tool.result":
+                    output = str(event.payload.get("output") or "")
+                    span.set_attrs(
+                        {
+                            "braintrust.output_json": json.dumps(output),
+                            "braintrust.span_attributes": json.dumps({"type": "tool"}),
+                            "gen_ai.operation.name": "execute_tool",
+                            "gen_ai.tool.call.id": str(event.payload.get("tool_call_id") or ""),
+                            "gen_ai.tool.call.result": json.dumps(output),
+                        },
+                        tool_error=bool(event.payload.get("error")),
+                    )
+                elif event.type == "task.transcript" and kind == "user":
+                    text = str(event.payload.get("text") or "")
+                    span.set_attrs(
+                        {"braintrust.input_json": json.dumps({"text": text})}
+                    )
+                elif event.type == "task.output":
+                    text = str(event.payload.get("text") or "")
+                    span.set_attrs(
+                        {"braintrust.output_json": json.dumps({"text": text[:8192]})}
+                    )
+                task, changed = await worker.ingest(event)
+                span.set_attrs(applied=changed)
+                if changed and parent is not None and event.type == "task.transcript":
+                    kind = str(event.payload.get("kind") or "event")
+                    parent.add_event(f"fx.{kind}", event.payload)
+                elif changed and parent is not None and event.type == "task.output":
+                    text = str(event.payload.get("text") or "")
+                    parent.add_event(
+                        "fx.assistant",
+                        {
+                            "text": text[:8192],
+                            "truncated": len(text) > 8192,
+                            "session_id": event.payload.get("session_id"),
+                        },
+                    )
+                elif changed and parent is not None and event.type == "task.question":
+                    question = str(event.payload.get("question") or event.payload.get("text") or "")
+                    parent.add_event("fx.attention", {"text": question[:8192]})
+                elif changed and parent is not None and event.type == "task.completed":
+                    parent.add_event("fx.turn.completed")
+                if task is not None:
+                    span.set_attrs({"chat.id": task.chat_id}, task_state=task.status)
+                    if changed and parent is not None:
+                        parent.set_attrs(
+                            {
+                                "fx.session_id": task.fx_session_id or "",
+                                "fx.transcript_event_count": task.transcript_event_count,
+                                "fx.tool_call_count": task.transcript_tool_call_count,
+                                "fx.truncated_event_count": task.transcript_truncated_count,
+                            }
+                        )
+
+                        def save_run(current: worker.Task) -> worker.Task:
+                            current.telemetry_span = parent.model_dump(mode="json")
+                            return current
+
+                        await worker.store.mutate_task(task.id, save_run)
+                terminal = bool(
+                    changed
+                    and task is not None
+                    and event.type in ("task.completed", "task.failed")
+                )
+                if changed and task is not None and task.status in ("attention", "complete", "errored"):
+                    await complete_worker_task(task)
+        if terminal and task is not None and parent is not None:
+            parent.set_attrs(
+                {"braintrust.output_json": json.dumps(task.result)},
+                task_state=task.status,
+            )
+            parent.stamp_end()
+
+            def close_run(current: worker.Task) -> worker.Task:
+                current.telemetry_span = parent.model_dump(mode="json")
+                return current
+
+            await worker.store.mutate_task(task.id, close_run)
+            await parent.push()
+        elif changed and parent is not None and parent.ended_at is not None:
+            await parent.push()
+    finally:
+        telemetry.flush()
 
 
 async def complete_worker_task(task: worker.Task) -> None:
@@ -817,17 +975,25 @@ async def complete_worker_task(task: worker.Task) -> None:
 
 
 async def _emit(chat_id: str, event: channels.Event) -> list[str]:
-    failures = []
-    for binding in await chats.bindings(chat_id):
-        channel = bot.channels.get(binding.channel)
-        if channel is None:
-            continue
-        try:
-            await channel.on_event(event, binding.state)
-        except Exception as error:
-            log.exception("channel delivery failed: %s -> %s", chat_id, binding.channel)
-            failures.append(f"{binding.channel}: {error}")
-    return failures
+    async with ai.experimental_telemetry.span("channel.deliver") as span:
+        bindings = await chats.bindings(chat_id)
+        span.set_attrs(
+            {"chat.id": chat_id},
+            event_type=event.type,
+            binding_count=len(bindings),
+        )
+        failures = []
+        for binding in bindings:
+            channel = bot.channels.get(binding.channel)
+            if channel is None:
+                continue
+            try:
+                await channel.on_event(event, binding.state)
+            except Exception as error:
+                log.exception("channel delivery failed: %s -> %s", chat_id, binding.channel)
+                failures.append(f"{binding.channel}: {error}")
+        span.set_attrs(failure_count=len(failures))
+        return failures
 
 
 async def _deliver(chat_id: str, message: str) -> list[str]:
@@ -837,7 +1003,10 @@ async def _deliver(chat_id: str, message: str) -> list[str]:
 
 
 async def _run_inbound_turn(chat_id: str) -> None:
-    async with turns.run(chat_id):
+    async with turns.run(chat_id), ai.experimental_telemetry.span(
+        "hatchery.turn"
+    ) as span:
+        span.set_attrs({"chat.id": chat_id}, origin="channel")
         await _emit(chat_id, channels.event(channels.protocol.TURN_STARTED))
         try:
             message = await _run_dispatcher_turn(chat_id, {"id": chat_id})
@@ -860,12 +1029,15 @@ async def _run_dispatcher_turn(
     if wake is not None:
         history.append(wake)
     agent = dispatcher.agent_for(record)
-    async with agent.run(dispatcher.model(), history) as result:
-        async for _ in result:
-            pass
-        added = result.messages[len(history) :]
-        for message in added:
-            await events.append(chat_id, "messages", message.model_dump(mode="json"))
+    try:
+        async with agent.run(dispatcher.model(), history) as result:
+            async for _ in result:
+                pass
+            added = result.messages[len(history) :]
+            for message in added:
+                await events.append(chat_id, "messages", message.model_dump(mode="json"))
+    finally:
+        telemetry.flush()
     return next(
         (message.text for message in reversed(added) if message.role == "assistant" and message.text),
         "subagent completion recorded",

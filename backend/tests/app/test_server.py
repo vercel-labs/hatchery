@@ -1,4 +1,5 @@
 import asyncio
+from unittest import mock
 
 import httpx
 import pytest
@@ -8,6 +9,7 @@ from websockets.frames import Close
 from websockets.http11 import Response
 
 import ai
+import ai.experimental_telemetry
 import channels
 from app import server
 from store import chats, events
@@ -487,8 +489,10 @@ async def test_first_ui_prompt_classifies_before_dispatcher(monkeypatch):
     def agent_for(record):
         return FakeAgent()
 
+    flush = mock.Mock()
     monkeypatch.setattr(server.dispatcher, "agent_for", agent_for)
     monkeypatch.setattr(server.ai.ui.ai_sdk, "to_sse", fake_sse)
+    monkeypatch.setattr(server.telemetry, "flush", flush)
     ui = ai.ui.ai_sdk.to_ui_messages([ai.user_message("fix the docs")])
     async with client() as c:
         response = await c.post(
@@ -511,6 +515,7 @@ async def test_first_ui_prompt_classifies_before_dispatcher(monkeypatch):
     assert response.text.index('"state": "assigned"') < response.text.index('"type":"finish"')
     assert seen["history"][0].role == "system"
     assert seen["history"][1].text == "fix the docs"
+    flush.assert_called_once_with()
 
 
 async def test_ui_turn_is_mirrored_to_bound_channel(monkeypatch):
@@ -640,9 +645,11 @@ async def test_sandbox_routes_use_chat_scoped_control_plane(monkeypatch):
     seen = {}
 
     class Record:
+        id = "wrk_1"
+
         def model_dump(self, exclude=None):
             assert exclude == {"daemon_token"}
-            return {"id": "wrk_1", "chat_id": chat.id, "title": "sandbox"}
+            return {"id": self.id, "chat_id": chat.id, "title": "sandbox"}
 
     async def list_all(chat_id):
         seen["listed"] = chat_id
@@ -652,6 +659,13 @@ async def test_sandbox_routes_use_chat_scoped_control_plane(monkeypatch):
         seen["created"] = (chat_id, launch)
         return Record()
 
+    task = server.worker.Task(
+        id="task_1", chat_id=chat.id, worker_id="wrk_1", title="fix",
+        prompt="fix it", model="openai/test", fx_session_id="fx_1",
+        created_at="2026-08-31T00:00:00+00:00",
+        updated_at="2026-08-31T00:00:00+00:00",
+    )
+    await server.worker.store.save_task(task)
     monkeypatch.setattr(server.sandbox, "list_all", list_all)
     monkeypatch.setattr(server.sandbox, "create", create)
 
@@ -669,6 +683,8 @@ async def test_sandbox_routes_use_chat_scoped_control_plane(monkeypatch):
     assert listed.status_code == 200
     assert created.status_code == 200
     assert listed.json()[0]["id"] == "wrk_1"
+    assert listed.json()[0]["subagents"][0]["task_id"] == "task_1"
+    assert listed.json()[0]["subagents"][0]["fx_session_id"] == "fx_1"
     assert created.json()["id"] == "wrk_1"
     assert seen["listed"] == chat.id
     assert seen["created"][0] == chat.id
@@ -784,6 +800,173 @@ async def test_task_readiness_requires_actual_daemon_session(monkeypatch):
     readiness = await server.task_readiness("chat_1", "task_1")
 
     assert readiness["session_ready"] is True
+
+
+async def test_worker_event_continues_and_closes_agent_run(monkeypatch):
+    seen = []
+
+    @ai.experimental_telemetry.adapter
+    async def capture(span):
+        yield
+        seen.append(span)
+
+    ai.experimental_telemetry.register(capture)
+    parent = ai.experimental_telemetry.create_span("hatchery.agent_run").stamp_start()
+    task = server.worker.Task(
+        id="task_trace",
+        chat_id="chat_trace",
+        worker_id="wrk_trace",
+        title="trace",
+        prompt="trace it",
+        model="openai/test",
+        telemetry_span=parent.model_dump(mode="json"),
+        created_at="2026-08-31T00:00:00+00:00",
+        updated_at="2026-08-31T00:00:00+00:00",
+    )
+    await server.worker.store.save_task(task)
+
+    async def complete(task):
+        pass
+
+    monkeypatch.setattr(server, "complete_worker_task", complete)
+    try:
+        await server.worker_event(
+            server.worker_protocol.Event(
+                id="evt_transcript",
+                worker_id=task.worker_id,
+                task_id=task.id,
+                sequence=0,
+                type="task.transcript",
+                created_at="2026-08-31T00:00:01+00:00",
+                payload={
+                    "kind": "tool.call",
+                    "tool_call_id": "call_trace",
+                    "tool_name": "read_file",
+                    "arguments": '{"path":"README.md"}',
+                    "session_id": "session_trace",
+                    "truncated": False,
+                },
+            )
+        )
+        await server.worker_event(
+            server.worker_protocol.Event(
+                id="evt_result",
+                worker_id=task.worker_id,
+                task_id=task.id,
+                sequence=1,
+                type="task.transcript",
+                created_at="2026-08-31T00:00:02+00:00",
+                payload={
+                    "kind": "tool.result",
+                    "tool_call_id": "call_trace",
+                    "output": "README contents",
+                    "error": False,
+                    "truncated": False,
+                },
+            )
+        )
+        await server.worker_event(
+            server.worker_protocol.Event(
+                id="evt_output",
+                worker_id=task.worker_id,
+                task_id=task.id,
+                sequence=2,
+                type="task.output",
+                created_at="2026-08-31T00:00:03+00:00",
+                payload={"text": "Finished reading."},
+            )
+        )
+        await server.worker_event(
+            server.worker_protocol.Event(
+                id="evt_trace",
+                worker_id=task.worker_id,
+                task_id=task.id,
+                sequence=3,
+                type="task.completed",
+                created_at="2026-08-31T00:00:04+00:00",
+                payload={"summary": "done"},
+            )
+        )
+    finally:
+        ai.experimental_telemetry.unregister(capture)
+
+    transcript = next(span for span in seen if span.name == "fx.tool.call")
+    result = next(span for span in seen if span.name == "fx.tool.result")
+    assistant = next(span for span in seen if span.name == "fx.assistant")
+    completed = next(span for span in seen if span.name == "fx.task.completed")
+    assert transcript.trace_id == parent.trace_id
+    assert transcript.parent_id == parent.id
+    assert transcript.data.attrs["braintrust.input_json"] == '{"path": "README.md"}'
+    assert transcript.data.attrs["braintrust.span_attributes"] == '{"type": "tool"}'
+    assert transcript.data.attrs["gen_ai.operation.name"] == "execute_tool"
+    assert transcript.data.attrs["gen_ai.tool.name"] == "read_file"
+    assert transcript.data.attrs["gen_ai.tool.call.id"] == "call_trace"
+    assert transcript.data.attrs["gen_ai.tool.call.arguments"] == '{"path":"README.md"}'
+    assert result.data.attrs["braintrust.output_json"] == '"README contents"'
+    assert result.data.attrs["gen_ai.tool.call.result"] == '"README contents"'
+    assert result.data.attrs["tool_error"] is False
+    assert assistant.data.attrs["braintrust.output_json"] == '{"text": "Finished reading."}'
+    assert completed.trace_id == parent.trace_id
+    assert completed.parent_id == parent.id
+    stored = await server.worker.store.get_task(task.id)
+    assert stored is not None
+    assert stored.telemetry_span["ended_at"] is not None
+    assert stored.telemetry_span["data"]["attrs"]["braintrust.output_json"] == '{"summary": "done"}'
+    assert stored.telemetry_span["data"]["attrs"]["fx.session_id"] == "session_trace"
+    assert stored.telemetry_span["data"]["attrs"]["fx.tool_call_count"] == 1
+    assert stored.telemetry_span["events"][0]["name"] == "fx.tool.call"
+    assert stored.telemetry_span["events"][0]["attrs"]["tool_name"] == "read_file"
+
+
+async def test_worker_event_pushes_late_transcript_without_extending_run(monkeypatch):
+    seen = []
+
+    @ai.experimental_telemetry.adapter
+    async def capture(span):
+        yield
+        seen.append(span)
+
+    ai.experimental_telemetry.register(capture)
+    parent = ai.experimental_telemetry.create_span("hatchery.agent_run").stamp_start()
+    parent.stamp_end()
+    ended_at = parent.ended_at
+    task = server.worker.Task(
+        id="task_late",
+        chat_id="chat_late",
+        worker_id="wrk_late",
+        title="late",
+        prompt="trace it",
+        model="openai/test",
+        status="complete",
+        event_sequence=3,
+        event_ids=["evt_completed"],
+        telemetry_span=parent.model_dump(mode="json"),
+        created_at="2026-08-31T00:00:00+00:00",
+        updated_at="2026-08-31T00:00:03+00:00",
+    )
+    await server.worker.store.save_task(task)
+    try:
+        await server.worker_event(
+            server.worker_protocol.Event(
+                id="evt_late",
+                worker_id=task.worker_id,
+                task_id=task.id,
+                sequence=1,
+                type="task.transcript",
+                created_at="2026-08-31T00:00:01+00:00",
+                payload={"kind": "tool.result", "output": "done", "truncated": False},
+            )
+        )
+    finally:
+        ai.experimental_telemetry.unregister(capture)
+
+    run = next(span for span in seen if span.name == "hatchery.agent_run")
+    assert run.ended_at == ended_at
+    assert run.events[-1].name == "fx.tool.result"
+    stored = await server.worker.store.get_task(task.id)
+    assert stored is not None
+    assert stored.status == "complete"
+    assert stored.transcript_event_count == 1
 
 
 def test_worker_event_subscriber_is_serialized():
@@ -926,3 +1109,38 @@ async def test_tty_bridge_maps_connection_failure(monkeypatch):
     await server._bridge_tty(ws, type("Worker", (), {"id": "wrk_1"})(), "task_1")
 
     assert ws.closed == (1011, "upstream connection failed")
+
+
+async def test_dispatcher_turn_flushes_telemetry(monkeypatch):
+    space = await server.spaces.default()
+    chat = await chats.create(space.id, "trace me")
+    await events.append(
+        chat.id, "messages", ai.user_message("hello").model_dump(mode="json")
+    )
+
+    class FakeRun:
+        def __init__(self, history):
+            self.messages = [*history, ai.assistant_message("done")]
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    class FakeAgent:
+        def run(self, model, history):
+            return FakeRun(history)
+
+    flush = mock.Mock()
+    monkeypatch.setattr(server.dispatcher, "agent_for", lambda record: FakeAgent())
+    monkeypatch.setattr(server.telemetry, "flush", flush)
+
+    assert await server._run_dispatcher_turn(chat.id, {"id": chat.id}) == "done"
+    flush.assert_called_once_with()

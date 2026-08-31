@@ -2,7 +2,7 @@
 
 import "@xterm/xterm/css/xterm.css";
 
-import { PlusIcon, XIcon } from "lucide-react";
+import { CheckIcon, CopyIcon, PlusIcon, XIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -12,8 +12,9 @@ export type SubagentTask = {
   id: string;
   sandbox_id: string;
   title: string;
-  task_id?: string;
-  session_id?: string;
+  task_id: string;
+  session_id: string;
+  fx_session_id?: string;
   status: string;
   created_at: string;
 };
@@ -29,6 +30,7 @@ export type ManualTerminal = {
 
 export type SandboxWorkspace = {
   id: string;
+  sandbox_name: string;
   title: string;
   status: string;
   created_at: string;
@@ -55,6 +57,23 @@ function tabs(box: SandboxWorkspace | undefined): TerminalTab[] {
     })),
     ...box.terminals.map((terminal) => ({ ...terminal, kind: "manual" as const })),
   ].sort((left, right) => left.created_at.localeCompare(right.created_at));
+}
+
+function CopyContext({ value }: { value: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const copy = async () => {
+    await navigator.clipboard.writeText(value);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1500);
+  };
+
+  return (
+    <Button variant="outline" size="xs" onClick={() => void copy()}>
+      {copied ? <CheckIcon /> : <CopyIcon />}
+      {copied ? "copied" : "copy"}
+    </Button>
+  );
 }
 
 function TaskTerminal({ chatId, tab }: { chatId: string; tab: TerminalTab }) {
@@ -245,6 +264,29 @@ export function TerminalPane({
   const activeTabs = tabs(activeSandbox);
   const activeTab =
     activeTabs.find((tab) => tab.id === selectedTabId) ?? activeTabs.at(-1);
+  const context = activeSandbox
+    ? JSON.stringify(
+        {
+          sandbox: {
+            id: activeSandbox.id,
+            name: activeSandbox.sandbox_name,
+            status: activeSandbox.status,
+          },
+          ...(activeTab?.kind === "subagent"
+            ? {
+                task: {
+                  id: activeTab.task_id,
+                  title: activeTab.title,
+                  fx_session_id: activeTab.fx_session_id,
+                  status: activeTab.status,
+                },
+              }
+            : {}),
+        },
+        null,
+        2,
+      )
+    : "";
 
   const selectSandbox = (box: SandboxWorkspace) => {
     setSelectedSandboxId(box.id);
@@ -392,6 +434,14 @@ export function TerminalPane({
       ) : (
         <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-muted-foreground">
           {activeSandbox?.status === "failed" ? "Sandbox failed" : "Sandbox ready"}
+        </div>
+      )}
+      {activeSandbox && (
+        <div className="flex shrink-0 items-start gap-2 border-t p-2">
+          <pre className="min-w-0 flex-1 overflow-auto text-xs text-muted-foreground">
+            {context}
+          </pre>
+          <CopyContext value={context} />
         </div>
       )}
     </div>

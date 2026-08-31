@@ -38,3 +38,26 @@ async def test_worker_tools_are_chat_scoped(monkeypatch):
     }
     assert await tools["list_sandboxes"].fn() == []
     assert seen["chat_id"] == "chat_1"
+
+
+async def test_create_subagent_returns_task_id(monkeypatch):
+    created = type("Task", (), {"id": "task_1", "worker_id": "wrk_1", "status": "pending"})()
+
+    async def launch_task(chat_id, sandbox_id, task, model):
+        assert (chat_id, sandbox_id, task, model) == (
+            "chat_1", "wrk_1", "fix it", "openai/test",
+        )
+        return created
+
+    monkeypatch.setattr(dispatcher.sandbox, "launch_task", launch_task)
+    agent = dispatcher.agent_for({"id": "chat_1"})
+    tool = next(tool for tool in agent.tools if tool.name == "create_subagent")
+
+    updates = [update async for update in tool.fn("wrk_1", "fix it", "openai/test")]
+
+    assert updates[-1] == {
+        "subagent_id": "task_1",
+        "task_id": "task_1",
+        "sandbox_id": "wrk_1",
+        "state": "pending",
+    }

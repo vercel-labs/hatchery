@@ -107,6 +107,28 @@ def test_captured_fx_jsonl_contract(fixture, scenario):
     assert events, scenario
 
 
+def test_transcript_payload_is_bounded_and_flat():
+    payload = main.Runtime.transcript_payload(
+        {
+            "type": "tool.result",
+            "id": "call_1",
+            "output": "abcdef",
+            "error": False,
+            "session_id": "session_1",
+        },
+        max_text=4,
+    )
+
+    assert payload == {
+        "kind": "tool.result",
+        "session_id": "session_1",
+        "tool_call_id": "call_1",
+        "output": "abcd",
+        "error": False,
+        "truncated": True,
+    }
+
+
 class _RecordedSession:
     exit_code = None
 
