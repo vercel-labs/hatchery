@@ -41,15 +41,11 @@ model message per event, source of truth), its devbox record the tail of
 (chat_id, "worker"). chats/spaces/bindings/dedupe are rows next to it.
 schema is idempotent DDL, created on startup — no migrations.
 
-## devbox
+## worker layer
 
-the worker layer: the dispatcher (backend/agent/) hands coding tasks to a
-devbox over api.vercel.com (`POST /v1/tasks`, assistant=fx), gets
-state pushed back over the task watch websocket, and the ui attaches to the
-task's pty via the backend's tty proxy. no polling anywhere.
+the previous DevBox integration has been removed. sandbox and subagent control
+uses Vercel Sandbox and Queues; terminal traffic uses the authenticated daemon
+route through the backend websocket bridge. see `migration.md`.
 
-.reference/api — primary implementation
-- services/api-devbox — DevBox and Tasks HTTP APIs
-- packages/devbox — domain logic, repositories, credentials, lifecycle, tasks
-- services/subscriber-devbox — asynchronous provisioning and lifecycle events
-- cli/devboxd — the in-box daemon: SSH, MCP, task execution, cloning, heartbeats, and lifecycle hooks
+`.reference/api` is specification material for retained behavior only. excluded
+DevBox subsystems must not be copied into hatchery.

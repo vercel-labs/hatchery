@@ -1,11 +1,8 @@
 // mirrors backend/models.py
 
-// Streams (chat SSE, terminal websocket) default to same-origin — vercel
-// routes /api to the backend service (vercel dev and deployed alike). When
-// running bare `next dev` + `uv run dev.py`, set
-// NEXT_PUBLIC_BACKEND_ORIGIN=http://127.0.0.1:8000 to dial the backend
-// directly: next's dev proxy severs quiet/long sse responses and can't
-// upgrade websockets.
+// Chat SSE defaults to same-origin — vercel routes /api to the backend service.
+// When running bare `next dev` + `uv run dev.py`, set
+// NEXT_PUBLIC_BACKEND_ORIGIN=http://127.0.0.1:8000 to dial the backend directly.
 const BACKEND_ORIGIN = process.env.NEXT_PUBLIC_BACKEND_ORIGIN ?? "";
 
 export function apiBase(): string {

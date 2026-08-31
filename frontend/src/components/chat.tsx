@@ -4,8 +4,8 @@ import { useEffect, useMemo } from "react";
 import { PlusIcon } from "lucide-react";
 
 import { ChatMessage } from "@/components/chat-message";
-import { PromptForm } from "@/components/prompt-form";
 import { Button } from "@/components/ui/button";
+import { PromptForm } from "@/components/prompt-form";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   Empty,
@@ -24,9 +24,6 @@ import {
 import { apiBase } from "@/lib/api";
 import type { ChatUIMessage } from "@/lib/messages";
 
-// Trimmed port of seal's ChatView: no uploads, models, resume, or approvals.
-// Keyed by chatId at the call site so it remounts on chat switch;
-// initialMessages is the stored transcript, fetched before mount.
 export function ChatView({
   chatId,
   initialMessages,
@@ -88,7 +85,7 @@ export function ChatView({
             <EmptyHeader>
               <EmptyTitle>Talk to the dispatcher</EmptyTitle>
               <EmptyDescription>
-                Describe the work; it hands it to a subagent you can watch.
+                Describe the work. The dispatcher can start fx subagents.
               </EmptyDescription>
             </EmptyHeader>
             <Button variant="outline" onClick={onCreateSandbox}>

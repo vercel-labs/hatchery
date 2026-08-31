@@ -8,8 +8,6 @@ streams whose tail wins. One stream per chat per concern:
   appends to it.
 - (chat_id, "ui"): lightweight change notifications consumed by the UI.
 
-Devboxes and subagent launches have first-class stores.
-
 Postgres when DATABASE_URL is set, otherwise one jsonl file per stream under
 HATCHERY_DATA_DIR. The jsonl locks are threading.Locks on purpose: a workflow
 worker runs each queue message on a fresh event loop (often another thread),

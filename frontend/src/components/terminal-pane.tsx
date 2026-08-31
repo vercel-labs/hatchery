@@ -8,56 +8,61 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { apiBase, wsBase } from "@/lib/api";
 
-export type CoderTask = {
+export type SubagentTask = {
   id: string;
-  devbox_id: string;
+  sandbox_id: string;
   title: string;
   task_id?: string;
   session_id?: string;
-  state: string;
+  status: string;
   created_at: string;
 };
 
 export type ManualTerminal = {
   id: string;
-  devbox_id: string;
+  sandbox_id: string;
   title: string;
   session_id?: string;
-  state: string;
+  status: string;
   created_at: string;
 };
 
-export type DevboxWorkspace = {
+export type SandboxWorkspace = {
   id: string;
   title: string;
-  repos: string[];
-  state: string;
-  error?: string;
+  status: string;
   created_at: string;
-  subagents: CoderTask[];
+  spec: { repos: string[] };
+  routes: Array<{ port: number; url: string }>;
+  subagents: SubagentTask[];
   terminals: ManualTerminal[];
 };
 
 type TerminalTab =
-  | (CoderTask & { kind: "subagent" })
+  | (SubagentTask & { kind: "subagent" })
   | (ManualTerminal & { kind: "manual" });
 
 const b64encode = (s: string) =>
   btoa(String.fromCharCode(...new TextEncoder().encode(s)));
 
-function tabs(box: DevboxWorkspace | undefined): TerminalTab[] {
+function tabs(box: SandboxWorkspace | undefined): TerminalTab[] {
   if (!box) return [];
   return [
-    ...box.subagents.map((task) => ({ ...task, kind: "subagent" as const })),
+    ...box.subagents.map((task) => ({
+      ...task,
+      title: task.title || "subagent",
+      kind: "subagent" as const,
+    })),
     ...box.terminals.map((terminal) => ({ ...terminal, kind: "manual" as const })),
   ].sort((left, right) => left.created_at.localeCompare(right.created_at));
 }
 
 function TaskTerminal({ chatId, tab }: { chatId: string; tab: TerminalTab }) {
   const hostRef = useRef<HTMLDivElement>(null);
-  const [status, setStatus] = useState<"connecting" | "live" | "exited">(
-    "connecting",
-  );
+  const [status, setStatus] = useState<
+    "waiting" | "connecting" | "live" | "exited" | "error"
+  >(tab.kind === "subagent" && tab.status === "pending" ? "waiting" : "connecting");
+  const [detail, setDetail] = useState("");
 
   useEffect(() => {
     const host = hostRef.current;
@@ -68,6 +73,8 @@ function TaskTerminal({ chatId, tab }: { chatId: string; tab: TerminalTab }) {
     let disposed = false;
     let offset = 0;
     let exited = false;
+    let sessionReady = tab.kind === "manual" || tab.status !== "pending";
+    let waitingDetail = "waiting for sandbox queue";
 
     const boot = async () => {
       const [{ Terminal }, { FitAddon }] = await Promise.all([
@@ -106,6 +113,33 @@ function TaskTerminal({ chatId, tab }: { chatId: string; tab: TerminalTab }) {
 
       const connect = () => {
         if (disposed || exited) return;
+        if (!sessionReady) {
+          setStatus("waiting");
+          setDetail(waitingDetail);
+          retry = setTimeout(async () => {
+            try {
+              const response = await fetch(
+                `${apiBase()}/api/chats/${chatId}/subagents/${tab.id}/readiness`,
+              );
+              if (response.ok) {
+                const readiness = await response.json();
+                sessionReady = readiness.session_ready;
+                waitingDetail =
+                  readiness.daemon?.queue_error ||
+                  (readiness.daemon?.queue_connected === false
+                    ? "sandbox queue is disconnected"
+                    : "waiting for sandbox queue");
+                setDetail(waitingDetail);
+              }
+            } catch {
+              setDetail("readiness check failed");
+            }
+            connect();
+          }, 1500);
+          return;
+        }
+        setStatus("connecting");
+        setDetail("");
         const path =
           tab.kind === "manual"
             ? `terminals/${tab.id}`
@@ -118,6 +152,7 @@ function TaskTerminal({ chatId, tab }: { chatId: string; tab: TerminalTab }) {
           if (frame.type === "handshake") {
             offset = frame.body.offset;
             setStatus("live");
+            setDetail("");
           } else if (frame.type === "tty-output") {
             const bytes = Uint8Array.from(atob(frame.body.data), (c) =>
               c.charCodeAt(0),
@@ -130,9 +165,15 @@ function TaskTerminal({ chatId, tab }: { chatId: string; tab: TerminalTab }) {
             term.write(`\r\n[session exited: ${frame.body.code}]\r\n`);
           }
         };
-        ws.onclose = () => {
+        ws.onclose = (event) => {
           if (disposed || exited) return;
-          setStatus("connecting");
+          const reason = event.reason || `connection closed (${event.code})`;
+          setDetail(reason);
+          if (event.code === 4404 || event.code === 4409) {
+            setStatus("waiting");
+          } else {
+            setStatus("error");
+          }
           retry = setTimeout(connect, 1500);
         };
       };
@@ -151,7 +192,7 @@ function TaskTerminal({ chatId, tab }: { chatId: string; tab: TerminalTab }) {
       ws?.close();
       void cleanup.then((dispose) => dispose?.());
     };
-  }, [chatId, tab.id, tab.kind]);
+  }, [chatId, tab.id, tab.kind, tab.status]);
 
   return (
     <>
@@ -162,11 +203,13 @@ function TaskTerminal({ chatId, tab }: { chatId: string; tab: TerminalTab }) {
               ? "size-2 rounded-full bg-emerald-500"
               : status === "exited"
                 ? "size-2 rounded-full bg-muted-foreground"
-                : "size-2 animate-pulse rounded-full bg-amber-500"
+                : status === "error"
+                  ? "size-2 rounded-full bg-destructive"
+                  : "size-2 animate-pulse rounded-full bg-amber-500"
           }
         />
         <span className="truncate text-xs text-muted-foreground">
-          {tab.title} — {status}
+          {tab.title} — {status}{detail ? `: ${detail}` : ""}
         </span>
       </div>
       <div ref={hostRef} className="min-h-0 flex-1 bg-[#0a0a0a] p-2" />
@@ -176,44 +219,44 @@ function TaskTerminal({ chatId, tab }: { chatId: string; tab: TerminalTab }) {
 
 export function TerminalPane({
   chatId,
-  devboxes,
-  preferredDevboxId,
+  sandboxes,
+  preferredSandboxId,
   onClose,
   onCreateSandbox,
   onChanged,
 }: {
   chatId: string;
-  devboxes: DevboxWorkspace[];
-  preferredDevboxId?: string;
+  sandboxes: SandboxWorkspace[];
+  preferredSandboxId?: string;
   onClose: () => void;
   onCreateSandbox: () => void;
   onChanged: () => void;
 }) {
   const latest =
-    devboxes.find((box) => box.id === preferredDevboxId) ??
-    devboxes.findLast((box) => tabs(box).length) ??
-    devboxes.at(-1);
-  const [selectedDevboxId, setSelectedDevboxId] = useState(latest?.id ?? "");
+    sandboxes.find((box) => box.id === preferredSandboxId) ??
+    sandboxes.findLast((box) => tabs(box).length) ??
+    sandboxes.at(-1);
+  const [selectedSandboxId, setSelectedSandboxId] = useState(latest?.id ?? "");
   const [selectedTabId, setSelectedTabId] = useState(tabs(latest).at(-1)?.id ?? "");
   const [creating, setCreating] = useState(false);
   const [deletingId, setDeletingId] = useState("");
-  const activeDevbox =
-    devboxes.find((box) => box.id === selectedDevboxId) ?? latest;
-  const activeTabs = tabs(activeDevbox);
+  const activeSandbox =
+    sandboxes.find((box) => box.id === selectedSandboxId) ?? latest;
+  const activeTabs = tabs(activeSandbox);
   const activeTab =
     activeTabs.find((tab) => tab.id === selectedTabId) ?? activeTabs.at(-1);
 
-  const selectDevbox = (box: DevboxWorkspace) => {
-    setSelectedDevboxId(box.id);
+  const selectSandbox = (box: SandboxWorkspace) => {
+    setSelectedSandboxId(box.id);
     setSelectedTabId(tabs(box).at(-1)?.id ?? "");
   };
 
   const createTerminal = async () => {
-    if (!activeDevbox) return;
+    if (!activeSandbox) return;
     setCreating(true);
     try {
       const response = await fetch(
-        `${apiBase()}/api/chats/${chatId}/devboxes/${activeDevbox.id}/terminals`,
+        `${apiBase()}/api/chats/${chatId}/sandboxes/${activeSandbox.id}/terminals`,
         { method: "POST" },
       );
       if (!response.ok) return;
@@ -244,18 +287,18 @@ export function TerminalPane({
     }
   };
 
-  const deleteDevbox = async (box: DevboxWorkspace) => {
+  const deleteSandbox = async (box: SandboxWorkspace) => {
     if (!window.confirm(`Delete ${box.title || "this sandbox"} and stop everything in it?`)) return;
     setDeletingId(box.id);
     try {
       const response = await fetch(
-        `${apiBase()}/api/chats/${chatId}/devboxes/${box.id}`,
+        `${apiBase()}/api/chats/${chatId}/sandboxes/${box.id}`,
         { method: "DELETE" },
       );
       if (!response.ok) return;
-      const remaining = devboxes.filter((candidate) => candidate.id !== box.id);
+      const remaining = sandboxes.filter((candidate) => candidate.id !== box.id);
       const next = remaining.at(-1);
-      setSelectedDevboxId(next?.id ?? "");
+      setSelectedSandboxId(next?.id ?? "");
       setSelectedTabId(tabs(next).at(-1)?.id ?? "");
       onChanged();
       if (!remaining.length) onClose();
@@ -267,23 +310,23 @@ export function TerminalPane({
   return (
     <div className="flex h-2/5 min-w-0 flex-none flex-col border-t @4xl:h-auto @4xl:min-w-[28rem] @4xl:flex-1 @4xl:border-t-0 @4xl:border-l">
       <div className="flex h-10 shrink-0 items-center gap-1 overflow-x-auto border-b px-2">
-        {devboxes.map((box, index) => (
+        {sandboxes.map((box, index) => (
           <div key={box.id} className="flex shrink-0 items-center">
             <Button
-              variant={box.id === activeDevbox?.id ? "secondary" : "ghost"}
+              variant={box.id === activeSandbox?.id ? "secondary" : "ghost"}
               size="sm"
               className="max-w-40 rounded-r-none"
-              onClick={() => selectDevbox(box)}
+              onClick={() => selectSandbox(box)}
             >
-              <span className="truncate">{box.title || `devbox ${index + 1}`}</span>
+              <span className="truncate">{box.title || `sandbox ${index + 1}`}</span>
             </Button>
             <Button
-              variant={box.id === activeDevbox?.id ? "secondary" : "ghost"}
+              variant={box.id === activeSandbox?.id ? "secondary" : "ghost"}
               size="icon-sm"
               className="rounded-l-none"
-              aria-label={`Delete ${box.title || `devbox ${index + 1}`}`}
-              disabled={deletingId === box.id || box.state === "creating"}
-              onClick={() => void deleteDevbox(box)}
+              aria-label={`Delete ${box.title || `sandbox ${index + 1}`}`}
+              disabled={deletingId === box.id || box.status === "creating"}
+              onClick={() => void deleteSandbox(box)}
             >
               <XIcon />
             </Button>
@@ -302,7 +345,7 @@ export function TerminalPane({
           variant="ghost"
           size="icon"
           className="ml-auto size-7 shrink-0"
-          aria-label="Close devboxes"
+          aria-label="Close sandboxes"
           onClick={onClose}
         >
           <XIcon />
@@ -338,7 +381,7 @@ export function TerminalPane({
           size="icon-xs"
           className="shrink-0"
           aria-label="New bash terminal"
-          disabled={creating || activeDevbox?.state !== "ready"}
+          disabled={creating || activeSandbox?.status !== "running"}
           onClick={createTerminal}
         >
           <PlusIcon />
@@ -348,7 +391,7 @@ export function TerminalPane({
         <TaskTerminal key={activeTab.id} chatId={chatId} tab={activeTab} />
       ) : (
         <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-muted-foreground">
-          {activeDevbox?.error || "Devbox ready"}
+          {activeSandbox?.status === "failed" ? "Sandbox failed" : "Sandbox ready"}
         </div>
       )}
     </div>

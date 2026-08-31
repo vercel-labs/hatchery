@@ -28,7 +28,7 @@ type Launch = {
 };
 
 const emptyLaunch: Launch = {
-  title: "devbox",
+  title: "sandbox",
   repos: [],
   setup_script: null,
   ports: [],
@@ -45,7 +45,7 @@ export function SandboxForm({
   chatId: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onCreated: (devboxId: string) => void;
+  onCreated: (sandboxId: string) => void;
 }) {
   const [launch, setLaunch] = useState(emptyLaunch);
   const [suggesting, setSuggesting] = useState(true);
@@ -54,7 +54,7 @@ export function SandboxForm({
 
   useEffect(() => {
     if (!open) return;
-    fetch(`${apiBase()}/api/chats/${chatId}/devboxes/suggestion`)
+    fetch(`${apiBase()}/api/chats/${chatId}/sandboxes/suggestion`)
       .then(async (response) => {
         if (!response.ok) throw new Error("Could not suggest sandbox settings");
         setLaunch(await response.json());
@@ -71,7 +71,7 @@ export function SandboxForm({
     setCreating(true);
     setError("");
     try {
-      const response = await fetch(`${apiBase()}/api/chats/${chatId}/devboxes`, {
+      const response = await fetch(`${apiBase()}/api/chats/${chatId}/sandboxes`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(launch),
@@ -80,9 +80,9 @@ export function SandboxForm({
         const body = await response.json().catch(() => null);
         throw new Error(body?.detail?.[0]?.msg ?? body?.detail ?? "Could not create sandbox");
       }
-      const devbox: { id: string } = await response.json();
+      const sandbox: { id: string } = await response.json();
       onOpenChange(false);
-      onCreated(devbox.id);
+      onCreated(sandbox.id);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not create sandbox");
     } finally {

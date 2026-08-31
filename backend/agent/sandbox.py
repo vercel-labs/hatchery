@@ -1,25 +1,22 @@
-"""Manual and dispatcher-driven devbox creation."""
+"""Chat-scoped Vercel Sandbox control-plane boundary."""
 
 import json
-import typing
 
 import ai
 import pydantic
 
 import models
-from agent import devbox
-from store import devboxes, events, terminals, workspaces
+from store import events
+import worker
 
 
 class Launch(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(
         extra="forbid",
-        json_schema_extra={
-            "required": ["title", "repos", "setup_script", "ports", "branch", "git_sha"]
-        },
+        json_schema_extra={"required": ["title", "repos", "setup_script", "ports", "branch", "git_sha"]},
     )
 
-    title: str = "devbox"
+    title: str = "sandbox"
     repos: list[str] = []
     setup_script: str | None = None
     ports: list[int] = []
@@ -29,7 +26,7 @@ class Launch(pydantic.BaseModel):
     @pydantic.field_validator("title")
     @classmethod
     def valid_title(cls, title: str) -> str:
-        return title.strip()[:80] or "devbox"
+        return title.strip()[:80] or "sandbox"
 
     @pydantic.field_validator("repos")
     @classmethod
@@ -82,9 +79,7 @@ async def suggest(space: models.Space) -> Launch:
         [ai.system_message(_SYSTEM), ai.user_message(request)],
         output_type=Launch,
         params=ai.InferenceRequestParams(
-            sampling={
-                ai.TemperatureSamplerParams: ai.TemperatureSamplerParams(temperature=0)
-            },
+            sampling={ai.TemperatureSamplerParams: ai.TemperatureSamplerParams(temperature=0)},
             output=ai.OutputParams(max_tokens=4096),
         ),
     ) as result:
@@ -93,41 +88,42 @@ async def suggest(space: models.Space) -> Launch:
         return result.output
 
 
-async def prepare(chat_id: str, launch: Launch) -> dict[str, typing.Any]:
-    record = await devboxes.create(chat_id, launch.title, launch.repos)
-    record.update(
-        setup_script=launch.setup_script,
-        ports=launch.ports,
-        branch=launch.branch,
-        git_sha=launch.git_sha,
+async def create(chat_id: str, launch: Launch) -> worker.Worker:
+    created = await worker.create(chat_id, worker.WorkerSpec(**launch.model_dump()))
+    await events.append(chat_id, "ui", {"type": "sandbox.changed"})
+    return created
+
+
+async def list_all(chat_id: str) -> list[worker.Worker]:
+    return await worker.list_all(chat_id)
+
+
+async def destroy(chat_id: str, sandbox_id: str) -> None:
+    record = await worker.get(sandbox_id)
+    if record is None or record.chat_id != chat_id:
+        raise ValueError("sandbox does not belong to this chat")
+    await worker.destroy(sandbox_id)
+    await events.append(chat_id, "ui", {"type": "sandbox.changed"})
+
+
+async def launch_task(chat_id: str, sandbox_id: str, prompt: str, model: str) -> worker.Task:
+    task = await worker.launch_task(chat_id, sandbox_id, prompt, model)
+    await events.append(
+        chat_id,
+        "ui",
+        {
+            "type": "task.changed",
+            "subagent_id": task.id,
+            "sandbox_id": task.worker_id,
+            "state": task.status,
+        },
     )
-    await devboxes.save(record)
-    await terminals.create(chat_id, record["id"], "bash")
-    await events.append(chat_id, "ui", {"type": "devbox.changed"})
-    return record
+    return task
 
 
-async def provision(record: dict[str, typing.Any]) -> dict[str, typing.Any]:
-    async with workspaces.provision(record["chat_id"]):
-        try:
-            record["set_id"] = await devbox.create_taskset(
-                f"hatchery {record['chat_id']} / {record['title']}"
-            )
-            record["box"] = await devbox.create_box(
-                f"hatchery-{record['chat_id']}-{record['id'][-6:]}",
-                record["repos"],
-                setup_script=record.get("setup_script"),
-                ports=record.get("ports"),
-                branch=record.get("branch"),
-                git_sha=record.get("git_sha"),
-            )
-            record["state"] = "ready"
-        except Exception as error:
-            record["state"] = "errored"
-            record["error"] = str(error)
-            await devboxes.save(record)
-            await events.append(record["chat_id"], "ui", {"type": "devbox.changed"})
-            raise
-        await devboxes.save(record)
-        await events.append(record["chat_id"], "ui", {"type": "devbox.changed"})
-        return record
+async def send_task_input(chat_id: str, task_id: str, prompt: str) -> worker.Task:
+    return await worker.send_task_input(chat_id, task_id, prompt)
+
+
+async def cancel_task(chat_id: str, task_id: str) -> worker.Task:
+    return await worker.cancel_task(chat_id, task_id)

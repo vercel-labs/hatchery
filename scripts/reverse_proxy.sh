@@ -1,5 +1,5 @@
 #!/bin/sh
-# Expose Vercel's local dev port and print the command needed to start it.
+# Expose Vercel's local dev server so cloud sandboxes can reach its Queue broker.
 set -eu
 
 root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"

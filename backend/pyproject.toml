@@ -6,12 +6,13 @@ requires-python = ">=3.12"
 dependencies = [
     "ai[vercel]",
     "asyncpg>=0.31.0",
+    "asyncssh>=2.21,<3",
     "fastapi>=0.115",
     "httpx>=0.28",
     "pydantic>=2.7",
     "vercel",
     "vercel-connect",
-    "websockets>=13",
+    "websockets>=15,<17",
 ]
 
 [dependency-groups]
@@ -23,6 +24,9 @@ dev = [
 
 [tool.vercel]
 entrypoint = "app.server:app"
+
+[[tool.vercel.subscribers]]
+entrypoint = "app.server:worker_event"
 
 [tool.uv]
 package = false
