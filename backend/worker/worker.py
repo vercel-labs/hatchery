@@ -84,13 +84,9 @@ async def launch_task(
     record = await _required(worker_id)
     if record.chat_id != chat_id:
         raise ValueError("sandbox does not belong to this chat")
-    if record.status == "stopped":
-        await sandbox.resume(record.sandbox_name, record.id, record.spec, record.daemon_token)
-        record.status = "running"
-        record.updated_at = _now()
-        await store.save(record)
-    if record.status != "running":
-        raise RuntimeError("sandbox is not running")
+    if record.status not in ("running", "stopped"):
+        raise RuntimeError("sandbox is not available")
+    resume_required = record.status == "stopped"
     now = _now()
     task = models.Task(
         id=task_id or f"task_{uuid.uuid4().hex[:12]}",
@@ -118,6 +114,17 @@ async def launch_task(
         payload={"prompt": prompt, "model": model},
         command_id=command_id,
     )
+    if resume_required:
+        try:
+            await sandbox.resume_for_command(record)
+        except Exception:
+            task.launch_attempts += 1
+            task.updated_at = _now()
+            await store.save_task(task)
+            raise
+        record.status = "running"
+        record.updated_at = _now()
+        await store.save(record)
     await queue.send(command)
     return task
 

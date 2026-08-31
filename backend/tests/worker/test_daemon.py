@@ -87,6 +87,47 @@ async def test_runtime_runs_interactive_fx_and_reuses_it_for_follow_up(monkeypat
     assert [event["sequence"] for event in emitted] == [0, 1]
 
 
+async def test_command_is_not_acknowledged_when_process_handoff_fails(monkeypatch, tmp_path):
+    emitted = []
+
+    async def publish(event):
+        emitted.append(event)
+
+    runtime = main.Runtime("wrk_1", str(tmp_path), publish, str(tmp_path / "state.json"))
+
+    async def launch(*args, **kwargs):
+        raise RuntimeError("process failed")
+
+    monkeypatch.setattr(runtime, "_launch", launch)
+    command = {
+        "worker_id": "wrk_1", "task_id": "task_1", "sequence": 0,
+        "type": "task.launch", "payload": {"prompt": "fix it"},
+    }
+
+    try:
+        await runtime.handle(command)
+    except RuntimeError as error:
+        assert str(error) == "process failed"
+    else:
+        raise AssertionError("failed handoff must reject Queue delivery")
+    assert runtime.sequences == {}
+
+
+async def test_runtime_recovers_active_task_with_fx_resume(monkeypatch, tmp_path):
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({"active": {"task_1": {"model": "openai/test"}}}))
+    runtime = main.Runtime("wrk_1", str(tmp_path), lambda event: None, str(state))
+    calls = []
+
+    async def launch(task_id, prompt, model, *, resume):
+        calls.append((task_id, prompt, model, resume))
+
+    monkeypatch.setattr(runtime, "_launch", launch)
+    await runtime.recover_active_tasks()
+
+    assert calls == [("task_1", "", "openai/test", True)]
+
+
 def test_fx_resume_is_only_used_for_relaunch():
     assert main.Runtime.fx_command(resume=False) == ["fx"]
     assert main.Runtime.fx_command(resume=True) == ["fx", "--resume", "last"]

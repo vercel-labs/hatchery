@@ -75,8 +75,14 @@ class Runtime:
         self.sequences = {key: int(value) for key, value in state.get("commands", {}).items()}
         self.processes: dict[str, TTYSession] = {}
         self.event_sequences = {key: int(value) for key, value in state.get("events", {}).items()}
+        self.active = {
+            str(key): {"model": str(value.get("model") or "")}
+            for key, value in state.get("active", {}).items()
+            if isinstance(value, dict)
+        }
         self.jobs: set[asyncio.Task] = set()
         self.streams: set[asyncio.Task] = set()
+        self.command_lock = asyncio.Lock()
         self.input_locks: dict[int, threading.Lock] = {}
         self._input_generations: dict[int, int] = {}
         self._input_generation_lock = threading.Lock()
@@ -86,35 +92,36 @@ class Runtime:
         self.sign_commits = None
 
     async def handle(self, raw: dict) -> None:
+        """Accept one command only after its process handoff is complete.
+
+        Queue delivery acknowledgement follows this method returning. Persisting the
+        sequence before scheduling background work could therefore lose a launch if
+        the daemon crashed between those two steps.
+        """
         task_id = str(raw.get("task_id") or "")
         if not task_id or raw.get("worker_id") != self.worker_id:
             return
         sequence = int(raw.get("sequence", -1))
-        if sequence <= self.sequences.get(task_id, -1):
-            return
-        self.sequences[task_id] = sequence
-        self._save_state()
-        kind = raw.get("type")
-        if kind == "task.cancel":
-            session = self.processes.get(task_id)
-            self.cancel_pending_input(session)
-            if session is not None and session.exit_code is None:
-                session.send_signal("interrupt")
-            return
-        if kind not in ("task.launch", "task.input"):
-            return
-        payload = raw.get("payload") or {}
-        prompt = str(payload.get("prompt") or "")
-        model = str(payload.get("model") or "")
-        session = self.processes.get(task_id)
-        if kind == "task.input" and session is not None and session.exit_code is None:
-            job = asyncio.create_task(self._deliver(task_id, session, prompt))
-        else:
-            job = asyncio.create_task(
-                self._launch(task_id, prompt, model, resume=kind == "task.input")
-            )
-        self.jobs.add(job)
-        job.add_done_callback(self.jobs.discard)
+        async with self.command_lock:
+            if sequence <= self.sequences.get(task_id, -1):
+                return
+            kind = raw.get("type")
+            if kind == "task.cancel":
+                session = self.processes.get(task_id)
+                self.cancel_pending_input(session)
+                if session is not None and session.exit_code is None:
+                    session.send_signal("interrupt")
+            elif kind in ("task.launch", "task.input"):
+                payload = raw.get("payload") or {}
+                prompt = str(payload.get("prompt") or "")
+                model = str(payload.get("model") or "")
+                session = self.processes.get(task_id)
+                if kind == "task.input" and session is not None and session.exit_code is None:
+                    await self._deliver(task_id, session, prompt)
+                else:
+                    await self._launch(task_id, prompt, model, resume=kind == "task.input")
+            self.sequences[task_id] = sequence
+            self._save_state()
 
     async def _launch(self, task_id: str, prompt: str, model: str, *, resume: bool) -> None:
         await self._emit(task_id, "task.started", {})
@@ -127,6 +134,8 @@ class Runtime:
             env["HATCHERY_WORKSPACE"] = self.workspace
             session = TTYSession(task_id, self.fx_command(resume=resume), self.workspace, 80, 24, env)
             self.processes[task_id] = session
+            self.active[task_id] = {"model": model}
+            self._save_state()
             with Handler.sessions_lock:
                 Handler.sessions[task_id] = session
             stream = asyncio.create_task(self._stream_task(task_id, session))
@@ -138,6 +147,7 @@ class Runtime:
             raise
         except Exception as error:
             await self._emit(task_id, "task.failed", {"error": str(error)})
+            raise
 
     async def _deliver(self, task_id: str, session: "TTYSession", prompt: str) -> None:
         try:
@@ -148,6 +158,7 @@ class Runtime:
             raise
         except Exception as error:
             await self._emit(task_id, "task.failed", {"error": str(error)})
+            raise
 
     async def _stream_task(self, task_id: str, session: "TTYSession") -> None:
         seen: set[str] = set()
@@ -177,6 +188,8 @@ class Runtime:
                             "tool_calls": [],
                         }
                     })
+                    self.active.pop(task_id, None)
+                    self._save_state()
             exit_code = await asyncio.to_thread(session.wait)
             if exit_code != 0:
                 _, output, _ = session.read(0, 0)
@@ -447,7 +460,13 @@ class Runtime:
         return {
             "commands": dict(self.sequences),
             "events": dict(self.event_sequences),
+            "active": dict(self.active),
         }
+
+    async def recover_active_tasks(self) -> None:
+        """Reconnect tasks whose fx process was owned by a previous daemon."""
+        for task_id, state in list(self.active.items()):
+            await self._launch(task_id, "", state.get("model", ""), resume=True)
 
     @staticmethod
     def meaningful_input(text: str) -> bool:
@@ -576,7 +595,11 @@ class Runtime:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.state_path.with_suffix(".tmp")
         temporary.write_text(
-            json.dumps({"commands": self.sequences, "events": self.event_sequences}),
+            json.dumps({
+                "commands": self.sequences,
+                "events": self.event_sequences,
+                "active": self.active,
+            }),
             encoding="utf-8",
         )
         temporary.replace(self.state_path)
@@ -1136,6 +1159,12 @@ async def _sign_commits(connect, connector: str, request: dict) -> list[str]:
     return signed
 
 
+async def redeliver_command(delivery, runtime: Runtime) -> None:
+    """Acknowledge a Queue command only after durable runtime acceptance."""
+    async with delivery as message:
+        await runtime.handle(message.payload)
+
+
 async def run(worker_id: str, workspace: str, port: int, state_path: str) -> None:
     from vercel import connect, queue
 
@@ -1152,6 +1181,7 @@ async def run(worker_id: str, workspace: str, port: int, state_path: str) -> Non
             return future.result(timeout=300)
         runtime.sign_commits = sign_commits
     runtime.loop = asyncio.get_running_loop()
+    await runtime.recover_active_tasks()
     Handler.workspace = workspace
     Handler.runtime = runtime
     server = http.server.ThreadingHTTPServer(("0.0.0.0", port), Handler)
@@ -1169,8 +1199,7 @@ async def run(worker_id: str, workspace: str, port: int, state_path: str) -> Non
                 lease_duration=300,
             ):
                 delivered = True
-                async with delivery as message:
-                    await runtime.handle(message.payload)
+                await redeliver_command(delivery, runtime)
             if not delivered:
                 await asyncio.sleep(1)
     finally:

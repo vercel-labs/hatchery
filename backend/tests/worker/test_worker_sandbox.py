@@ -114,6 +114,126 @@ async def test_wait_for_daemon_retries_route_warmup(monkeypatch):
     assert calls == 2
 
 
+async def test_existing_sandbox_repairs_dead_daemon(monkeypatch):
+    calls = {}
+
+    class Files:
+        async def mkdir(self, path):
+            calls.setdefault("mkdir", []).append(path)
+
+        async def write_text(self, path, text, mode):
+            calls["write"] = (path, mode)
+
+    class Process:
+        returncode = None
+
+        async def refresh(self):
+            pass
+
+    class Box:
+        fs = Files()
+        routes = [types.SimpleNamespace(port=8787, url="https://daemon.example")]
+
+        async def create_process(self, command, args, env):
+            calls["process"] = (command, args, env)
+            return Process()
+
+    health = iter([httpx.ConnectError("down"), {"ok": True, "version": 4}])
+
+    async def daemon_health(url, token):
+        result = next(health)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(sandbox, "_daemon_health", daemon_health)
+    monkeypatch.setattr(sandbox, "_wait_for_daemon", lambda *args, **kwargs: daemon_health(args[0], args[1]))
+
+    await sandbox.repair_daemon(
+        Box(), "wrk_1", models.WorkerSpec(), "secret",
+        [models.Route(port=8787, url="https://daemon.example")],
+    )
+
+    assert calls["write"] == (sandbox.DAEMON_PATH, 0o755)
+    assert calls["process"][0] == "python3"
+
+
+async def test_probe_route_rejects_undeclared_port():
+    record = models.Worker(
+        id="wrk_1", chat_id="chat_1", sandbox_name="hatchery-wrk_1",
+        command_topic="topic", title="worker", status="running",
+        spec=models.WorkerSpec(ports=[3000]),
+        routes=[models.Route(port=3000, url="https://app.example")],
+        daemon_token="secret", created_at="now", updated_at="now",
+    )
+
+    try:
+        await sandbox.probe_route(record, 8787)
+    except ValueError as error:
+        assert "not declared" in str(error)
+    else:
+        raise AssertionError("control-plane route must not be probeable")
+
+
+async def test_snapshot_create_and_restore(monkeypatch):
+    calls = []
+
+    class Created:
+        id = "snap_1"
+
+    class Box:
+        routes = [types.SimpleNamespace(port=8787, url="https://daemon.example")]
+
+        async def snapshot(self):
+            calls.append("snapshot")
+            return Created()
+
+        async def stop(self):
+            calls.append("stop")
+
+        async def update(self, **options):
+            calls.append(("update", options))
+
+        async def update_network_policy(self, policy):
+            calls.append("policy")
+
+    box = Box()
+
+    async def get_sandbox(name):
+        return box
+
+    async def resume_sandbox(name):
+        calls.append("resume")
+        return box
+
+    async def configure(found):
+        calls.append("git")
+
+    async def credentials():
+        return None
+
+    async def repair(*args, **kwargs):
+        calls.append("repair")
+
+    monkeypatch.setattr(sandbox.vercel_sandbox, "get_sandbox", get_sandbox)
+    monkeypatch.setattr(sandbox.vercel_sandbox, "resume_sandbox", resume_sandbox)
+    monkeypatch.setattr(sandbox.git, "configure", configure)
+    monkeypatch.setattr(sandbox.git, "git_credentials", credentials)
+    monkeypatch.setattr(sandbox, "repair_daemon", repair)
+    record = models.Worker(
+        id="wrk_1", chat_id="chat_1", sandbox_name="hatchery-wrk_1",
+        command_topic="topic", title="worker", status="running",
+        spec=models.WorkerSpec(),
+        routes=[models.Route(port=8787, url="https://daemon.example")],
+        daemon_token="secret",
+        created_at="now", updated_at="now",
+    )
+
+    assert await sandbox.snapshot(record) == "snap_1"
+    assert await sandbox.snapshot(record, "snap_1") == "snap_1"
+    assert calls == ["snapshot", "stop", ("update", {"current_snapshot_id": "snap_1"}), "resume", "policy", "git", "repair"]
+
+
 def test_daemon_env_bridges_vercel_dev_queue_through_public_origin(monkeypatch):
     monkeypatch.setenv("VERCEL_QUEUE_TOKEN", "vc-dev-token")
     monkeypatch.setenv("VERCEL_QUEUE_BASE_URL", "http://127.0.0.1:3000/_svc/_queues")

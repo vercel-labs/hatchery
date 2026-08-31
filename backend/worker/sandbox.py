@@ -39,6 +39,7 @@ first_unsigned_commit = git.first_unsigned_commit
 sign_request = git.sign_request
 is_signed_by_app = git.is_signed_by_app
 origin_owner_repo = git.origin_owner_repo
+redeliver_command = daemon_main.redeliver_command
 
 
 @dataclasses.dataclass(frozen=True)
@@ -77,12 +78,7 @@ async def provision(
     if created:
         process = await _bootstrap(box, worker_id, spec, daemon_token)
     routes = [models.Route(port=route.port, url=route.url) for route in box.routes]
-    daemon_route = next((route for route in routes if route.port == DAEMON_PORT), None)
-    if daemon_route is None:
-        raise RuntimeError("sandbox did not expose the daemon route")
-    health = await _wait_for_daemon(daemon_route.url, daemon_token, process)
-    if health != {"ok": True, "version": daemon_main.VERSION}:
-        raise RuntimeError("sandbox daemon returned an incompatible health response")
+    await repair_daemon(box, worker_id, spec, daemon_token, routes, process=process)
     return Provisioned(name, routes)
 
 
@@ -100,11 +96,46 @@ async def resume(name: str, worker_id: str, spec: models.WorkerSpec, token: str)
     box = await vercel_sandbox.resume_sandbox(name=name)
     await box.update_network_policy(git.github_network_policy(await git.git_credentials()))
     await git.configure(box)
-    await box.create_process(
-        "python3",
-        [DAEMON_PATH, "--port", str(DAEMON_PORT), "--worker-id", worker_id, "--workspace", _workspace(spec), "--state", DAEMON_STATE_PATH],
-        env=_daemon_env(worker_id, spec, token),
-    )
+    routes = [models.Route(port=route.port, url=route.url) for route in box.routes]
+    await repair_daemon(box, worker_id, spec, token, routes)
+
+
+async def resume_for_command(record: models.Worker) -> None:
+    """Resume and verify a stopped worker before its durable command is published."""
+    await resume(record.sandbox_name, record.id, record.spec, record.daemon_token)
+
+
+async def recover_daemon(record: models.Worker) -> None:
+    """Repair daemon control and let its persisted active-task set resume fx."""
+    box = await vercel_sandbox.get_sandbox(name=record.sandbox_name)
+    await repair_daemon(box, record.id, record.spec, record.daemon_token, record.routes)
+
+
+async def repair_daemon(
+    box,
+    worker_id: str,
+    spec: models.WorkerSpec,
+    token: str,
+    routes: list[models.Route],
+    *,
+    process=None,
+) -> None:
+    daemon_route = next((route for route in routes if route.port == DAEMON_PORT), None)
+    if daemon_route is None:
+        raise RuntimeError("sandbox did not expose the daemon route")
+    if process is None:
+        try:
+            health = await _daemon_health(daemon_route.url, token)
+            if health == {"ok": True, "version": daemon_main.VERSION}:
+                return
+        except (httpx.HTTPError, ValueError):
+            pass
+        await box.fs.mkdir("/opt/hatchery")
+        await box.fs.write_text(DAEMON_PATH, daemon_main.source(), mode=0o755)
+        process = await _start_daemon(box, worker_id, spec, token)
+    health = await _wait_for_daemon(daemon_route.url, token, process)
+    if health != {"ok": True, "version": daemon_main.VERSION}:
+        raise RuntimeError("sandbox daemon returned an incompatible health response")
 
 
 async def _bootstrap(box, worker_id: str, spec: models.WorkerSpec, token: str):
@@ -143,12 +174,44 @@ async def _bootstrap(box, worker_id: str, spec: models.WorkerSpec, token: str):
             check=True,
             capture_output=True,
         )
-    workspace = _workspace(spec)
+    return await _start_daemon(box, worker_id, spec, token)
+
+
+async def _start_daemon(box, worker_id: str, spec: models.WorkerSpec, token: str):
     return await box.create_process(
         "python3",
-        [DAEMON_PATH, "--port", str(DAEMON_PORT), "--worker-id", worker_id, "--workspace", workspace, "--state", DAEMON_STATE_PATH],
+        [DAEMON_PATH, "--port", str(DAEMON_PORT), "--worker-id", worker_id, "--workspace", _workspace(spec), "--state", DAEMON_STATE_PATH],
         env=_daemon_env(worker_id, spec, token),
     )
+
+
+async def probe_route(record: models.Worker, port: int, path: str = "/") -> httpx.Response:
+    """Probe one declared application route; internal control routes are not exposed."""
+    if port not in record.spec.ports:
+        raise ValueError("port is not declared by this worker")
+    route = next((item for item in record.routes if item.port == port), None)
+    if route is None:
+        raise RuntimeError("sandbox route is unavailable")
+    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+        response = await client.get(f"{route.url.rstrip('/')}/{path.lstrip('/')}")
+        response.raise_for_status()
+        return response
+
+
+async def snapshot(record: models.Worker, snapshot_id: str | None = None) -> str:
+    """Create a filesystem snapshot, or restore one and restart the daemon."""
+    box = await vercel_sandbox.get_sandbox(name=record.sandbox_name)
+    if snapshot_id is None:
+        created = await box.snapshot()
+        return created.id
+    await box.stop()
+    await box.update(current_snapshot_id=snapshot_id)
+    box = await vercel_sandbox.resume_sandbox(name=record.sandbox_name)
+    await box.update_network_policy(git.github_network_policy(await git.git_credentials()))
+    await git.configure(box)
+    routes = [models.Route(port=route.port, url=route.url) for route in box.routes]
+    await repair_daemon(box, record.id, record.spec, record.daemon_token, routes)
+    return snapshot_id
 
 
 def daemon_url(record: models.Worker) -> str:
@@ -219,29 +282,33 @@ async def _tty_action(record: models.Worker, session_id: str, action: str, paylo
         response.raise_for_status()
 
 
+async def _daemon_health(url: str, token: str) -> dict:
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.get(
+            f"{url.rstrip('/')}/health",
+            headers={"authorization": f"Bearer {token}"},
+        )
+        response.raise_for_status()
+        return response.json()
+
+
 async def _wait_for_daemon(url: str, token: str, process=None) -> dict:
     error = None
-    async with httpx.AsyncClient(timeout=10) as client:
-        for attempt in range(20):
-            try:
-                response = await client.get(
-                    f"{url}/health",
-                    headers={"authorization": f"Bearer {token}"},
-                )
-                response.raise_for_status()
-                return response.json()
-            except (httpx.HTTPError, ValueError) as current:
-                error = current
-                if process is not None:
-                    await process.refresh()
-                    if process.returncode is not None:
-                        _, stderr = await process.communicate()
-                        detail = (stderr or "").strip()
-                        raise RuntimeError(
-                            f"sandbox daemon exited with {process.returncode}: {detail}"
-                        ) from current
-                if attempt < 19:
-                    await asyncio.sleep(1)
+    for attempt in range(20):
+        try:
+            return await _daemon_health(url, token)
+        except (httpx.HTTPError, ValueError) as current:
+            error = current
+            if process is not None:
+                await process.refresh()
+                if process.returncode is not None:
+                    _, stderr = await process.communicate()
+                    detail = (stderr or "").strip()
+                    raise RuntimeError(
+                        f"sandbox daemon exited with {process.returncode}: {detail}"
+                    ) from current
+            if attempt < 19:
+                await asyncio.sleep(1)
     raise RuntimeError("sandbox daemon did not become healthy") from error
 
 
