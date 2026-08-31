@@ -5,6 +5,8 @@ import datetime
 import secrets
 import uuid
 
+import ai.experimental_telemetry
+
 from worker import models, protocol, queue, sandbox, store
 from worker.daemon import VERSION as DAEMON_VERSION
 
@@ -14,8 +16,21 @@ def _now() -> str:
 
 
 async def _send_command(record: models.Worker, command: protocol.Command) -> None:
-    await sandbox.prepare_for_command(record)
-    await queue.send(command)
+    async with ai.experimental_telemetry.span("worker.command") as span:
+        span.set_attrs(
+            {
+                "chat.id": record.chat_id,
+                "worker.id": record.id,
+                "task.id": command.task_id or "",
+                "command.id": command.id,
+            },
+            command_type=command.type,
+            sequence=command.sequence,
+            worker_state=record.status,
+        )
+        await sandbox.prepare_for_command(record)
+        message_id = await queue.send(command)
+        span.set_attrs({"queue.message_id": message_id or ""})
 
 
 async def create(chat_id: str, spec: models.WorkerSpec) -> models.Worker:
@@ -35,7 +50,14 @@ async def create(chat_id: str, spec: models.WorkerSpec) -> models.Worker:
     )
     await store.save(record)
     try:
-        provisioned = await sandbox.provision(record.id, spec, record.daemon_token)
+        async with ai.experimental_telemetry.span("sandbox.provision") as span:
+            span.set_attrs(
+                {"chat.id": chat_id, "worker.id": record.id},
+                repo_count=len(spec.repos),
+                port_count=len(spec.ports),
+            )
+            provisioned = await sandbox.provision(record.id, spec, record.daemon_token)
+            span.set_attrs(sandbox_name=provisioned.sandbox_name)
     except Exception:
         record.status = "failed"
         record.updated_at = _now()

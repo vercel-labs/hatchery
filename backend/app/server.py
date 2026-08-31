@@ -70,51 +70,58 @@ class _StoreHub:
     """
 
     async def dispatch(self, channel: str, inbound: channels.Inbound) -> None:
-        found = await spaces.list_all() or [await spaces.default()]
-        title = inbound.title or inbound.text.strip().splitlines()[0][:80]
-        chat, created = await chats.claim(
-            f"{channel}:{inbound.token}",
-            channel,
-            None,
-            title,
-            inbound.state,
-        )
-        if created:
-            await events.append(
-                chat.id, "messages", ai.user_message(inbound.text).model_dump(mode="json")
+        async with ai.experimental_telemetry.span("channel.dispatch") as span:
+            span.set_attrs(channel=channel)
+            found = await spaces.list_all() or [await spaces.default()]
+            title = inbound.title or inbound.text.strip().splitlines()[0][:80]
+            chat, created = await chats.claim(
+                f"{channel}:{inbound.token}",
+                channel,
+                None,
+                title,
+                inbound.state,
             )
-            await _classify_chat(
-                chat.id,
-                inbound.text,
-                {
-                    "origin": channel,
-                    "author": _inbound_author(inbound),
-                    "repo": inbound.repo,
-                    "channel_state": inbound.state,
-                },
-                found,
+            span.set_attrs(
+                {"chat.id": chat.id, "space.id": chat.space_id or ""},
+                created=created,
             )
-            chat = await chats.get(chat.id) or chat
-            _spawn(_name_chat(chat.id, inbound.text))
-        elif chat.space_id is None:
-            await _classify_chat(
-                chat.id,
-                inbound.text,
-                {
-                    "origin": channel,
-                    "author": _inbound_author(inbound),
-                    "repo": inbound.repo,
-                    "channel_state": inbound.state,
-                },
-                found,
-            )
-            chat = await chats.get(chat.id) or chat
-        else:
-            await events.append(
-                chat.id, "messages", ai.user_message(inbound.text).model_dump(mode="json")
-            )
-        log.info("inbound %s -> %s chat %s", channel, "new" if created else "existing", chat.id)
-        await _run_inbound_turn(chat.id)
+            if created:
+                await events.append(
+                    chat.id, "messages", ai.user_message(inbound.text).model_dump(mode="json")
+                )
+                await _classify_chat(
+                    chat.id,
+                    inbound.text,
+                    {
+                        "origin": channel,
+                        "author": _inbound_author(inbound),
+                        "repo": inbound.repo,
+                        "channel_state": inbound.state,
+                    },
+                    found,
+                )
+                chat = await chats.get(chat.id) or chat
+                _spawn(_name_chat(chat.id, inbound.text))
+            elif chat.space_id is None:
+                await _classify_chat(
+                    chat.id,
+                    inbound.text,
+                    {
+                        "origin": channel,
+                        "author": _inbound_author(inbound),
+                        "repo": inbound.repo,
+                        "channel_state": inbound.state,
+                    },
+                    found,
+                )
+                chat = await chats.get(chat.id) or chat
+            else:
+                await events.append(
+                    chat.id, "messages", ai.user_message(inbound.text).model_dump(mode="json")
+                )
+            span.set_attrs({"space.id": chat.space_id or ""})
+            log.info("inbound %s -> %s chat %s", channel, "new" if created else "existing", chat.id)
+            await _run_inbound_turn(chat.id)
 
     async def dedupe(self, key: str) -> bool:
         return await chats.dedupe(key)
@@ -138,19 +145,26 @@ async def _name_chat(chat_id: str, prompt: str) -> None:
 async def _classify_chat(
     chat_id: str, prompt: str, metadata: dict, candidates: list[models.Space]
 ) -> models.Space:
-    await _emit(chat_id, channels.event(channels.protocol.SPACE_ASSIGNING))
-    selected = await classifier.classify(prompt, metadata, candidates)
-    assigned = await chats.assign_space(chat_id, selected.id)
-    if assigned is None:
-        raise fastapi.HTTPException(404, "unknown chat")
-    await _emit(
-        chat_id,
-        channels.event(
-            channels.protocol.SPACE_ASSIGNED,
-            space={"id": selected.id, "name": selected.name, "color": selected.color},
-        ),
-    )
-    return selected
+    async with ai.experimental_telemetry.span("hatchery.classify") as span:
+        span.set_attrs(
+            {"chat.id": chat_id},
+            origin=str(metadata.get("origin", "unknown")),
+            candidate_count=len(candidates),
+        )
+        await _emit(chat_id, channels.event(channels.protocol.SPACE_ASSIGNING))
+        selected = await classifier.classify(prompt, metadata, candidates)
+        span.set_attrs({"space.id": selected.id})
+        assigned = await chats.assign_space(chat_id, selected.id)
+        if assigned is None:
+            raise fastapi.HTTPException(404, "unknown chat")
+        await _emit(
+            chat_id,
+            channels.event(
+                channels.protocol.SPACE_ASSIGNED,
+                space={"id": selected.id, "name": selected.name, "color": selected.color},
+            ),
+        )
+        return selected
 
 
 bot = channels.App(_StoreHub())
@@ -380,8 +394,12 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
     incoming, _ = ai.ui.ai_sdk.to_messages(request.messages)
 
     async def stream():
-        async with turns.run(request.chat_id):
+        async with turns.run(request.chat_id), ai.experimental_telemetry.span(
+            "hatchery.turn"
+        ) as span:
+            span.set_attrs({"chat.id": request.chat_id}, origin="ui")
             stored = await _transcript(request.chat_id)
+            span.set_attrs(stored_message_count=len(stored))
             known = {message.id for message in stored}
             received = []
             for message in incoming:
@@ -392,6 +410,7 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                     await events.append(request.chat_id, "messages", message.model_dump(mode="json"))
                     stored.append(message)
                     received.append(message)
+            span.set_attrs(received_message_count=len(received))
             for message in received:
                 await _emit(
                     request.chat_id,
@@ -419,6 +438,7 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                         data={"state": "assigning"},
                     )
                 )
+                span.set_attrs(classification_required=True)
                 selected = await _classify_chat(
                     request.chat_id,
                     first.text,
@@ -436,6 +456,7 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                     )
                 )
             space = await _space_for_chat(request.chat_id)
+            span.set_attrs({"space.id": space.id})
             history = [ai.system_message(dispatcher.system_prompt(space)), *stored]
             agent = dispatcher.agent_for({"id": request.chat_id})
             await _emit(request.chat_id, channels.event(channels.protocol.TURN_STARTED))
@@ -789,9 +810,25 @@ async def manual_tty(ws: fastapi.WebSocket, chat_id: str, terminal_id: str) -> N
 )
 async def worker_event(event: worker_protocol.Event) -> None:
     """Persist one at-least-once worker event and wake the owning chat."""
-    task, changed = await worker.ingest(event)
-    if changed and task is not None and task.status in ("attention", "complete", "errored"):
-        await complete_worker_task(task)
+    try:
+        async with ai.experimental_telemetry.span("worker.event.ingest") as span:
+            span.set_attrs(
+                {
+                    "worker.id": event.worker_id,
+                    "task.id": event.task_id or "",
+                    "event.id": event.id,
+                },
+                event_type=event.type,
+                sequence=event.sequence,
+            )
+            task, changed = await worker.ingest(event)
+            span.set_attrs(applied=changed)
+            if task is not None:
+                span.set_attrs({"chat.id": task.chat_id}, task_state=task.status)
+            if changed and task is not None and task.status in ("attention", "complete", "errored"):
+                await complete_worker_task(task)
+    finally:
+        telemetry.flush()
 
 
 async def complete_worker_task(task: worker.Task) -> None:
@@ -825,17 +862,25 @@ async def complete_worker_task(task: worker.Task) -> None:
 
 
 async def _emit(chat_id: str, event: channels.Event) -> list[str]:
-    failures = []
-    for binding in await chats.bindings(chat_id):
-        channel = bot.channels.get(binding.channel)
-        if channel is None:
-            continue
-        try:
-            await channel.on_event(event, binding.state)
-        except Exception as error:
-            log.exception("channel delivery failed: %s -> %s", chat_id, binding.channel)
-            failures.append(f"{binding.channel}: {error}")
-    return failures
+    async with ai.experimental_telemetry.span("channel.deliver") as span:
+        bindings = await chats.bindings(chat_id)
+        span.set_attrs(
+            {"chat.id": chat_id},
+            event_type=event.type,
+            binding_count=len(bindings),
+        )
+        failures = []
+        for binding in bindings:
+            channel = bot.channels.get(binding.channel)
+            if channel is None:
+                continue
+            try:
+                await channel.on_event(event, binding.state)
+            except Exception as error:
+                log.exception("channel delivery failed: %s -> %s", chat_id, binding.channel)
+                failures.append(f"{binding.channel}: {error}")
+        span.set_attrs(failure_count=len(failures))
+        return failures
 
 
 async def _deliver(chat_id: str, message: str) -> list[str]:
@@ -845,7 +890,10 @@ async def _deliver(chat_id: str, message: str) -> list[str]:
 
 
 async def _run_inbound_turn(chat_id: str) -> None:
-    async with turns.run(chat_id):
+    async with turns.run(chat_id), ai.experimental_telemetry.span(
+        "hatchery.turn"
+    ) as span:
+        span.set_attrs({"chat.id": chat_id}, origin="channel")
         await _emit(chat_id, channels.event(channels.protocol.TURN_STARTED))
         try:
             message = await _run_dispatcher_turn(chat_id, {"id": chat_id})
