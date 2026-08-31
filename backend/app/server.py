@@ -12,7 +12,6 @@ _StoreHub (dedupe, claim binding, append); no turn runs on inbound yet.
 """
 
 import asyncio
-import base64
 import contextlib
 import html
 import json
@@ -600,50 +599,48 @@ async def _bridge_tty(
     session_id: str,
     command: list[str] | None = None,
 ) -> None:
+    url, headers = worker.sandbox.tty(record)
+    attach = {
+        "session_id": session_id,
+        "offset": int(ws.query_params.get("offset", "0")),
+        "cols": int(ws.query_params.get("cols", "80")),
+        "rows": int(ws.query_params.get("rows", "24")),
+    }
+    if command is not None:
+        attach["command"] = command
     await ws.accept()
-    offset = int(ws.query_params.get("offset", "0"))
-    cols = int(ws.query_params.get("cols", "80"))
-    rows = int(ws.query_params.get("rows", "24"))
-    await ws.send_json({"type": "handshake", "body": {"sessionId": session_id, "offset": offset}})
-
-    async def down() -> None:
-        nonlocal offset, command
-        while True:
-            result = await worker.sandbox.tty_read(
-                record, session_id, offset, cols, rows, command=command
-            )
-            command = None
-            data = base64.b64decode(result.get("data", ""))
-            if data:
-                await ws.send_json(
-                    {"type": "tty-output", "body": {"data": base64.b64encode(data).decode()}}
-                )
-                offset = int(result.get("offset", offset)) + len(data)
-            if result.get("exit_code") is not None:
-                await ws.send_json({"type": "exit", "body": {"code": result["exit_code"]}})
-                return
-
-    async def up() -> None:
-        while True:
-            frame = await ws.receive_json()
-            body = frame.get("body") or {}
-            if frame.get("type") == "tty-input":
-                await worker.sandbox.tty_input(record, session_id, base64.b64decode(body["data"]))
-            elif frame.get("type") == "resize":
-                await worker.sandbox.tty_resize(record, session_id, int(body["cols"]), int(body["rows"]))
-            elif frame.get("type") == "signal":
-                await worker.sandbox.tty_signal(record, session_id, str(body["signal"]))
-
     try:
-        done, pending = await asyncio.wait(
-            [asyncio.create_task(down()), asyncio.create_task(up())],
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        for task in pending:
-            task.cancel()
-        for task in done:
-            task.result()
-    except fastapi.WebSocketDisconnect:
+        async with websockets.asyncio.client.connect(
+            url, additional_headers=headers, max_size=None, compression=None
+        ) as upstream:
+            await upstream.send(json.dumps(attach))
+
+            async def down() -> None:
+                async for message in upstream:
+                    if isinstance(message, bytes):
+                        await ws.send_bytes(message)
+                    else:
+                        await ws.send_text(message)
+
+            async def up() -> None:
+                while True:
+                    message = await ws.receive()
+                    if message["type"] == "websocket.disconnect":
+                        return
+                    if message.get("bytes") is not None:
+                        await upstream.send(message["bytes"])
+                    elif message.get("text") is not None:
+                        await upstream.send(message["text"])
+
+            done, pending = await asyncio.wait(
+                [asyncio.create_task(down()), asyncio.create_task(up())],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            for task in done:
+                task.result()
+    except (fastapi.WebSocketDisconnect, websockets.ConnectionClosed):
         pass
     finally:
         with contextlib.suppress(RuntimeError):

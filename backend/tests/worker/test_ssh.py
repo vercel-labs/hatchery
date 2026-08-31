@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import os
 import socket
@@ -128,6 +129,51 @@ async def test_unknown_ssh_resume_is_not_found(ssh_service):
     assert closed.value.code == 4404
 
 
+async def test_tty_websocket_streams_input_and_output(ssh_service):
+    session_id = "tty-stream"
+    url = f"ws://127.0.0.1:{ssh_service.websocket_port}/tty"
+    headers = {"authorization": "Bearer secret"}
+    async with websockets.connect(url, additional_headers=headers) as connection:
+        await connection.send(json.dumps({
+            "session_id": session_id,
+            "offset": 0,
+            "cols": 100,
+            "rows": 30,
+            "command": ["/bin/cat"],
+        }))
+        handshake = json.loads(await connection.recv())
+        assert handshake == {
+            "type": "handshake",
+            "body": {
+                "sessionId": session_id,
+                "offset": 0,
+                "cols": 100,
+                "rows": 30,
+            },
+        }
+        await connection.send(json.dumps({
+            "type": "tty-input",
+            "body": {"data": base64.b64encode(b"streamed input\n").decode()},
+        }))
+        output = json.loads(await connection.recv())
+        assert b"streamed input" in base64.b64decode(output["body"]["data"])
+
+    session = main.Handler.sessions.pop(session_id)
+    session.send_signal("terminate")
+    session.wait()
+
+
+async def test_tty_websocket_rejects_unknown_session_before_handshake(ssh_service):
+    url = f"ws://127.0.0.1:{ssh_service.websocket_port}/tty"
+    async with websockets.connect(
+        url, additional_headers={"authorization": "Bearer secret"}
+    ) as connection:
+        await connection.send(json.dumps({"session_id": "missing"}))
+        with pytest.raises(websockets.ConnectionClosedError) as closed:
+            await connection.recv()
+    assert closed.value.code == 4404
+
+
 def test_sandbox_ssh_returns_same_authenticated_route_for_every_environment():
     record = models.Worker(
         id="wrk",
@@ -144,5 +190,25 @@ def test_sandbox_ssh_returns_same_authenticated_route_for_every_environment():
     )
     assert sandbox.ssh(record) == (
         "wss://ssh.example",
+        {"authorization": "Bearer secret"},
+    )
+
+
+def test_sandbox_tty_returns_authenticated_daemon_websocket_route():
+    record = models.Worker(
+        id="wrk",
+        chat_id="chat",
+        sandbox_name="hatchery-wrk",
+        command_topic="hatchery-worker-wrk-commands-v1",
+        title="box",
+        status="running",
+        spec=models.WorkerSpec(),
+        routes=[models.Route(port=8788, url="https://stream.example")],
+        daemon_token="secret",
+        created_at="2026-08-29T00:00:00+00:00",
+        updated_at="2026-08-29T00:00:00+00:00",
+    )
+    assert sandbox.tty(record) == (
+        "wss://stream.example/tty",
         {"authorization": "Bearer secret"},
     )

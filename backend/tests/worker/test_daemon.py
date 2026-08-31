@@ -17,7 +17,7 @@ def test_health_is_authenticated(monkeypatch):
         with urllib.request.urlopen(
             urllib.request.Request(url, headers={"authorization": "Bearer secret"})
         ) as response:
-            assert response.read() == b'{"ok": true, "version": 4}'
+            assert response.read() == b'{"ok": true, "version": 5}'
         try:
             urllib.request.urlopen(url)
         except urllib.error.HTTPError as error:
@@ -177,3 +177,20 @@ def test_tty_session_accepts_input_resize_and_signal(tmp_path):
     assert exit_code is None
     session.send_signal("terminate")
     assert session.wait() < 0
+
+
+def test_tty_session_retries_partial_writes(monkeypatch):
+    writes = []
+
+    def write(fd, data):
+        chunk = bytes(data[:2])
+        writes.append((fd, chunk))
+        return len(chunk)
+
+    monkeypatch.setattr(main.os, "write", write)
+    session = object.__new__(main.TTYSession)
+    session.fd = 7
+
+    session.write(b"hello")
+
+    assert writes == [(7, b"he"), (7, b"ll"), (7, b"o")]

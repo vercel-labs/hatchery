@@ -1,7 +1,6 @@
 """Thin Vercel Sandbox adapter. SDK handles never escape this module."""
 
 import asyncio
-import base64
 import dataclasses
 import os
 import pathlib
@@ -183,9 +182,20 @@ async def _bootstrap(box, worker_id: str, spec: models.WorkerSpec, token: str):
 
 
 async def _start_daemon(box, worker_id: str, spec: models.WorkerSpec, token: str):
+    command = " ".join([
+        "exec python3",
+        DAEMON_PATH,
+        "--port", str(DAEMON_PORT),
+        "--worker-id", worker_id,
+        "--workspace", _workspace(spec),
+        "--state", DAEMON_STATE_PATH,
+    ])
     return await box.create_process(
-        "python3",
-        [DAEMON_PATH, "--port", str(DAEMON_PORT), "--worker-id", worker_id, "--workspace", _workspace(spec), "--state", DAEMON_STATE_PATH],
+        "/bin/sh",
+        [
+            "-lc",
+            f"pkill -f '^python3 {DAEMON_PATH}( |$)' 2>/dev/null || true; {command}",
+        ],
         env=_daemon_env(worker_id, spec, token),
     )
 
@@ -244,65 +254,29 @@ def daemon_url(record: models.Worker) -> str:
     return route.url.rstrip("/")
 
 
+def _websocket_route(url: str) -> str:
+    url = url.rstrip("/")
+    if url.startswith("https://"):
+        return "wss://" + url.removeprefix("https://")
+    if url.startswith("http://"):
+        return "ws://" + url.removeprefix("http://")
+    return url
+
+
 def ssh(record: models.Worker) -> tuple[str, dict[str, str]]:
     """Return the authenticated SSH WebSocket endpoint for any environment."""
     route = next((route for route in record.routes if route.port == SSH_PORT), None)
     if route is None:
         raise RuntimeError("sandbox SSH route is unavailable")
-    url = route.url.rstrip("/")
-    if url.startswith("https://"):
-        url = "wss://" + url.removeprefix("https://")
-    elif url.startswith("http://"):
-        url = "ws://" + url.removeprefix("http://")
-    return url, {"authorization": f"Bearer {record.daemon_token}"}
+    return _websocket_route(route.url), {
+        "authorization": f"Bearer {record.daemon_token}"
+    }
 
 
-async def tty_read(
-    record: models.Worker,
-    session_id: str,
-    offset: int,
-    cols: int,
-    rows: int,
-    *,
-    command: list[str] | None = None,
-) -> dict:
-    payload = {"offset": offset, "cols": cols, "rows": rows}
-    if command is not None:
-        payload["command"] = command
-    async with httpx.AsyncClient(timeout=35) as client:
-        response = await client.post(
-            f"{daemon_url(record)}/tty/{session_id}/read",
-            headers={"authorization": f"Bearer {record.daemon_token}"},
-            json=payload,
-        )
-        response.raise_for_status()
-        return response.json()
-
-
-async def tty_input(record: models.Worker, session_id: str, data: bytes) -> None:
-    await _tty_action(record, session_id, "input", {"data": base64.b64encode(data).decode()})
-
-
-async def tty_resize(record: models.Worker, session_id: str, cols: int, rows: int) -> None:
-    await _tty_action(record, session_id, "resize", {"cols": cols, "rows": rows})
-
-
-async def tty_signal(record: models.Worker, session_id: str, signal_name: str) -> None:
-    try:
-        await _tty_action(record, session_id, "signal", {"signal": signal_name})
-    except httpx.HTTPStatusError as error:
-        if error.response.status_code != 404:
-            raise
-
-
-async def _tty_action(record: models.Worker, session_id: str, action: str, payload: dict) -> None:
-    async with httpx.AsyncClient(timeout=10) as client:
-        response = await client.post(
-            f"{daemon_url(record)}/tty/{session_id}/{action}",
-            headers={"authorization": f"Bearer {record.daemon_token}"},
-            json=payload,
-        )
-        response.raise_for_status()
+def tty(record: models.Worker) -> tuple[str, dict[str, str]]:
+    """Return the daemon's authenticated streaming TTY endpoint."""
+    url, headers = ssh(record)
+    return url + "/tty", headers
 
 
 async def _daemon_health(url: str, token: str) -> dict:

@@ -29,7 +29,7 @@ import uuid
 import asyncssh
 import websockets.asyncio.server
 
-VERSION = 4
+VERSION = 5
 REPLAY_LIMIT = 1024 * 1024
 SSH_PORT = 8788
 SSH_INTERNAL_PORT = 8022
@@ -691,7 +691,12 @@ class TTYSession:
             return self.exit_code
 
     def write(self, data: bytes) -> None:
-        os.write(self.fd, data)
+        view = memoryview(data)
+        while view:
+            written = os.write(self.fd, view)
+            if written <= 0:
+                raise OSError("PTY write made no progress")
+            view = view[written:]
 
     def resize(self, cols: int, rows: int) -> None:
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
@@ -925,7 +930,11 @@ class SSHService:
         return connection.respond(http.HTTPStatus.UNAUTHORIZED, "unauthorized\n")
 
     async def handle(self, websocket) -> None:
-        query = urllib.parse.parse_qs(urllib.parse.urlsplit(websocket.request.path).query)
+        parsed = urllib.parse.urlsplit(websocket.request.path)
+        if parsed.path == "/tty":
+            await self.handle_tty(websocket, urllib.parse.parse_qs(parsed.query))
+            return
+        query = urllib.parse.parse_qs(parsed.query)
         requested = query.get("stream_id", ["new"])[0]
         output_offset = int(query.get("offset", ["0"])[0])
         if requested == "new":
@@ -970,6 +979,97 @@ class SSHService:
                 task.result()
         if stream.closed:
             self.streams.pop(stream.id, None)
+
+    async def handle_tty(self, websocket, query: dict[str, list[str]]) -> None:
+        """Attach one WebSocket directly to a durable PTY session."""
+        try:
+            raw = await websocket.recv()
+            if not isinstance(raw, str):
+                raise ValueError("TTY attach frame must be JSON text")
+            attach = json.loads(raw)
+            session_id = str(attach["session_id"])
+            offset = max(0, int(attach.get("offset", 0)))
+            cols = max(1, int(attach.get("cols", 80)))
+            rows = max(1, int(attach.get("rows", 24)))
+            command = attach.get("command")
+            if command is not None:
+                command = [str(item) for item in command]
+                if not command:
+                    raise ValueError("TTY command must not be empty")
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            await websocket.close(4400, str(error))
+            return
+
+        with Handler.sessions_lock:
+            session = Handler.sessions.get(session_id)
+            if session is None and command is not None:
+                session = TTYSession(
+                    session_id,
+                    command,
+                    self.workspace,
+                    cols,
+                    rows,
+                    agent_environment(),
+                )
+                Handler.sessions[session_id] = session
+        if session is None:
+            await websocket.close(4404, "session not found")
+            return
+
+        session.resize(cols, rows)
+        with session.condition:
+            offset = max(offset, session.base_offset)
+        await websocket.send(json.dumps({
+            "type": "handshake",
+            "body": {
+                "sessionId": session_id,
+                "offset": offset,
+                "cols": cols,
+                "rows": rows,
+            },
+        }))
+
+        async def upload() -> None:
+            async for message in websocket:
+                if not isinstance(message, str):
+                    continue
+                try:
+                    frame = json.loads(message)
+                    body = frame.get("body") or {}
+                    if frame.get("type") == "tty-input":
+                        session.write(base64.b64decode(body.get("data", ""), validate=True))
+                    elif frame.get("type") == "resize":
+                        session.resize(max(1, int(body["cols"])), max(1, int(body["rows"])))
+                    elif frame.get("type") == "signal" and body.get("signal") in (
+                        "interrupt", "terminate", "kill"
+                    ):
+                        session.send_signal(body["signal"])
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                    continue
+
+        async def download() -> None:
+            current = offset
+            while True:
+                start, data, exit_code = await asyncio.to_thread(session.read, current)
+                if data:
+                    await websocket.send(json.dumps({
+                        "type": "tty-output",
+                        "body": {"data": base64.b64encode(data).decode()},
+                    }))
+                    current = start + len(data)
+                if exit_code is not None:
+                    await websocket.send(json.dumps({
+                        "type": "exit", "body": {"code": exit_code}
+                    }))
+                    return
+
+        tasks = [asyncio.create_task(upload()), asyncio.create_task(download())]
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+        for task in done:
+            if not task.cancelled():
+                task.result()
 
     async def stop(self) -> None:
         for stream in list(self.streams.values()):
