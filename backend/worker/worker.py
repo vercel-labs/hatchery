@@ -122,10 +122,6 @@ async def launch_task(
     now = _now()
     resolved_task_id = task_id or f"task_{uuid.uuid4().hex[:12]}"
     run_span = ai.experimental_telemetry.create_span("hatchery.agent_run").stamp_start()
-    if run_span.id:
-        run_span.trace_id = f"trace_{uuid.uuid4().hex}"
-        run_span.parent_id = None
-        run_span.trace_attrs = {}
     run_span.set_attrs(
         {"chat.id": chat_id, "worker.id": worker_id, "task.id": resolved_task_id},
         model=model,

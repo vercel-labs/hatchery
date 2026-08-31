@@ -64,8 +64,10 @@ async def test_launch_and_follow_up_publish_ordered_commands(monkeypatch):
     monkeypatch.setattr(worker.sandbox, "provision", provision)
     created = await worker.create("chat_1", models.WorkerSpec())
 
-    async with ai.experimental_telemetry.use_sink(ai.experimental_telemetry.DictSink()):
-        task = await worker.launch_task("chat_1", created.id, "fix it", "openai/test")
+    sink = ai.experimental_telemetry.DictSink()
+    async with ai.experimental_telemetry.use_sink(sink):
+        async with ai.experimental_telemetry.span("hatchery.turn") as turn_span:
+            task = await worker.launch_task("chat_1", created.id, "fix it", "openai/test")
         task.completion_delivered = True
         await worker.store.save_task(task)
         task = await worker.send_task_input("chat_1", task.id, "also test it")
@@ -74,6 +76,8 @@ async def test_launch_and_follow_up_publish_ordered_commands(monkeypatch):
     assert [command.sequence for command in sent] == [0, 1]
     assert task.telemetry_span is not None
     assert task.telemetry_span["name"] == "hatchery.agent_run"
+    assert task.telemetry_span["trace_id"] == turn_span.trace_id
+    assert task.telemetry_span["parent_id"] == turn_span.id
     assert task.command_sequence == 1
     assert task.completion_delivered is False
     with pytest.raises(ValueError, match="does not belong"):
