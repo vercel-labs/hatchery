@@ -23,6 +23,7 @@ async def test_provision_creates_persistent_sandbox_and_checks_daemon(monkeypatc
 
     class Box:
         fs = Files()
+        region = "iad1"
         routes = [
             types.SimpleNamespace(port=8787, url="https://daemon.example"),
             types.SimpleNamespace(port=8788, url="https://ssh.example"),
@@ -87,6 +88,7 @@ async def test_provision_creates_persistent_sandbox_and_checks_daemon(monkeypatc
     }
     assert calls["process"][2]["HATCHERY_DAEMON_TOKEN"] == "secret"
     assert calls["process"][2]["HATCHERY_WORKER_ID"] == "wrk_1"
+    assert calls["process"][2]["VERCEL_REGION"] == "iad1"
     assert calls["process"][2]["FX_PERMISSION_MODE"] == "yolo"
     assert calls["process"][2]["AI_GATEWAY_API_KEY"] == sandbox.AI_GATEWAY_PLACEHOLDER
     assert calls["health"] == (
@@ -186,6 +188,7 @@ async def test_existing_sandbox_repairs_dead_daemon(monkeypatch):
 
     class Box:
         fs = Files()
+        region = "iad1"
         routes = [types.SimpleNamespace(port=8787, url="https://daemon.example")]
 
         async def create_process(self, command, args, env):
@@ -318,12 +321,24 @@ def test_daemon_env_preserves_cloud_queue_identity(monkeypatch):
     monkeypatch.setenv("VERCEL_QUEUE_BASE_URL", "https://queues.example")
     monkeypatch.delenv("VERCEL_QUEUE_TOKEN", raising=False)
 
-    env = sandbox._daemon_env("wrk_1", models.WorkerSpec(), "secret")
+    env = sandbox._daemon_env(
+        "wrk_1", models.WorkerSpec(), "secret", region="sfo1"
+    )
 
     assert env["VERCEL_OIDC_TOKEN"] == "oidc"
     assert env["VERCEL_REGION"] == "iad1"
     assert env["VERCEL_DEPLOYMENT_ID"] == "dpl_1"
     assert env["VERCEL_QUEUE_BASE_URL"] == "https://queues.example"
+
+
+def test_daemon_env_uses_sandbox_region_when_runtime_region_is_missing(monkeypatch):
+    monkeypatch.delenv("VERCEL_REGION", raising=False)
+
+    env = sandbox._daemon_env(
+        "wrk_1", models.WorkerSpec(), "secret", region="iad1"
+    )
+
+    assert env["VERCEL_REGION"] == "iad1"
 
 
 def test_daemon_env_requires_public_origin_for_vercel_dev(monkeypatch):

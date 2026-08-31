@@ -198,7 +198,7 @@ async def _start_daemon(box, worker_id: str, spec: models.WorkerSpec, token: str
             f"pkill -f '^python3 {DAEMON_PATH}( |$)' 2>/dev/null || true; "
             f"{command} >>{DAEMON_LOG_PATH} 2>&1",
         ],
-        env=_daemon_env(worker_id, spec, token),
+        env=_daemon_env(worker_id, spec, token, region=box.region),
     )
 
 
@@ -336,7 +336,9 @@ def _workspace(spec: models.WorkerSpec) -> str:
     return "/vercel"
 
 
-def _daemon_env(worker_id: str, spec: models.WorkerSpec, token: str) -> dict[str, str]:
+def _daemon_env(
+    worker_id: str, spec: models.WorkerSpec, token: str, *, region: str | None = None
+) -> dict[str, str]:
     env = {
         "HATCHERY_DAEMON_TOKEN": token,
         "HATCHERY_WORKER_ID": worker_id,
@@ -355,6 +357,8 @@ def _daemon_env(worker_id: str, spec: models.WorkerSpec, token: str) -> dict[str
     ):
         if value := os.environ.get(name):
             env[name] = value
+    if region and "VERCEL_REGION" not in env:
+        env["VERCEL_REGION"] = region
     if env.get("VERCEL_QUEUE_TOKEN") == "vc-dev-token":
         public_url = os.environ.get("HATCHERY_PUBLIC_URL", "").rstrip("/")
         if not public_url:
