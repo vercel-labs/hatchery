@@ -1,4 +1,5 @@
 import asyncio
+from unittest import mock
 
 import httpx
 import pytest
@@ -487,8 +488,10 @@ async def test_first_ui_prompt_classifies_before_dispatcher(monkeypatch):
     def agent_for(record):
         return FakeAgent()
 
+    flush = mock.Mock()
     monkeypatch.setattr(server.dispatcher, "agent_for", agent_for)
     monkeypatch.setattr(server.ai.ui.ai_sdk, "to_sse", fake_sse)
+    monkeypatch.setattr(server.telemetry, "flush", flush)
     ui = ai.ui.ai_sdk.to_ui_messages([ai.user_message("fix the docs")])
     async with client() as c:
         response = await c.post(
@@ -511,6 +514,7 @@ async def test_first_ui_prompt_classifies_before_dispatcher(monkeypatch):
     assert response.text.index('"state": "assigned"') < response.text.index('"type":"finish"')
     assert seen["history"][0].role == "system"
     assert seen["history"][1].text == "fix the docs"
+    flush.assert_called_once_with()
 
 
 async def test_ui_turn_is_mirrored_to_bound_channel(monkeypatch):
@@ -926,3 +930,38 @@ async def test_tty_bridge_maps_connection_failure(monkeypatch):
     await server._bridge_tty(ws, type("Worker", (), {"id": "wrk_1"})(), "task_1")
 
     assert ws.closed == (1011, "upstream connection failed")
+
+
+async def test_dispatcher_turn_flushes_telemetry(monkeypatch):
+    space = await server.spaces.default()
+    chat = await chats.create(space.id, "trace me")
+    await events.append(
+        chat.id, "messages", ai.user_message("hello").model_dump(mode="json")
+    )
+
+    class FakeRun:
+        def __init__(self, history):
+            self.messages = [*history, ai.assistant_message("done")]
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    class FakeAgent:
+        def run(self, model, history):
+            return FakeRun(history)
+
+    flush = mock.Mock()
+    monkeypatch.setattr(server.dispatcher, "agent_for", lambda record: FakeAgent())
+    monkeypatch.setattr(server.telemetry, "flush", flush)
+
+    assert await server._run_dispatcher_turn(chat.id, {"id": chat.id}) == "done"
+    flush.assert_called_once_with()

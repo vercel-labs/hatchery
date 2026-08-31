@@ -33,7 +33,7 @@ import models
 import store
 import vercel.functions
 import vercel.queue
-from agent import classifier, dispatcher, sandbox, topic
+from agent import classifier, dispatcher, sandbox, telemetry, topic
 import worker
 from worker import protocol as worker_protocol
 from channels import github, slack
@@ -41,6 +41,10 @@ from store import chats, events, spaces, turns
 
 log = logging.getLogger("app")
 _background: set[asyncio.Task] = set()
+
+# This module is also the queue subscriber entrypoint, where FastAPI's lifespan
+# does not run.
+telemetry.install()
 
 
 def _spawn(coro) -> None:
@@ -156,9 +160,11 @@ bot.add(github.channel())
 
 @contextlib.asynccontextmanager
 async def lifespan(_: fastapi.FastAPI):
+    telemetry.install()
     await store.ensure_ready()
     await spaces.default()
     yield
+    telemetry.flush()
 
 
 app = fastapi.FastAPI(title="hatchery", lifespan=lifespan)
@@ -454,6 +460,8 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                     channels.event(channels.protocol.TURN_FAILED, error=str(error)),
                 )
                 raise
+            finally:
+                telemetry.flush()
 
     return fastapi.responses.StreamingResponse(
         stream(), headers=ai.ui.ai_sdk.UI_MESSAGE_STREAM_HEADERS
@@ -860,12 +868,15 @@ async def _run_dispatcher_turn(
     if wake is not None:
         history.append(wake)
     agent = dispatcher.agent_for(record)
-    async with agent.run(dispatcher.model(), history) as result:
-        async for _ in result:
-            pass
-        added = result.messages[len(history) :]
-        for message in added:
-            await events.append(chat_id, "messages", message.model_dump(mode="json"))
+    try:
+        async with agent.run(dispatcher.model(), history) as result:
+            async for _ in result:
+                pass
+            added = result.messages[len(history) :]
+            for message in added:
+                await events.append(chat_id, "messages", message.model_dump(mode="json"))
+    finally:
+        telemetry.flush()
     return next(
         (message.text for message in reversed(added) if message.role == "assistant" and message.text),
         "subagent completion recorded",

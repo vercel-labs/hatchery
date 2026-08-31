@@ -4,9 +4,10 @@ version = "0.1.0"
 description = "a software factory: an agent reachable from slack, github, and its own ui."
 requires-python = ">=3.12"
 dependencies = [
-    "ai[vercel]",
+    "ai[otel,vercel]",
     "asyncpg>=0.31.0",
     "asyncssh>=2.21,<3",
+    "braintrust[otel]>=0.35.0",
     "fastapi>=0.115",
     "httpx>=0.28",
     "pydantic>=2.7",
