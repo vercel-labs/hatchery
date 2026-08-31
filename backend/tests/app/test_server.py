@@ -829,6 +829,7 @@ async def test_worker_event_continues_and_closes_agent_run(monkeypatch):
                 created_at="2026-08-31T00:00:01+00:00",
                 payload={
                     "kind": "tool.call",
+                    "tool_call_id": "call_trace",
                     "tool_name": "read_file",
                     "arguments": '{"path":"README.md"}',
                     "session_id": "session_trace",
@@ -838,12 +839,40 @@ async def test_worker_event_continues_and_closes_agent_run(monkeypatch):
         )
         await server.worker_event(
             server.worker_protocol.Event(
-                id="evt_trace",
+                id="evt_result",
                 worker_id=task.worker_id,
                 task_id=task.id,
                 sequence=1,
-                type="task.completed",
+                type="task.transcript",
                 created_at="2026-08-31T00:00:02+00:00",
+                payload={
+                    "kind": "tool.result",
+                    "tool_call_id": "call_trace",
+                    "output": "README contents",
+                    "error": False,
+                    "truncated": False,
+                },
+            )
+        )
+        await server.worker_event(
+            server.worker_protocol.Event(
+                id="evt_output",
+                worker_id=task.worker_id,
+                task_id=task.id,
+                sequence=2,
+                type="task.output",
+                created_at="2026-08-31T00:00:03+00:00",
+                payload={"text": "Finished reading."},
+            )
+        )
+        await server.worker_event(
+            server.worker_protocol.Event(
+                id="evt_trace",
+                worker_id=task.worker_id,
+                task_id=task.id,
+                sequence=3,
+                type="task.completed",
+                created_at="2026-08-31T00:00:04+00:00",
                 payload={"summary": "done"},
             )
         )
@@ -851,14 +880,27 @@ async def test_worker_event_continues_and_closes_agent_run(monkeypatch):
         ai.experimental_telemetry.unregister(capture)
 
     transcript = next(span for span in seen if span.name == "fx.tool.call")
+    result = next(span for span in seen if span.name == "fx.tool.result")
+    assistant = next(span for span in seen if span.name == "fx.assistant")
     completed = next(span for span in seen if span.name == "fx.task.completed")
     assert transcript.trace_id == parent.trace_id
     assert transcript.parent_id == parent.id
+    assert transcript.data.attrs["braintrust.input_json"] == '{"path": "README.md"}'
+    assert transcript.data.attrs["braintrust.span_attributes"] == '{"type": "tool"}'
+    assert transcript.data.attrs["gen_ai.operation.name"] == "execute_tool"
+    assert transcript.data.attrs["gen_ai.tool.name"] == "read_file"
+    assert transcript.data.attrs["gen_ai.tool.call.id"] == "call_trace"
+    assert transcript.data.attrs["gen_ai.tool.call.arguments"] == '{"path":"README.md"}'
+    assert result.data.attrs["braintrust.output_json"] == '"README contents"'
+    assert result.data.attrs["gen_ai.tool.call.result"] == '"README contents"'
+    assert result.data.attrs["tool_error"] is False
+    assert assistant.data.attrs["braintrust.output_json"] == '{"text": "Finished reading."}'
     assert completed.trace_id == parent.trace_id
     assert completed.parent_id == parent.id
     stored = await server.worker.store.get_task(task.id)
     assert stored is not None
     assert stored.telemetry_span["ended_at"] is not None
+    assert stored.telemetry_span["data"]["attrs"]["braintrust.output_json"] == '{"summary": "done"}'
     assert stored.telemetry_span["data"]["attrs"]["fx.session_id"] == "session_trace"
     assert stored.telemetry_span["data"]["attrs"]["fx.tool_call_count"] == 1
     assert stored.telemetry_span["events"][0]["name"] == "fx.tool.call"

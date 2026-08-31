@@ -2,6 +2,7 @@
 
 import asyncio
 import datetime
+import json
 import secrets
 import uuid
 
@@ -123,7 +124,13 @@ async def launch_task(
     resolved_task_id = task_id or f"task_{uuid.uuid4().hex[:12]}"
     run_span = ai.experimental_telemetry.create_span("hatchery.agent_run").stamp_start()
     run_span.set_attrs(
-        {"chat.id": chat_id, "worker.id": worker_id, "task.id": resolved_task_id},
+        {
+            "braintrust.input_json": json.dumps({"prompt": prompt}),
+            "braintrust.span_attributes": json.dumps({"type": "task"}),
+            "chat.id": chat_id,
+            "worker.id": worker_id,
+            "task.id": resolved_task_id,
+        },
         model=model,
     )
     task = models.Task(

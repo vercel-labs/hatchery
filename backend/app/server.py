@@ -840,6 +840,46 @@ async def worker_event(event: worker_protocol.Event) -> None:
                     event_type=event.type,
                     sequence=event.sequence,
                 )
+                kind = str(event.payload.get("kind") or "event")
+                if event.type == "task.transcript" and kind == "tool.call":
+                    arguments = str(event.payload.get("arguments") or "{}")
+                    try:
+                        tool_input = json.loads(arguments)
+                    except json.JSONDecodeError:
+                        tool_input = arguments
+                    span.set_attrs(
+                        {
+                            "braintrust.input_json": json.dumps(tool_input),
+                            "braintrust.span_attributes": json.dumps({"type": "tool"}),
+                            "gen_ai.operation.name": "execute_tool",
+                            "gen_ai.tool.name": str(event.payload.get("tool_name") or "fx"),
+                            "gen_ai.tool.type": "function",
+                            "gen_ai.tool.call.id": str(event.payload.get("tool_call_id") or ""),
+                            "gen_ai.tool.call.arguments": arguments,
+                        }
+                    )
+                elif event.type == "task.transcript" and kind == "tool.result":
+                    output = str(event.payload.get("output") or "")
+                    span.set_attrs(
+                        {
+                            "braintrust.output_json": json.dumps(output),
+                            "braintrust.span_attributes": json.dumps({"type": "tool"}),
+                            "gen_ai.operation.name": "execute_tool",
+                            "gen_ai.tool.call.id": str(event.payload.get("tool_call_id") or ""),
+                            "gen_ai.tool.call.result": json.dumps(output),
+                        },
+                        tool_error=bool(event.payload.get("error")),
+                    )
+                elif event.type == "task.transcript" and kind == "user":
+                    text = str(event.payload.get("text") or "")
+                    span.set_attrs(
+                        {"braintrust.input_json": json.dumps({"text": text})}
+                    )
+                elif event.type == "task.output":
+                    text = str(event.payload.get("text") or "")
+                    span.set_attrs(
+                        {"braintrust.output_json": json.dumps({"text": text[:8192]})}
+                    )
                 task, changed = await worker.ingest(event)
                 span.set_attrs(applied=changed)
                 if changed and parent is not None and event.type == "task.transcript":
@@ -885,7 +925,10 @@ async def worker_event(event: worker_protocol.Event) -> None:
                 if changed and task is not None and task.status in ("attention", "complete", "errored"):
                     await complete_worker_task(task)
         if terminal and task is not None and parent is not None:
-            parent.set_attrs(task_state=task.status)
+            parent.set_attrs(
+                {"braintrust.output_json": json.dumps(task.result)},
+                task_state=task.status,
+            )
             parent.stamp_end()
 
             def close_run(current: worker.Task) -> worker.Task:

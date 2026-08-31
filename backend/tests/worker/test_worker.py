@@ -78,6 +78,8 @@ async def test_launch_and_follow_up_publish_ordered_commands(monkeypatch):
     assert task.telemetry_span["name"] == "hatchery.agent_run"
     assert task.telemetry_span["trace_id"] == turn_span.trace_id
     assert task.telemetry_span["parent_id"] == turn_span.id
+    assert task.telemetry_span["data"]["attrs"]["braintrust.input_json"] == '{"prompt": "fix it"}'
+    assert task.telemetry_span["data"]["attrs"]["braintrust.span_attributes"] == '{"type": "task"}'
     assert task.command_sequence == 1
     assert task.completion_delivered is False
     with pytest.raises(ValueError, match="does not belong"):
