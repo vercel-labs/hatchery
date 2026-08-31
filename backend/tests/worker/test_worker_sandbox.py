@@ -60,7 +60,11 @@ async def test_provision_creates_persistent_sandbox_and_checks_daemon(monkeypatc
             calls["health"] = (url, headers)
             return Response()
 
+    async def oidc_token():
+        return "oidc-token"
+
     monkeypatch.setattr(sandbox.vercel_sandbox, "get_or_create_sandbox", get_or_create_sandbox)
+    monkeypatch.setattr(sandbox.vercel_oidc, "get_vercel_oidc_token", oidc_token)
     monkeypatch.setattr(sandbox.httpx, "AsyncClient", Client)
 
     provisioned = await sandbox.provision("wrk_1", models.WorkerSpec(), "secret")
@@ -73,9 +77,18 @@ async def test_provision_creates_persistent_sandbox_and_checks_daemon(monkeypatc
     assert "from vercel import connect, queue; import asyncssh, websockets" in bootstrap
     assert "fx.sh/setup.sh" in bootstrap
     assert calls["options"]["ports"] == [8787, 8788]
+    assert calls["options"]["env"] == {
+        "AI_GATEWAY_API_KEY": sandbox.AI_GATEWAY_PLACEHOLDER,
+    }
+    gateway_rule = calls["options"]["network_policy"].allow[sandbox.AI_GATEWAY_HOST][0]
+    assert dict(gateway_rule.transform[0].headers) == {
+        "Authorization": "Bearer oidc-token",
+        "ai-gateway-auth-method": "oidc",
+    }
     assert calls["process"][2]["HATCHERY_DAEMON_TOKEN"] == "secret"
     assert calls["process"][2]["HATCHERY_WORKER_ID"] == "wrk_1"
     assert calls["process"][2]["FX_PERMISSION_MODE"] == "yolo"
+    assert calls["process"][2]["AI_GATEWAY_API_KEY"] == sandbox.AI_GATEWAY_PLACEHOLDER
     assert calls["health"] == (
         "https://daemon.example/health",
         {"authorization": "Bearer secret"},
@@ -253,6 +266,9 @@ async def test_snapshot_create_and_restore(monkeypatch):
     async def credentials():
         return None
 
+    async def network_policy(credential):
+        return "policy"
+
     async def repair(*args, **kwargs):
         calls.append("repair")
 
@@ -260,6 +276,7 @@ async def test_snapshot_create_and_restore(monkeypatch):
     monkeypatch.setattr(sandbox.vercel_sandbox, "resume_sandbox", resume_sandbox)
     monkeypatch.setattr(sandbox.git, "configure", configure)
     monkeypatch.setattr(sandbox.git, "git_credentials", credentials)
+    monkeypatch.setattr(sandbox, "_network_policy", network_policy)
     monkeypatch.setattr(sandbox, "repair_daemon", repair)
     record = models.Worker(
         id="wrk_1", chat_id="chat_1", sandbox_name="hatchery-wrk_1",

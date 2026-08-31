@@ -49,6 +49,7 @@ async def test_runtime_runs_interactive_fx_and_reuses_it_for_follow_up(monkeypat
 
     monkeypatch.setattr(main, "TTYSession", Session)
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "gateway-key")
 
     async def publish(event):
         emitted.append(event)
@@ -71,6 +72,7 @@ async def test_runtime_runs_interactive_fx_and_reuses_it_for_follow_up(monkeypat
     await asyncio.gather(*runtime.jobs)
 
     assert commands == [(["fx"], {"cwd": str(tmp_path), "env": commands[0][1]["env"]})]
+    assert commands[0][1]["env"]["AI_GATEWAY_API_KEY"] == "gateway-key"
     assert json.loads((tmp_path / ".fx" / "settings.json").read_text()) == {
         "permission_mode": "yolo",
         "yolo_acknowledged": True,

@@ -8,6 +8,7 @@ import pathlib
 
 import httpx
 from vercel import sandbox as vercel_sandbox
+from vercel.oidc import aio as vercel_oidc
 
 from worker import git, models
 from worker.daemon import main as daemon_main
@@ -18,6 +19,8 @@ DAEMON_PATH = "/opt/hatchery/daemon.py"
 DAEMON_STATE_PATH = "/opt/hatchery/daemon-state.json"
 GIT_RUNTIME_PATH = "/opt/hatchery/git_runtime.py"
 SHIM_PATH = "/opt/hatchery/bin"
+AI_GATEWAY_HOST = "ai-gateway.vercel.sh"
+AI_GATEWAY_PLACEHOLDER = "sandbox-network-policy-placeholder"
 
 # The worker adapter exposes the retained behavioral surface while the shared
 # implementation lives in worker.git and is copied into each sandbox.
@@ -53,6 +56,7 @@ async def provision(
 ) -> Provisioned:
     name = f"hatchery-{worker_id}"
     credential = await git.git_credentials()
+    network_policy = await _network_policy(credential)
     source = None
     if spec.repos:
         revision = spec.git_sha or spec.branch
@@ -71,7 +75,8 @@ async def provision(
         ports=list(dict.fromkeys([*spec.ports, DAEMON_PORT, SSH_PORT])),
         resources=resources,
         persistent=True,
-        network_policy=git.github_network_policy(credential),
+        network_policy=network_policy,
+        env={"AI_GATEWAY_API_KEY": AI_GATEWAY_PLACEHOLDER},
         tags={"hatchery-worker": worker_id},
     )
     process = None
@@ -94,7 +99,7 @@ async def destroy(name: str) -> None:
 
 async def resume(name: str, worker_id: str, spec: models.WorkerSpec, token: str) -> None:
     box = await vercel_sandbox.resume_sandbox(name=name)
-    await box.update_network_policy(git.github_network_policy(await git.git_credentials()))
+    await box.update_network_policy(await _network_policy(await git.git_credentials()))
     await git.configure(box)
     routes = [models.Route(port=route.port, url=route.url) for route in box.routes]
     await repair_daemon(box, worker_id, spec, token, routes)
@@ -207,11 +212,29 @@ async def snapshot(record: models.Worker, snapshot_id: str | None = None) -> str
     await box.stop()
     await box.update(current_snapshot_id=snapshot_id)
     box = await vercel_sandbox.resume_sandbox(name=record.sandbox_name)
-    await box.update_network_policy(git.github_network_policy(await git.git_credentials()))
+    await box.update_network_policy(await _network_policy(await git.git_credentials()))
     await git.configure(box)
     routes = [models.Route(port=route.port, url=route.url) for route in box.routes]
     await repair_daemon(box, record.id, record.spec, record.daemon_token, routes)
     return snapshot_id
+
+
+async def _network_policy(github_token: str | None):
+    oidc_token = await vercel_oidc.get_vercel_oidc_token()
+    allow = dict(git.github_network_policy(github_token).allow)
+    allow[AI_GATEWAY_HOST] = (
+        vercel_sandbox.NetworkPolicyRule(
+            transform=[
+                vercel_sandbox.NetworkPolicyTransform(
+                    headers={
+                        "Authorization": f"Bearer {oidc_token}",
+                        "ai-gateway-auth-method": "oidc",
+                    }
+                )
+            ]
+        ),
+    )
+    return vercel_sandbox.NetworkPolicy.custom(allow)
 
 
 def daemon_url(record: models.Worker) -> str:
@@ -325,10 +348,10 @@ def _daemon_env(worker_id: str, spec: models.WorkerSpec, token: str) -> dict[str
         "HATCHERY_WORKSPACE": _workspace(spec),
         "FX_PERMISSION_MODE": "yolo",
         "FX_AUTO_UPGRADE": "0",
+        "AI_GATEWAY_API_KEY": AI_GATEWAY_PLACEHOLDER,
     }
     for name in (
         "VERCEL_OIDC_TOKEN",
-        "AI_GATEWAY_API_KEY",
         "GITHUB_CONNECTOR",
         "VERCEL_QUEUE_TOKEN",
         "VERCEL_QUEUE_BASE_URL",

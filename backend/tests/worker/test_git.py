@@ -100,9 +100,10 @@ def test_origin_parser_accepts_https_and_ssh():
 def test_agent_environment_scrubs_control_plane_secrets():
     env = main.agent_environment({
         "PATH": "/usr/bin", "HATCHERY_DAEMON_TOKEN": "secret", "VERCEL_QUEUE_TOKEN": "queue",
-        "GH_TOKEN": "github", "SAFE": "yes",
+        "GH_TOKEN": "github", "AI_GATEWAY_API_KEY": "gateway-key", "SAFE": "yes",
     })
     assert env["SAFE"] == "yes"
+    assert env["AI_GATEWAY_API_KEY"] == "gateway-key"
     assert env["PATH"].startswith("/opt/hatchery/bin:")
     assert "HATCHERY_DAEMON_TOKEN" not in env
     assert "VERCEL_QUEUE_TOKEN" not in env

@@ -46,6 +46,25 @@ def test_fx_runtime_contract(scenario, capability):
     _require(main.Runtime, capability)
 
 
+def test_fx_gateway_key_is_process_environment_only(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    runtime = main.Runtime("wrk", str(tmp_path), lambda event: None)
+
+    env = runtime.configure_fx(gateway_key="gateway-key")
+
+    assert env == {"AI_GATEWAY_API_KEY": "gateway-key"}
+    settings = json.loads((tmp_path / ".fx" / "settings.json").read_text())
+    assert "AI_GATEWAY_API_KEY" not in settings
+
+
+def test_fx_gateway_key_uses_current_process_environment(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "gateway-key")
+    runtime = main.Runtime("wrk", str(tmp_path), lambda event: None)
+
+    assert runtime.configure_fx() == {"AI_GATEWAY_API_KEY": "gateway-key"}
+
+
 @pytest.mark.parametrize(
     "fixture,scenario",
     [
