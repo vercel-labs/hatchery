@@ -82,6 +82,11 @@ async def test_provision_creates_persistent_sandbox_and_checks_daemon(monkeypatc
     )
 
 
+def test_workspace_matches_vercel_git_source_layout():
+    assert sandbox._workspace(models.WorkerSpec(repos=["acme/app"])) == "/vercel/app"
+    assert sandbox._workspace(models.WorkerSpec()) == "/vercel"
+
+
 async def test_wait_for_daemon_retries_route_warmup(monkeypatch):
     calls = 0
 

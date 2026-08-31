@@ -163,7 +163,7 @@ async def _bootstrap(box, worker_id: str, spec: models.WorkerSpec, token: str):
     for repo in spec.repos[1:]:
         await box.run_process(
             "git",
-            ["clone", f"https://github.com/{repo}.git", f"/vercel/sandbox/{repo.split('/')[-1]}"],
+            ["clone", f"https://github.com/{repo}.git", f"/vercel/{repo.split('/')[-1]}"],
             check=True,
             capture_output=True,
         )
@@ -314,8 +314,8 @@ async def _wait_for_daemon(url: str, token: str, process=None) -> dict:
 
 def _workspace(spec: models.WorkerSpec) -> str:
     if spec.repos:
-        return f"/vercel/sandbox/{spec.repos[0].split('/')[-1]}"
-    return "/vercel/sandbox"
+        return f"/vercel/{spec.repos[0].split('/')[-1]}"
+    return "/vercel"
 
 
 def _daemon_env(worker_id: str, spec: models.WorkerSpec, token: str) -> dict[str, str]:

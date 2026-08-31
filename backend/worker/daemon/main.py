@@ -985,7 +985,7 @@ class SSHService:
 class Handler(http.server.BaseHTTPRequestHandler):
     sessions: dict[str, TTYSession] = {}
     sessions_lock = threading.Lock()
-    workspace = "/vercel/sandbox"
+    workspace = "/vercel"
     runtime: Runtime | None = None
 
     @classmethod
@@ -1212,7 +1212,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--worker-id", default=os.environ.get("HATCHERY_WORKER_ID"))
-    parser.add_argument("--workspace", default=os.environ.get("HATCHERY_WORKSPACE", "/vercel/sandbox"))
+    parser.add_argument("--workspace", default=os.environ.get("HATCHERY_WORKSPACE", "/vercel"))
     parser.add_argument("--state", default="/opt/hatchery/daemon-state.json")
     args = parser.parse_args()
     if not args.worker_id:
