@@ -150,6 +150,7 @@ async def repair_daemon(
                 health.get("ok") is True
                 and health.get("version") == daemon_main.VERSION
                 and health.get("queue_connected") is True
+                and health.get("event_deployment") == os.environ.get("VERCEL_DEPLOYMENT_ID")
             ):
                 return
         except (httpx.HTTPError, ValueError):
@@ -405,6 +406,8 @@ def _daemon_env(
     ):
         if value := os.environ.get(name):
             env[name] = value
+    if deployment := os.environ.get("VERCEL_DEPLOYMENT_ID"):
+        env["HATCHERY_EVENT_DEPLOYMENT"] = deployment
     if os.environ.get("VERCEL_QUEUE_TOKEN") == "vc-dev-token":
         env["VERCEL_QUEUE_TOKEN"] = "vc-dev-token"
     if region and "VERCEL_REGION" not in env:

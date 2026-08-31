@@ -9,6 +9,7 @@ from worker.daemon import main
 
 def test_health_is_authenticated(monkeypatch):
     monkeypatch.setenv("HATCHERY_DAEMON_TOKEN", "secret")
+    monkeypatch.setenv("HATCHERY_EVENT_DEPLOYMENT", "dpl_1")
     server = main.http.server.ThreadingHTTPServer(("127.0.0.1", 0), main.Handler)
     thread = threading.Thread(target=server.serve_forever)
     thread.start()
@@ -22,6 +23,7 @@ def test_health_is_authenticated(monkeypatch):
                 "version": main.VERSION,
                 "queue_connected": False,
                 "queue_error": None,
+                "event_deployment": "dpl_1",
             }
         try:
             urllib.request.urlopen(url)
@@ -42,7 +44,7 @@ async def test_runtime_runs_interactive_fx_and_reuses_it_for_follow_up(monkeypat
 
         def __init__(self, task_id, command, workspace, cols, rows, env):
             commands.append((command, {"cwd": workspace, "env": env}))
-            self.output = bytearray(b"drawn")
+            self.output = bytearray(main.FX_INPUT_READY)
             self.writes = []
             self.condition = threading.Condition()
 

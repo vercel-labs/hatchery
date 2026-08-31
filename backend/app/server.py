@@ -777,6 +777,7 @@ async def manual_tty(ws: fastapi.WebSocket, chat_id: str, terminal_id: str) -> N
 @vercel.queue.subscribe(
     topic=worker_protocol.EVENT_TOPIC,
     consumer_group="hatchery-control-plane-v1",
+    max_concurrency=1,
 )
 async def worker_event(event: worker_protocol.Event) -> None:
     """Persist one at-least-once worker event and wake the owning chat."""

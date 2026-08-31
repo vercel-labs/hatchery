@@ -30,8 +30,9 @@ import uuid
 import asyncssh
 import websockets.asyncio.server
 
-VERSION = 7
+VERSION = 8
 REPLAY_LIMIT = 1024 * 1024
+FX_INPUT_READY = b"\x1b[?2004h"
 SSH_PORT = 8788
 SSH_INTERNAL_PORT = 8022
 SSH_STREAM_GRACE = 300
@@ -295,7 +296,7 @@ class Runtime:
         with lock:
             if first:
                 with session.condition:
-                    while not session.output and session.exit_code is None:
+                    while FX_INPUT_READY not in session.output and session.exit_code is None:
                         session.condition.wait(0.05)
                         with self._input_generation_lock:
                             if generation != self._input_generations.get(key, 0):
@@ -1125,6 +1126,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "version": VERSION,
                 "queue_connected": self.queue_connected,
                 "queue_error": self.queue_error,
+                "event_deployment": os.environ.get("HATCHERY_EVENT_DEPLOYMENT"),
             })
             return
         if self.path == "/tty":
@@ -1309,13 +1311,14 @@ async def run(worker_id: str, workspace: str, port: int, state_path: str) -> Non
         region=os.environ.get("VERCEL_REGION"),
         deployment=queue.ALL_DEPLOYMENTS,
     )
+    event_deployment = os.environ.get("HATCHERY_EVENT_DEPLOYMENT")
 
     async def publish(event: dict) -> None:
         await queue_client.send(
             "hatchery-worker-events-v1",
             event,
             idempotency_key=event["id"],
-            deployment=queue.ALL_DEPLOYMENTS,
+            deployment=event_deployment or queue.ALL_DEPLOYMENTS,
         )
 
     runtime = Runtime(worker_id, workspace, publish, state_path)

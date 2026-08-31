@@ -786,6 +786,18 @@ async def test_task_readiness_requires_actual_daemon_session(monkeypatch):
     assert readiness["session_ready"] is True
 
 
+def test_worker_event_subscriber_is_serialized():
+    subscription = next(
+        item
+        for item in server.vercel.queue.get_subscriptions()
+        if item.func is server.worker_event
+    )
+
+    assert subscription.topic == server.worker_protocol.EVENT_TOPIC
+    assert subscription.consumer_group == "hatchery-control-plane-v1"
+    assert subscription.max_concurrency == 1
+
+
 async def test_task_tty_rejects_pending_subagent(monkeypatch):
     task = server.worker.Task(
         id="task_1", chat_id="chat_1", worker_id="wrk_1", title="fix",

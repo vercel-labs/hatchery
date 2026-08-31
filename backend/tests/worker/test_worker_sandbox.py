@@ -108,6 +108,7 @@ async def test_provision_creates_persistent_sandbox_and_checks_daemon(monkeypatc
     )
     assert calls["process"][2]["HATCHERY_DAEMON_TOKEN"] == "secret"
     assert calls["process"][2]["HATCHERY_WORKER_ID"] == "wrk_1"
+    assert "HATCHERY_EVENT_DEPLOYMENT" not in calls["process"][2]
     assert calls["process"][2]["VERCEL_REGION"] == "iad1"
     assert calls["process"][2]["VERCEL_QUEUE_TOKEN"] == sandbox.QUEUE_TOKEN_PLACEHOLDER
     assert "VERCEL_OIDC_TOKEN" not in calls["process"][2]
@@ -254,6 +255,53 @@ async def test_existing_sandbox_repairs_dead_daemon(monkeypatch):
     assert "pkill" in calls["process"][1][1]
     assert f"exec python3 {sandbox.DAEMON_PATH}" in calls["process"][1][1]
     assert f">>{sandbox.DAEMON_LOG_PATH} 2>&1" in calls["process"][1][1]
+
+
+async def test_healthy_daemon_is_restarted_when_event_deployment_changes(monkeypatch):
+    calls = {}
+
+    class Files:
+        async def mkdir(self, path):
+            pass
+
+        async def write_text(self, path, text, mode):
+            calls["write"] = (path, mode)
+
+    class Box:
+        fs = Files()
+        region = "iad1"
+
+        async def create_process(self, command, args, env):
+            calls["env"] = env
+            return types.SimpleNamespace(returncode=None)
+
+    async def daemon_health(url, token):
+        return {
+            "ok": True,
+            "version": sandbox.daemon_main.VERSION,
+            "queue_connected": True,
+            "event_deployment": "dpl_old",
+        }
+
+    async def wait_for_daemon(url, token, process):
+        return {
+            "ok": True,
+            "version": sandbox.daemon_main.VERSION,
+            "queue_connected": True,
+            "event_deployment": "dpl_new",
+        }
+
+    monkeypatch.setenv("VERCEL_DEPLOYMENT_ID", "dpl_new")
+    monkeypatch.setattr(sandbox, "_daemon_health", daemon_health)
+    monkeypatch.setattr(sandbox, "_wait_for_daemon", wait_for_daemon)
+
+    await sandbox.repair_daemon(
+        Box(), "wrk_1", models.WorkerSpec(), "secret",
+        [models.Route(port=8787, url="https://daemon.example")],
+    )
+
+    assert calls["write"] == (sandbox.DAEMON_PATH, 0o755)
+    assert calls["env"]["HATCHERY_EVENT_DEPLOYMENT"] == "dpl_new"
 
 
 async def test_prepare_for_command_resumes_and_repairs_daemon(monkeypatch):
@@ -416,6 +464,7 @@ def test_daemon_env_uses_placeholder_without_exposing_cloud_identity(monkeypatch
 
     assert "VERCEL_OIDC_TOKEN" not in env
     assert "VERCEL_DEPLOYMENT_ID" not in env
+    assert env["HATCHERY_EVENT_DEPLOYMENT"] == "dpl_1"
     assert env["VERCEL_QUEUE_TOKEN"] == sandbox.QUEUE_TOKEN_PLACEHOLDER
     assert env["VERCEL_REGION"] == "iad1"
     assert env["VERCEL_QUEUE_BASE_URL"] == "https://queues.example"

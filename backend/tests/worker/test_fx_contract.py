@@ -104,7 +104,7 @@ def _delivery(runtime, session, text, *, first=False):
     return result
 
 
-def test_first_fx_delivery_waits_for_terminal_output():
+def test_first_fx_delivery_waits_for_bracketed_paste_readiness():
     runtime = main.Runtime("wrk", "/tmp", lambda event: None)
     _require(runtime, "deliver_input")
     session = _RecordedSession()
@@ -119,7 +119,12 @@ def test_first_fx_delivery_waits_for_terminal_output():
     time.sleep(0.03)
     assert session.writes == []
     with session.condition:
-        session.output.extend(b"drawn")
+        session.output.extend(b"terminal drew something")
+        session.condition.notify_all()
+    time.sleep(0.03)
+    assert session.writes == []
+    with session.condition:
+        session.output.extend(main.FX_INPUT_READY)
         session.condition.notify_all()
     thread.join(1)
     assert done.is_set()
@@ -128,7 +133,7 @@ def test_first_fx_delivery_waits_for_terminal_output():
 def test_first_fx_delivery_is_bracketed_paste_then_enter_without_interrupt():
     runtime = main.Runtime("wrk", "/tmp", lambda event: None)
     session = _RecordedSession()
-    session.output.extend(b"drawn")
+    session.output.extend(main.FX_INPUT_READY)
     _delivery(runtime, session, "first\nsecond", first=True)
     assert session.writes == [b"\x1b[200~first\nsecond\x1b[201~", b"\r"]
 
@@ -172,7 +177,7 @@ def test_concurrent_fx_deliveries_do_not_interleave():
 def test_readiness_wait_is_paid_only_for_first_delivery():
     runtime = main.Runtime("wrk", "/tmp", lambda event: None)
     session = _RecordedSession()
-    session.output.extend(b"drawn")
+    session.output.extend(main.FX_INPUT_READY)
     _delivery(runtime, session, "first", first=True)
     started = time.monotonic()
     _delivery(runtime, session, "second", first=False)
