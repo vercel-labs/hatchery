@@ -2,6 +2,10 @@ import asyncio
 
 import httpx
 import pytest
+import websockets
+from websockets.datastructures import Headers
+from websockets.frames import Close
+from websockets.http11 import Response
 
 import ai
 import channels
@@ -720,3 +724,83 @@ async def test_task_tty_rejects_unknown_subagent():
     ws = FakeWebSocket()
     await server.task_tty(ws, "chat_1", "subagent_1")
     assert ws.closed == (4404, "unknown subagent")
+
+
+class BridgeWebSocket:
+    query_params = {}
+
+    def __init__(self):
+        self.accepted = False
+        self.closed = None
+
+    async def accept(self):
+        self.accepted = True
+
+    async def close(self, code=1000, reason=""):
+        assert self.accepted
+        self.closed = (code, reason)
+
+    async def receive(self):
+        await asyncio.Future()
+
+
+async def test_tty_bridge_propagates_upstream_close(monkeypatch):
+    class Connection:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def send(self, message):
+            pass
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise websockets.ConnectionClosedError(
+                Close(4404, "session not found"), None
+            )
+
+    monkeypatch.setattr(server.worker.sandbox, "tty", lambda record: ("wss://tty.example", {}))
+    monkeypatch.setattr(server.websockets.asyncio.client, "connect", lambda *args, **kwargs: Connection())
+    ws = BridgeWebSocket()
+
+    await server._bridge_tty(ws, type("Worker", (), {"id": "wrk_1"})(), "task_1")
+
+    assert ws.closed == (4404, "session not found")
+
+
+async def test_tty_bridge_maps_auth_rejection(monkeypatch):
+    class Connection:
+        async def __aenter__(self):
+            raise websockets.InvalidStatus(Response(401, "Unauthorized", Headers()))
+
+        async def __aexit__(self, *args):
+            return None
+
+    monkeypatch.setattr(server.worker.sandbox, "tty", lambda record: ("wss://tty.example", {}))
+    monkeypatch.setattr(server.websockets.asyncio.client, "connect", lambda *args, **kwargs: Connection())
+    ws = BridgeWebSocket()
+
+    await server._bridge_tty(ws, type("Worker", (), {"id": "wrk_1"})(), "task_1")
+
+    assert ws.closed == (4401, "upstream rejected connection (401)")
+
+
+async def test_tty_bridge_maps_connection_failure(monkeypatch):
+    class Connection:
+        async def __aenter__(self):
+            raise OSError("unreachable")
+
+        async def __aexit__(self, *args):
+            return None
+
+    monkeypatch.setattr(server.worker.sandbox, "tty", lambda record: ("wss://tty.example", {}))
+    monkeypatch.setattr(server.websockets.asyncio.client, "connect", lambda *args, **kwargs: Connection())
+    ws = BridgeWebSocket()
+
+    await server._bridge_tty(ws, type("Worker", (), {"id": "wrk_1"})(), "task_1")
+
+    assert ws.closed == (1011, "upstream connection failed")

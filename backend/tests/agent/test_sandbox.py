@@ -83,3 +83,36 @@ async def test_sandbox_operations_delegate_with_chat_scope(monkeypatch):
     assert result == "created"
     assert seen["chat_id"] == "chat_1"
     assert seen["spec"].repos == ["acme/app"]
+
+
+async def test_launch_task_immediately_invalidates_ui(monkeypatch):
+    task = sandbox.worker.Task(
+        id="task_1",
+        chat_id="chat_1",
+        worker_id="wrk_1",
+        title="fix it",
+        prompt="fix it",
+        model="openai/test",
+        created_at="2026-08-31T00:00:00+00:00",
+        updated_at="2026-08-31T00:00:00+00:00",
+    )
+
+    async def launch_task(chat_id, sandbox_id, prompt, model):
+        assert (chat_id, sandbox_id, prompt, model) == (
+            "chat_1", "wrk_1", "fix it", "openai/test"
+        )
+        return task
+
+    monkeypatch.setattr(sandbox.worker, "launch_task", launch_task)
+
+    created = await sandbox.launch_task("chat_1", "wrk_1", "fix it", "openai/test")
+
+    assert created == task
+    assert await sandbox.events.read("chat_1", "ui") == [
+        (0, {
+            "type": "task.changed",
+            "subagent_id": "task_1",
+            "sandbox_id": "wrk_1",
+            "state": "pending",
+        })
+    ]

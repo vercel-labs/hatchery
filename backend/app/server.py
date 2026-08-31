@@ -609,6 +609,8 @@ async def _bridge_tty(
     if command is not None:
         attach["command"] = command
     await ws.accept()
+    close_code = 1000
+    close_reason = ""
     try:
         async with websockets.asyncio.client.connect(
             url, additional_headers=headers, max_size=None, compression=None
@@ -640,11 +642,26 @@ async def _bridge_tty(
                 task.cancel()
             for task in done:
                 task.result()
-    except (fastapi.WebSocketDisconnect, websockets.ConnectionClosed):
+    except fastapi.WebSocketDisconnect:
         pass
+    except websockets.ConnectionClosed as error:
+        if error.rcvd is not None:
+            close_code = error.rcvd.code
+            close_reason = error.rcvd.reason
+        else:
+            close_code = 1011
+            close_reason = "upstream connection closed"
+    except websockets.InvalidStatus as error:
+        status = error.response.status_code
+        close_code = 4401 if status == 401 else 4403 if status == 403 else 1011
+        close_reason = f"upstream rejected connection ({status})"
+    except Exception as error:
+        log.warning("TTY bridge failed for sandbox %s session %s: %s", record.id, session_id, error)
+        close_code = 1011
+        close_reason = "upstream connection failed"
     finally:
         with contextlib.suppress(RuntimeError):
-            await ws.close()
+            await ws.close(code=close_code, reason=close_reason)
 
 
 @app.websocket("/api/chats/{chat_id}/sandboxes/{sandbox_id}/ssh")

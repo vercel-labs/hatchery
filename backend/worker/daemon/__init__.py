@@ -1,3 +1,5 @@
 """Code installed inside each worker sandbox."""
 
-VERSION = 4
+from worker.daemon.main import VERSION
+
+__all__ = ["VERSION"]

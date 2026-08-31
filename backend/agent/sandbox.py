@@ -107,7 +107,18 @@ async def destroy(chat_id: str, sandbox_id: str) -> None:
 
 
 async def launch_task(chat_id: str, sandbox_id: str, prompt: str, model: str) -> worker.Task:
-    return await worker.launch_task(chat_id, sandbox_id, prompt, model)
+    task = await worker.launch_task(chat_id, sandbox_id, prompt, model)
+    await events.append(
+        chat_id,
+        "ui",
+        {
+            "type": "task.changed",
+            "subagent_id": task.id,
+            "sandbox_id": task.worker_id,
+            "state": task.status,
+        },
+    )
+    return task
 
 
 async def send_task_input(chat_id: str, task_id: str, prompt: str) -> worker.Task:

@@ -1,6 +1,8 @@
 import pytest
 
 from worker import models, protocol, sandbox, worker
+from worker.daemon import VERSION
+from worker.daemon import main as daemon_main
 
 
 async def test_create_provisions_and_persists(monkeypatch):
@@ -20,7 +22,7 @@ async def test_create_provisions_and_persists(monkeypatch):
 
     assert created.chat_id == "chat_1"
     assert created.status == "running"
-    assert created.daemon_version == 4
+    assert created.daemon_version == VERSION == daemon_main.VERSION
     assert created.daemon_token
     assert await worker.get(created.id) == created
     assert await worker.list_all("chat_1") == [created]
