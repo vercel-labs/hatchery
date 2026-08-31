@@ -21,6 +21,7 @@ GIT_RUNTIME_PATH = "/opt/hatchery/git_runtime.py"
 SHIM_PATH = "/opt/hatchery/bin"
 AI_GATEWAY_HOST = "ai-gateway.vercel.sh"
 AI_GATEWAY_PLACEHOLDER = "sandbox-network-policy-placeholder"
+QUEUE_TOKEN_PLACEHOLDER = "sandbox-queue-policy-placeholder"
 
 # The worker adapter exposes the retained behavioral surface while the shared
 # implementation lives in worker.git and is copied into each sandbox.
@@ -56,7 +57,7 @@ async def provision(
 ) -> Provisioned:
     name = f"hatchery-{worker_id}"
     credential = await git.git_credentials()
-    network_policy = await _network_policy(credential)
+    network_policy = await _network_policy(credential, os.environ.get("VERCEL_REGION"))
     source = None
     if spec.repos:
         revision = spec.git_sha or spec.branch
@@ -79,6 +80,7 @@ async def provision(
         env={"AI_GATEWAY_API_KEY": AI_GATEWAY_PLACEHOLDER},
         tags={"hatchery-worker": worker_id},
     )
+    await box.update_network_policy(await _network_policy(credential, box.region))
     process = None
     if created:
         process = await _bootstrap(box, worker_id, spec, daemon_token)
@@ -99,7 +101,9 @@ async def destroy(name: str) -> None:
 
 async def resume(name: str, worker_id: str, spec: models.WorkerSpec, token: str) -> None:
     box = await vercel_sandbox.resume_sandbox(name=name)
-    await box.update_network_policy(await _network_policy(await git.git_credentials()))
+    await box.update_network_policy(
+        await _network_policy(await git.git_credentials(), box.region)
+    )
     await git.configure(box)
     routes = [models.Route(port=route.port, url=route.url) for route in box.routes]
     await repair_daemon(box, worker_id, spec, token, routes)
@@ -108,6 +112,14 @@ async def resume(name: str, worker_id: str, spec: models.WorkerSpec, token: str)
 async def resume_for_command(record: models.Worker) -> None:
     """Resume and verify a stopped worker before its durable command is published."""
     await resume(record.sandbox_name, record.id, record.spec, record.daemon_token)
+
+
+async def refresh_queue_auth(record: models.Worker) -> None:
+    """Rotate the Queue credential injected at the sandbox network boundary."""
+    box = await vercel_sandbox.get_sandbox(name=record.sandbox_name)
+    await box.update_network_policy(
+        await _network_policy(await git.git_credentials(), box.region)
+    )
 
 
 async def recover_daemon(record: models.Worker) -> None:
@@ -131,7 +143,11 @@ async def repair_daemon(
     if process is None:
         try:
             health = await _daemon_health(daemon_route.url, token)
-            if health.get("ok") is True and health.get("version") == daemon_main.VERSION:
+            if (
+                health.get("ok") is True
+                and health.get("version") == daemon_main.VERSION
+                and health.get("queue_connected") is True
+            ):
                 return
         except (httpx.HTTPError, ValueError):
             pass
@@ -141,6 +157,10 @@ async def repair_daemon(
     health = await _wait_for_daemon(daemon_route.url, token, process)
     if health.get("ok") is not True or health.get("version") != daemon_main.VERSION:
         raise RuntimeError("sandbox daemon returned an incompatible health response")
+    if health.get("queue_connected") is not True:
+        raise RuntimeError(
+            f"sandbox daemon Queue connection failed: {health.get('queue_error') or 'not connected'}"
+        )
 
 
 async def _bootstrap(box, worker_id: str, spec: models.WorkerSpec, token: str):
@@ -224,14 +244,16 @@ async def snapshot(record: models.Worker, snapshot_id: str | None = None) -> str
     await box.stop()
     await box.update(current_snapshot_id=snapshot_id)
     box = await vercel_sandbox.resume_sandbox(name=record.sandbox_name)
-    await box.update_network_policy(await _network_policy(await git.git_credentials()))
+    await box.update_network_policy(
+        await _network_policy(await git.git_credentials(), box.region)
+    )
     await git.configure(box)
     routes = [models.Route(port=route.port, url=route.url) for route in box.routes]
     await repair_daemon(box, record.id, record.spec, record.daemon_token, routes)
     return snapshot_id
 
 
-async def _network_policy(github_token: str | None):
+async def _network_policy(github_token: str | None, region: str | None):
     oidc_token = await vercel_oidc.get_vercel_oidc_token()
     allow = dict(git.github_network_policy(github_token).allow)
     allow[AI_GATEWAY_HOST] = (
@@ -246,6 +268,26 @@ async def _network_policy(github_token: str | None):
             ]
         ),
     )
+    if region:
+        allow[f"{region}.vercel-queue.com"] = (
+            vercel_sandbox.NetworkPolicyRule(
+                match=vercel_sandbox.NetworkPolicyRequestMatcher(
+                    headers=[
+                        vercel_sandbox.NetworkPolicyKeyValueMatcher(
+                            key=vercel_sandbox.NetworkPolicyMatcher.exact("authorization"),
+                            value=vercel_sandbox.NetworkPolicyMatcher.exact(
+                                f"Bearer {QUEUE_TOKEN_PLACEHOLDER}"
+                            ),
+                        )
+                    ]
+                ),
+                transform=[
+                    vercel_sandbox.NetworkPolicyTransform(
+                        headers={"Authorization": f"Bearer {oidc_token}"}
+                    )
+                ],
+            ),
+        )
     return vercel_sandbox.NetworkPolicy.custom(allow)
 
 
@@ -314,20 +356,25 @@ async def _wait_for_daemon(url: str, token: str, process=None) -> dict:
     error = None
     for attempt in range(20):
         try:
-            return await _daemon_health(url, token)
+            health = await _daemon_health(url, token)
+            if health.get("queue_connected") is True:
+                return health
+            error = RuntimeError(
+                health.get("queue_error") or "sandbox daemon Queue is not connected"
+            )
         except (httpx.HTTPError, ValueError) as current:
             error = current
-            if process is not None:
-                await process.refresh()
-                if process.returncode is not None:
-                    _, stderr = await process.communicate()
-                    detail = (stderr or "").strip()
-                    raise RuntimeError(
-                        f"sandbox daemon exited with {process.returncode}: {detail}"
-                    ) from current
-            if attempt < 19:
-                await asyncio.sleep(1)
-    raise RuntimeError("sandbox daemon did not become healthy") from error
+        if process is not None:
+            await process.refresh()
+            if process.returncode is not None:
+                _, stderr = await process.communicate()
+                detail = (stderr or "").strip()
+                raise RuntimeError(
+                    f"sandbox daemon exited with {process.returncode}: {detail}"
+                ) from error
+        if attempt < 19:
+            await asyncio.sleep(1)
+    raise RuntimeError("sandbox daemon did not become Queue-ready") from error
 
 
 def _workspace(spec: models.WorkerSpec) -> str:
@@ -346,17 +393,17 @@ def _daemon_env(
         "FX_PERMISSION_MODE": "yolo",
         "FX_AUTO_UPGRADE": "0",
         "AI_GATEWAY_API_KEY": AI_GATEWAY_PLACEHOLDER,
+        "VERCEL_QUEUE_TOKEN": QUEUE_TOKEN_PLACEHOLDER,
     }
     for name in (
-        "VERCEL_OIDC_TOKEN",
         "GITHUB_CONNECTOR",
-        "VERCEL_QUEUE_TOKEN",
         "VERCEL_QUEUE_BASE_URL",
         "VERCEL_REGION",
-        "VERCEL_DEPLOYMENT_ID",
     ):
         if value := os.environ.get(name):
             env[name] = value
+    if os.environ.get("VERCEL_QUEUE_TOKEN") == "vc-dev-token":
+        env["VERCEL_QUEUE_TOKEN"] = "vc-dev-token"
     if region and "VERCEL_REGION" not in env:
         env["VERCEL_REGION"] = region
     if env.get("VERCEL_QUEUE_TOKEN") == "vc-dev-token":

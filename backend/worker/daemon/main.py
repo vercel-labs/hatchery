@@ -30,7 +30,7 @@ import uuid
 import asyncssh
 import websockets.asyncio.server
 
-VERSION = 6
+VERSION = 7
 REPLAY_LIMIT = 1024 * 1024
 SSH_PORT = 8788
 SSH_INTERNAL_PORT = 8022
@@ -1304,8 +1304,19 @@ async def redeliver_command(delivery, runtime: Runtime) -> None:
 async def run(worker_id: str, workspace: str, port: int, state_path: str) -> None:
     from vercel import connect, queue
 
+    queue_client = queue.QueueClient(
+        token=os.environ.get("VERCEL_QUEUE_TOKEN"),
+        region=os.environ.get("VERCEL_REGION"),
+        deployment=queue.ALL_DEPLOYMENTS,
+    )
+
     async def publish(event: dict) -> None:
-        await queue.send("hatchery-worker-events-v1", event, idempotency_key=event["id"])
+        await queue_client.send(
+            "hatchery-worker-events-v1",
+            event,
+            idempotency_key=event["id"],
+            deployment=queue.ALL_DEPLOYMENTS,
+        )
 
     runtime = Runtime(worker_id, workspace, publish, state_path)
     connector = os.environ.get("GITHUB_CONNECTOR", "")
@@ -1326,7 +1337,7 @@ async def run(worker_id: str, workspace: str, port: int, state_path: str) -> Non
     ssh = SSHService(workspace)
     await ssh.start()
     try:
-        await poll_commands(queue, runtime, worker_id)
+        await poll_commands(queue_client, runtime, worker_id)
     finally:
         await ssh.stop()
         server.shutdown()

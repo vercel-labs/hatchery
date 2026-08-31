@@ -29,6 +29,9 @@ async def test_provision_creates_persistent_sandbox_and_checks_daemon(monkeypatc
             types.SimpleNamespace(port=8788, url="https://ssh.example"),
         ]
 
+        async def update_network_policy(self, policy):
+            calls["network_policy"] = policy
+
         async def run_process(self, command, args, **options):
             calls.setdefault("runs", []).append((command, args, options))
 
@@ -45,7 +48,11 @@ async def test_provision_creates_persistent_sandbox_and_checks_daemon(monkeypatc
             pass
 
         def json(self):
-            return {"ok": True, "version": sandbox.daemon_main.VERSION}
+            return {
+                "ok": True,
+                "version": sandbox.daemon_main.VERSION,
+                "queue_connected": True,
+            }
 
     class Client:
         def __init__(self, timeout):
@@ -81,14 +88,24 @@ async def test_provision_creates_persistent_sandbox_and_checks_daemon(monkeypatc
     assert calls["options"]["env"] == {
         "AI_GATEWAY_API_KEY": sandbox.AI_GATEWAY_PLACEHOLDER,
     }
-    gateway_rule = calls["options"]["network_policy"].allow[sandbox.AI_GATEWAY_HOST][0]
+    gateway_rule = calls["network_policy"].allow[sandbox.AI_GATEWAY_HOST][0]
     assert dict(gateway_rule.transform[0].headers) == {
         "Authorization": "Bearer oidc-token",
         "ai-gateway-auth-method": "oidc",
     }
+    queue_rule = calls["network_policy"].allow["iad1.vercel-queue.com"][0]
+    assert dict(queue_rule.transform[0].headers) == {
+        "Authorization": "Bearer oidc-token"
+    }
+    assert queue_rule.match.headers[0].value.value == (
+        f"Bearer {sandbox.QUEUE_TOKEN_PLACEHOLDER}"
+    )
     assert calls["process"][2]["HATCHERY_DAEMON_TOKEN"] == "secret"
     assert calls["process"][2]["HATCHERY_WORKER_ID"] == "wrk_1"
     assert calls["process"][2]["VERCEL_REGION"] == "iad1"
+    assert calls["process"][2]["VERCEL_QUEUE_TOKEN"] == sandbox.QUEUE_TOKEN_PLACEHOLDER
+    assert "VERCEL_OIDC_TOKEN" not in calls["process"][2]
+    assert "VERCEL_DEPLOYMENT_ID" not in calls["process"][2]
     assert calls["process"][2]["FX_PERMISSION_MODE"] == "yolo"
     assert calls["process"][2]["AI_GATEWAY_API_KEY"] == sandbox.AI_GATEWAY_PLACEHOLDER
     assert calls["health"] == (
@@ -117,7 +134,11 @@ async def test_wait_for_daemon_retries_route_warmup(monkeypatch):
                 )
 
         def json(self):
-            return {"ok": True, "version": sandbox.daemon_main.VERSION}
+            return {
+                "ok": True,
+                "version": sandbox.daemon_main.VERSION,
+                "queue_connected": True,
+            }
 
     class Client:
         def __init__(self, timeout):
@@ -140,7 +161,11 @@ async def test_wait_for_daemon_retries_route_warmup(monkeypatch):
 
     health = await sandbox._wait_for_daemon("https://daemon.example", "secret")
 
-    assert health == {"ok": True, "version": sandbox.daemon_main.VERSION}
+    assert health == {
+        "ok": True,
+        "version": sandbox.daemon_main.VERSION,
+        "queue_connected": True,
+    }
     assert calls == 2
 
 
@@ -195,7 +220,14 @@ async def test_existing_sandbox_repairs_dead_daemon(monkeypatch):
             calls["process"] = (command, args, env)
             return Process()
 
-    health = iter([httpx.ConnectError("down"), {"ok": True, "version": sandbox.daemon_main.VERSION}])
+    health = iter([
+        httpx.ConnectError("down"),
+        {
+            "ok": True,
+            "version": sandbox.daemon_main.VERSION,
+            "queue_connected": True,
+        },
+    ])
 
     async def daemon_health(url, token):
         result = next(health)
@@ -242,6 +274,7 @@ async def test_snapshot_create_and_restore(monkeypatch):
         id = "snap_1"
 
     class Box:
+        region = "iad1"
         routes = [types.SimpleNamespace(port=8787, url="https://daemon.example")]
 
         async def snapshot(self):
@@ -272,7 +305,8 @@ async def test_snapshot_create_and_restore(monkeypatch):
     async def credentials():
         return None
 
-    async def network_policy(credential):
+    async def network_policy(credential, region):
+        assert region == "iad1"
         return "policy"
 
     async def repair(*args, **kwargs):
@@ -314,7 +348,7 @@ def test_daemon_env_bridges_vercel_dev_queue_through_public_origin(monkeypatch):
     assert "VERCEL_DEPLOYMENT_ID" not in env
 
 
-def test_daemon_env_preserves_cloud_queue_identity(monkeypatch):
+def test_daemon_env_uses_placeholder_without_exposing_cloud_identity(monkeypatch):
     monkeypatch.setenv("VERCEL_OIDC_TOKEN", "oidc")
     monkeypatch.setenv("VERCEL_REGION", "iad1")
     monkeypatch.setenv("VERCEL_DEPLOYMENT_ID", "dpl_1")
@@ -325,9 +359,10 @@ def test_daemon_env_preserves_cloud_queue_identity(monkeypatch):
         "wrk_1", models.WorkerSpec(), "secret", region="sfo1"
     )
 
-    assert env["VERCEL_OIDC_TOKEN"] == "oidc"
+    assert "VERCEL_OIDC_TOKEN" not in env
+    assert "VERCEL_DEPLOYMENT_ID" not in env
+    assert env["VERCEL_QUEUE_TOKEN"] == sandbox.QUEUE_TOKEN_PLACEHOLDER
     assert env["VERCEL_REGION"] == "iad1"
-    assert env["VERCEL_DEPLOYMENT_ID"] == "dpl_1"
     assert env["VERCEL_QUEUE_BASE_URL"] == "https://queues.example"
 
 

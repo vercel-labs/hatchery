@@ -53,7 +53,11 @@ async def test_launch_and_follow_up_publish_ordered_commands(monkeypatch):
     async def send(command):
         sent.append(command)
 
+    async def refresh_queue_auth(record):
+        pass
+
     monkeypatch.setattr(worker.queue, "send", send)
+    monkeypatch.setattr(worker.sandbox, "refresh_queue_auth", refresh_queue_auth)
     async def provision(worker_id, spec, daemon_token):
         return sandbox.Provisioned(f"hatchery-{worker_id}", [])
     monkeypatch.setattr(worker.sandbox, "provision", provision)
@@ -82,12 +86,16 @@ async def test_stopped_worker_persists_task_before_resume_and_publish(monkeypatc
         assert await worker.store.list_tasks("chat_1")
         order.append("resume")
 
+    async def refresh_queue_auth(record):
+        order.append("refresh")
+
     async def send(command):
         assert (await worker.get(command.worker_id)).status == "running"
         order.append("send")
 
     monkeypatch.setattr(worker.sandbox, "provision", provision)
     monkeypatch.setattr(worker.sandbox, "resume_for_command", resume_for_command)
+    monkeypatch.setattr(worker.sandbox, "refresh_queue_auth", refresh_queue_auth)
     monkeypatch.setattr(worker.queue, "send", send)
     created = await worker.create("chat_1", models.WorkerSpec())
     created.status = "stopped"
@@ -96,13 +104,18 @@ async def test_stopped_worker_persists_task_before_resume_and_publish(monkeypatc
     task = await worker.launch_task("chat_1", created.id, "fix it", "openai/test")
 
     assert task.status == "pending"
-    assert order == ["resume", "send"]
+    assert order == ["resume", "refresh", "send"]
 
 
 async def test_ingest_is_idempotent_and_ordered(monkeypatch):
     async def send(command):
         pass
+
+    async def refresh_queue_auth(record):
+        pass
+
     monkeypatch.setattr(worker.queue, "send", send)
+    monkeypatch.setattr(worker.sandbox, "refresh_queue_auth", refresh_queue_auth)
     async def provision(worker_id, spec, daemon_token):
         return sandbox.Provisioned(f"hatchery-{worker_id}", [])
     monkeypatch.setattr(worker.sandbox, "provision", provision)

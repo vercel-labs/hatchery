@@ -13,6 +13,11 @@ def _now() -> str:
     return datetime.datetime.now(datetime.UTC).isoformat()
 
 
+async def _send_command(record: models.Worker, command: protocol.Command) -> None:
+    await sandbox.refresh_queue_auth(record)
+    await queue.send(command)
+
+
 async def create(chat_id: str, spec: models.WorkerSpec) -> models.Worker:
     now = _now()
     worker_id = f"wrk_{uuid.uuid4().hex[:12]}"
@@ -125,7 +130,7 @@ async def launch_task(
         record.status = "running"
         record.updated_at = _now()
         await store.save(record)
-    await queue.send(command)
+    await _send_command(record, command)
     return task
 
 
@@ -154,14 +159,16 @@ async def send_task_input(chat_id: str, task_id: str, prompt: str) -> models.Tas
     task = await store.mutate_task(current.id, record)
     if task is None:
         raise KeyError(task_id)
-    await queue.send(
+    record = await _required(task.worker_id)
+    await _send_command(
+        record,
         protocol.command(
             task.worker_id,
             task.command_sequence,
             "task.input",
             task_id=task.id,
             payload={"prompt": prompt},
-        )
+        ),
     )
     return task
 
@@ -209,13 +216,15 @@ async def cancel_task(chat_id: str, task_id: str) -> models.Task:
     task.status = "cancelled"
     task.updated_at = _now()
     await store.save_task(task)
-    await queue.send(
+    record = await _required(task.worker_id)
+    await _send_command(
+        record,
         protocol.command(
             task.worker_id,
             task.command_sequence,
             "task.cancel",
             task_id=task.id,
-        )
+        ),
     )
     return task
 
@@ -411,7 +420,8 @@ async def reconcile_task(task_id: str) -> models.Task:
         command_id=f"cmd_{uuid.uuid5(uuid.NAMESPACE_URL, f'{task.id}:{task.command_sequence}:{kind}').hex}",
     )
     try:
-        await queue.send(command)
+        record = await _required(task.worker_id)
+        await _send_command(record, command)
     except Exception:
         task.launch_attempts += 1
         task.updated_at = _now()

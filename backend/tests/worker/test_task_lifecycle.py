@@ -7,7 +7,11 @@ async def _worker(monkeypatch):
     async def provision(worker_id, spec, daemon_token):
         return sandbox.Provisioned(f"hatchery-{worker_id}", [])
 
+    async def refresh_queue_auth(record):
+        pass
+
     monkeypatch.setattr(worker.sandbox, "provision", provision)
+    monkeypatch.setattr(worker.sandbox, "refresh_queue_auth", refresh_queue_auth)
     return await worker.create("chat_1", models.WorkerSpec(repos=["acme/app"]))
 
 
