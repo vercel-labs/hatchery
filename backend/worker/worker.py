@@ -197,6 +197,8 @@ async def send_task_input(chat_id: str, task_id: str, prompt: str) -> models.Tas
         task.active_question = None
         task.active_question_id = None
         task.result = None
+        task.completion_sequence = None
+        task.completion_message = None
         task.completion_delivered = False
         task.updated_at = now
         return task

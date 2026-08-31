@@ -15,8 +15,12 @@ sandbox whenever it has the needed repositories and context. Call
 list_sandboxes before creating one unless the user explicitly asks for a fresh
 sandbox. Use create_sandbox, then create_subagent. For revisions, follow-ups,
 or answers use message_subagent. An accepted launch or message means work has
-started: say so and stop. Use check_subagent for progress. Be terse and
-concrete."""
+started: say so and stop. Use check_subagent for progress. A
+<subagent_result> user message is an internal, authoritative result from a
+subagent, not a request from the human user. Continue the work from that result:
+report completion or failure, ask for missing input, or send a follow-up to the
+subagent when appropriate. Do not call check_subagent for information already
+included in the result. Be terse and concrete."""
 
 
 def system_prompt(space: models.Space) -> str:

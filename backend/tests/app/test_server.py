@@ -691,7 +691,7 @@ async def test_sandbox_routes_use_chat_scoped_control_plane(monkeypatch):
     assert old.status_code == 404
 
 
-async def test_worker_completion_persists_and_delivers_message(monkeypatch):
+async def test_worker_completion_wakes_dispatcher_with_hidden_persisted_result(monkeypatch):
     space = await server.spaces.default()
     chat = await chats.create(space.id, "task")
     task = server.worker.Task(
@@ -702,26 +702,91 @@ async def test_worker_completion_persists_and_delivers_message(monkeypatch):
         prompt="fix it",
         model="openai/test",
         status="complete",
+        event_sequence=3,
         result={"summary": "fixed and tested"},
         created_at="2026-08-28T00:00:00+00:00",
         updated_at="2026-08-28T00:00:00+00:00",
     )
     await server.worker.store.save_task(task)
     delivered = []
+    turns = []
+
+    async def turn(chat_id, record, wake=None):
+        turns.append([message for message in await server._transcript(chat_id)])
+        await events.append(
+            chat_id,
+            "messages",
+            ai.assistant_message("The subagent fixed and tested it.").model_dump(mode="json"),
+        )
+        return "The subagent fixed and tested it."
 
     async def deliver(chat_id, message):
         delivered.append((chat_id, message))
         return []
 
+    monkeypatch.setattr(server, "_run_dispatcher_turn", turn)
     monkeypatch.setattr(server, "_deliver", deliver)
     await server.complete_worker_task(task)
     await server.complete_worker_task(task)
 
     stored = [ai.messages.Message.model_validate(data) for _, data in await events.read(chat.id, "messages")]
-    assert [(message.role, message.text) for message in stored] == [("assistant", "fixed and tested")]
-    assert delivered == [(chat.id, "fixed and tested")]
+    assert [(message.role, message.text) for message in stored] == [
+        (
+            "user",
+            '<subagent_result>\n{"subagent_id":"task_1","status":"complete","result":{"summary":"fixed and tested"}}\n</subagent_result>',
+        ),
+        ("assistant", "The subagent fixed and tested it."),
+    ]
+    assert stored[0].provider_metadata == {
+        "hatchery": {"kind": "subagent_result", "subagent_id": "task_1"}
+    }
+    assert len(turns) == 1
+    assert turns[0][-1].id == "subagent_result_task_1_3"
+    assert delivered == [(chat.id, "The subagent fixed and tested it.")]
     assert (await server.worker.get_task(chat.id, task.id)).completion_delivered is True
     assert (await chats.get(chat.id)).status == "done"
+
+    async with client() as c:
+        visible = (await c.get(f"/api/chats/{chat.id}/messages")).json()
+    assert [message["role"] for message in visible] == ["assistant"]
+
+
+async def test_worker_completion_retries_delivery_without_rerunning_dispatcher(monkeypatch):
+    space = await server.spaces.default()
+    chat = await chats.create(space.id, "task")
+    task = server.worker.Task(
+        id="task_1", chat_id=chat.id, worker_id="wrk_1", title="fix",
+        prompt="fix it", model="openai/test", status="complete", event_sequence=2,
+        result={"summary": "done"}, created_at="2026-08-28T00:00:00+00:00",
+        updated_at="2026-08-28T00:00:00+00:00",
+    )
+    await server.worker.store.save_task(task)
+    turn_calls = 0
+    delivery_calls = 0
+
+    async def turn(chat_id, record, wake=None):
+        nonlocal turn_calls
+        turn_calls += 1
+        await events.append(
+            chat_id, "messages", ai.assistant_message("done").model_dump(mode="json")
+        )
+        return "done"
+
+    async def deliver(chat_id, message):
+        nonlocal delivery_calls
+        delivery_calls += 1
+        return ["temporary"] if delivery_calls == 1 else []
+
+    monkeypatch.setattr(server, "_run_dispatcher_turn", turn)
+    monkeypatch.setattr(server, "_deliver", deliver)
+    await server.complete_worker_task(task)
+    await server.complete_worker_task(task)
+
+    stored = await events.read(chat.id, "messages")
+    assert len(stored) == 2
+    assert turn_calls == 1
+    assert delivery_calls == 2
+    assert (await server.worker.get_task(chat.id, task.id)).completion_delivered is True
 
 
 async def test_task_readiness_reports_queue_state(monkeypatch):
