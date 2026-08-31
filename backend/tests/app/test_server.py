@@ -821,12 +821,29 @@ async def test_worker_event_continues_and_closes_agent_run(monkeypatch):
     try:
         await server.worker_event(
             server.worker_protocol.Event(
-                id="evt_trace",
+                id="evt_transcript",
                 worker_id=task.worker_id,
                 task_id=task.id,
                 sequence=0,
-                type="task.completed",
+                type="task.transcript",
                 created_at="2026-08-31T00:00:01+00:00",
+                payload={
+                    "kind": "tool.call",
+                    "tool_name": "read_file",
+                    "arguments": '{"path":"README.md"}',
+                    "session_id": "session_trace",
+                    "truncated": False,
+                },
+            )
+        )
+        await server.worker_event(
+            server.worker_protocol.Event(
+                id="evt_trace",
+                worker_id=task.worker_id,
+                task_id=task.id,
+                sequence=1,
+                type="task.completed",
+                created_at="2026-08-31T00:00:02+00:00",
                 payload={"summary": "done"},
             )
         )
@@ -839,6 +856,10 @@ async def test_worker_event_continues_and_closes_agent_run(monkeypatch):
     stored = await server.worker.store.get_task(task.id)
     assert stored is not None
     assert stored.telemetry_span["ended_at"] is not None
+    assert stored.telemetry_span["data"]["attrs"]["fx.session_id"] == "session_trace"
+    assert stored.telemetry_span["data"]["attrs"]["fx.tool_call_count"] == 1
+    assert stored.telemetry_span["events"][0]["name"] == "fx.tool.call"
+    assert stored.telemetry_span["events"][0]["attrs"]["tool_name"] == "read_file"
 
 
 def test_worker_event_subscriber_is_serialized():

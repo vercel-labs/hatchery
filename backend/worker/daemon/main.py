@@ -181,7 +181,12 @@ class Runtime:
                     break
                 if event["type"] == "assistant":
                     last_summary = event["text"]
-                    await self._emit(task_id, "task.output", {"text": last_summary})
+                    await self._emit(task_id, "task.output", {
+                        "text": last_summary,
+                        "session_id": event.get("session_id"),
+                    })
+                elif event["type"] in ("user", "tool.call", "tool.result"):
+                    await self._emit(task_id, "task.transcript", self.transcript_payload(event))
                 elif event["type"] == "attention":
                     await self._emit(task_id, "task.question", {"question": event["text"]})
                 elif event["type"] == "turn.completed":
@@ -566,11 +571,43 @@ class Runtime:
             await self._launch(task_id, prompt, model, resume=True)
         return len(batch)
 
+    @staticmethod
+    def transcript_payload(event: dict, max_text: int = 8 * 1024) -> dict:
+        payload = {"kind": str(event.get("type") or "event")}
+        if event.get("session_id"):
+            payload["session_id"] = str(event["session_id"])
+        if event.get("type") in ("user", "assistant"):
+            text = str(event.get("text") or "")
+            payload.update(text=text[:max_text], truncated=len(text) > max_text)
+        elif event.get("type") == "tool.call":
+            tool = event.get("tool") or {}
+            arguments = json.dumps(tool.get("arguments") or {}, ensure_ascii=False)
+            payload.update(
+                tool_call_id=str(event.get("id") or ""),
+                tool_name=str(tool.get("name") or ""),
+                arguments=arguments[:max_text],
+                truncated=len(arguments) > max_text,
+            )
+        elif event.get("type") == "tool.result":
+            output = str(event.get("output") or "")
+            payload.update(
+                tool_call_id=str(event.get("id") or ""),
+                output=output[:max_text],
+                error=bool(event.get("error")),
+                truncated=len(output) > max_text,
+            )
+        return payload
+
     async def ingest_fx_event(self, task_id: str, event: dict) -> None:
         """Publish one decoded fx event through the daemon's ordered event channel."""
         kind = event.get("type")
         if kind == "assistant":
-            await self._emit(task_id, "task.output", {"text": event.get("text", "")})
+            await self._emit(task_id, "task.output", {
+                "text": event.get("text", ""),
+                "session_id": event.get("session_id"),
+            })
+        elif kind in ("user", "tool.call", "tool.result"):
+            await self._emit(task_id, "task.transcript", self.transcript_payload(event))
         elif kind == "attention":
             await self._emit(task_id, "task.question", {"question": event.get("text", "input required")})
         elif kind == "turn.completed":

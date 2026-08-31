@@ -833,8 +833,41 @@ async def worker_event(event: worker_protocol.Event) -> None:
                 )
                 task, changed = await worker.ingest(event)
                 span.set_attrs(applied=changed)
+                if changed and parent is not None and event.type == "task.transcript":
+                    kind = str(event.payload.get("kind") or "event")
+                    parent.add_event(f"fx.{kind}", event.payload)
+                elif changed and parent is not None and event.type == "task.output":
+                    text = str(event.payload.get("text") or "")
+                    parent.add_event(
+                        "fx.assistant",
+                        {
+                            "text": text[:8192],
+                            "truncated": len(text) > 8192,
+                            "session_id": event.payload.get("session_id"),
+                        },
+                    )
+                elif changed and parent is not None and event.type == "task.question":
+                    question = str(event.payload.get("question") or event.payload.get("text") or "")
+                    parent.add_event("fx.attention", {"text": question[:8192]})
+                elif changed and parent is not None and event.type == "task.completed":
+                    parent.add_event("fx.turn.completed")
                 if task is not None:
                     span.set_attrs({"chat.id": task.chat_id}, task_state=task.status)
+                    if changed and parent is not None:
+                        parent.set_attrs(
+                            {
+                                "fx.session_id": task.fx_session_id or "",
+                                "fx.transcript_event_count": task.transcript_event_count,
+                                "fx.tool_call_count": task.transcript_tool_call_count,
+                                "fx.truncated_event_count": task.transcript_truncated_count,
+                            }
+                        )
+
+                        def save_run(current: worker.Task) -> worker.Task:
+                            current.telemetry_span = parent.model_dump(mode="json")
+                            return current
+
+                        await worker.store.mutate_task(task.id, save_run)
                 terminal = bool(
                     changed
                     and task is not None

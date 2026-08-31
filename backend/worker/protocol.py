@@ -14,6 +14,7 @@ EventType = typing.Literal[
     "daemon.ready",
     "task.started",
     "task.output",
+    "task.transcript",
     "task.question",
     "task.completed",
     "task.failed",

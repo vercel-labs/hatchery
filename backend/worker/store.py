@@ -224,6 +224,12 @@ async def apply_event(event) -> tuple[models.Task | None, bool]:
             text = str(event.payload.get("text") or "").strip()
             if text:
                 task.last_agent_words = text
+                task.transcript_event_count += 1
+                if len(text) > 8 * 1024:
+                    task.transcript_truncated_count += 1
+            session_id = event.payload.get("session_id")
+            if session_id:
+                task.fx_session_id = str(session_id)
             pull_request = event.payload.get("pull_request")
             if isinstance(pull_request, dict):
                 url = str(pull_request.get("url") or "")
@@ -232,6 +238,15 @@ async def apply_event(event) -> tuple[models.Task | None, bool]:
                         "url": url,
                         "repo_path": str(pull_request.get("repo_path") or ""),
                     })
+        elif event.type == "task.transcript":
+            task.transcript_event_count += 1
+            if event.payload.get("kind") == "tool.call":
+                task.transcript_tool_call_count += 1
+            if event.payload.get("truncated"):
+                task.transcript_truncated_count += 1
+            session_id = event.payload.get("session_id")
+            if session_id:
+                task.fx_session_id = str(session_id)
         elif event.type == "task.question":
             question = str(event.payload.get("question") or event.payload.get("text") or "input required")
             task.status = "attention"
