@@ -4,7 +4,9 @@ import { useCallback, useEffect, useState } from "react";
 import {
   BookMarkedIcon,
   CheckIcon,
+  ChevronsUpDownIcon,
   FolderGitIcon,
+  GitBranchIcon,
   LinkIcon,
   LogOutIcon,
   PencilIcon,
@@ -21,6 +23,7 @@ import type { ChatUIMessage } from "@/lib/messages";
 import { ChatView } from "@/components/chat";
 import { SandboxForm } from "@/components/sandbox-form";
 import { TerminalPane, type SandboxWorkspace } from "@/components/terminal-pane";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -29,6 +32,15 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Empty,
   EmptyDescription,
@@ -116,18 +128,33 @@ export default function Home() {
   // set by space clicks only; chat clicks leave the order alone
   const [sortSpaceId, setSortSpaceId] = useState<string | null>(null);
 
+  const disconnectGitHub = async () => {
+    if (!window.confirm("Disconnect GitHub? Active sandboxes will lose repository access.")) {
+      return;
+    }
+    const response = await apiFetch("/api/connections/github", { method: "DELETE" });
+    if (response.ok) {
+      setUser((current) => current ? { ...current, github: undefined } : current);
+    }
+  };
+
   useEffect(() => {
     const load = async () => {
       const identity = await apiFetch("/api/auth/me");
       if (!identity.ok) throw new Error("backend unreachable");
       const me: { user: User | null } = await identity.json();
-      setUser(me.user);
-      if (!me.user) return;
-      const [s, c] = await Promise.all([
+      if (!me.user) {
+        setUser(null);
+        return;
+      }
+      const [s, c, github] = await Promise.all([
         apiFetch("/api/spaces"),
         apiFetch("/api/chats"),
+        apiFetch("/api/connections/github"),
       ]);
-      if (!s.ok || !c.ok) throw new Error("backend unreachable");
+      if (!s.ok || !c.ok || !github.ok) throw new Error("backend unreachable");
+      const connection: { connection: User["github"] | null } = await github.json();
+      setUser({ ...me.user, github: connection.connection ?? undefined });
       setSpaces(await s.json());
       setChats(await c.json());
     };
@@ -221,9 +248,9 @@ export default function Home() {
     );
   };
 
-  if (!failed && user === undefined) return <div className="h-svh" />;
+  if (user === undefined && !failed) return <div className="h-svh" />;
 
-  if (!failed && user === null) {
+  if (user == null) {
     return (
       <main className="flex h-svh items-center justify-center p-6">
         <Card className="w-full max-w-sm">
@@ -248,26 +275,64 @@ export default function Home() {
   return (
     <SidebarProvider className="h-svh overflow-hidden">
       <Sidebar>
-        <SidebarHeader className="px-4 py-3">
-          <div className="flex items-center gap-2">
-            <div className="min-w-0 flex-1">
-              <div className="text-sm font-semibold">hatchery</div>
-              <div className="truncate text-xs text-muted-foreground">
-                {user?.name ?? user?.username ?? user?.email}
-              </div>
-            </div>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              aria-label="Sign out"
-              onClick={async () => {
-                await apiFetch("/api/auth/logout", { method: "POST" });
-                window.location.reload();
-              }}
-            >
-              <LogOutIcon />
-            </Button>
-          </div>
+        <SidebarHeader className="p-2">
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={
+                <SidebarMenuButton size="lg" className="h-auto">
+                  <Avatar size="sm">
+                    <AvatarImage src={user.picture ?? undefined} alt="" />
+                    <AvatarFallback>
+                      {(user.name ?? user.username ?? user.email ?? "U").slice(0, 1).toUpperCase()}
+                    </AvatarFallback>
+                  </Avatar>
+                  <span className="min-w-0 flex-1">
+                    <span className="block font-semibold">hatchery</span>
+                    <span className="block truncate text-xs text-muted-foreground">
+                      {user.name ?? user.username ?? user.email}
+                    </span>
+                  </span>
+                  <ChevronsUpDownIcon />
+                </SidebarMenuButton>
+              }
+            />
+            <DropdownMenuContent side="bottom" align="start" className="min-w-60">
+              <DropdownMenuGroup>
+                <DropdownMenuLabel>Account</DropdownMenuLabel>
+                {user.github ? (
+                  <DropdownMenuItem disabled>
+                    <GitBranchIcon />
+                    Connected as @{user.github.login}
+                  </DropdownMenuItem>
+                ) : (
+                  <DropdownMenuItem
+                    render={<a href={`${apiBase()}/api/connections/github/authorize`} />}
+                  >
+                    <GitBranchIcon />
+                    Connect GitHub
+                  </DropdownMenuItem>
+                )}
+              </DropdownMenuGroup>
+              <DropdownMenuSeparator />
+              <DropdownMenuGroup>
+                {user.github && (
+                  <DropdownMenuItem variant="destructive" onClick={disconnectGitHub}>
+                    <GitBranchIcon />
+                    Disconnect GitHub
+                  </DropdownMenuItem>
+                )}
+                <DropdownMenuItem
+                  onClick={async () => {
+                    await apiFetch("/api/auth/logout", { method: "POST" });
+                    window.location.reload();
+                  }}
+                >
+                  <LogOutIcon />
+                  Sign out
+                </DropdownMenuItem>
+              </DropdownMenuGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </SidebarHeader>
         <SidebarSeparator />
 

@@ -6,7 +6,7 @@ import ai
 import pydantic
 
 import models
-from store import events
+from store import chats, events
 import worker
 
 
@@ -89,7 +89,12 @@ async def suggest(space: models.Space) -> Launch:
 
 
 async def create(chat_id: str, launch: Launch) -> worker.Worker:
-    created = await worker.create(chat_id, worker.WorkerSpec(**launch.model_dump()))
+    chat = await chats.get(chat_id)
+    created = await worker.create(
+        chat_id,
+        worker.WorkerSpec(**launch.model_dump()),
+        user_id=chat.user_id if chat is not None else None,
+    )
     await events.append(chat_id, "ui", {"type": "sandbox.changed"})
     return created
 

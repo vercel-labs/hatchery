@@ -21,12 +21,21 @@ export function wsBase(): string {
   );
 }
 
+export type GitHubConnection = {
+  id: string;
+  login: string;
+  avatar_url: string | null;
+  installation_id: string | null;
+  connected_at: string;
+};
+
 export type User = {
   id: string;
   email: string | null;
   name: string | null;
   username: string | null;
   picture: string | null;
+  github?: GitHubConnection;
 };
 
 export type Resource = {
@@ -47,6 +56,7 @@ export type Space = {
 
 export type Chat = {
   id: string;
+  user_id: string | null;
   space_id: string | null;
   title: string;
   topic: string | null;

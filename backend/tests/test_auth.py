@@ -40,6 +40,7 @@ async def test_save_user_is_compatible_with_existing_auth_schema(monkeypatch):
     assert await auth.auth_store.save_user(user) == user
     query, args = database.calls[0]
     assert "updated_at" not in query
+    assert "hatchery_users.data || EXCLUDED.data" in query
     assert args == ("user_1", json.dumps(user))
 
 
@@ -195,6 +196,86 @@ async def test_callback_creates_session_without_storing_provider_tokens(monkeypa
     assert "session-secret" in response.headers["set-cookie"]
     assert "HttpOnly" in response.headers["set-cookie"]
     assert "access_token" not in seen
+
+
+async def test_github_authorization_uses_vercel_user_subject(monkeypatch):
+    seen = {}
+
+    async def start(connector, **kwargs):
+        seen.update(connector=connector, **kwargs)
+        return type("Authorization", (), {"url": "https://connect.vercel.com/authorize"})()
+
+    monkeypatch.setenv("GITHUB_CONNECTOR", "github/hatchery")
+    monkeypatch.setattr(auth.connect, "start_authorization", start)
+
+    response = await auth.begin_github(request(), {"id": "user_1"})
+
+    assert response.headers["location"] == "https://connect.vercel.com/authorize"
+    assert seen["connector"] == "github/hatchery"
+    assert seen["subject"] == auth.connect.ConnectUserTokenSubject(id="user_1")
+    assert seen["return_url"] == "http://localhost:3000/api/connections/github/return"
+
+
+async def test_github_return_saves_identity_without_token(monkeypatch):
+    saved = {}
+
+    async def token(_connector, **_kwargs):
+        return type(
+            "Token",
+            (),
+            {"token": "private-token", "installation_id": "inst_1"},
+        )()
+
+    async def save(user_id, connection):
+        saved.update(user_id=user_id, connection=connection)
+
+    def responder(http_request):
+        assert http_request.headers["authorization"] == "Bearer private-token"
+        return httpx.Response(
+            200,
+            json={"id": 42, "login": "octocat", "avatar_url": "https://github/avatar"},
+        )
+
+    class Client(httpx.AsyncClient):
+        def __init__(self, **kwargs):
+            super().__init__(transport=httpx.MockTransport(responder), **kwargs)
+
+    monkeypatch.setenv("GITHUB_CONNECTOR", "github/hatchery")
+    monkeypatch.setattr(auth.connect, "get_token_response", token)
+    monkeypatch.setattr(auth.auth_store, "save_github_connection", save)
+    monkeypatch.setattr(auth.httpx, "AsyncClient", Client)
+
+    response = await auth.finish_github({"id": "user_1"})
+
+    assert response.headers["location"] == "/"
+    assert saved["user_id"] == "user_1"
+    assert saved["connection"]["id"] == "42"
+    assert saved["connection"]["login"] == "octocat"
+    assert saved["connection"]["installation_id"] == "inst_1"
+    assert "token" not in saved["connection"]
+
+
+async def test_disconnect_github_revokes_grant_and_metadata(monkeypatch):
+    seen = {}
+
+    async def revoke(connector, **kwargs):
+        seen.update(connector=connector, **kwargs)
+
+    async def delete(user_id):
+        seen["deleted"] = user_id
+
+    monkeypatch.setenv("GITHUB_CONNECTOR", "github/hatchery")
+    monkeypatch.setattr(auth.connect, "revoke_token", revoke)
+    monkeypatch.setattr(auth.auth_store, "delete_github_connection", delete)
+
+    await auth.disconnect_github(
+        {"id": "user_1", "github": {"installation_id": "inst_1"}}
+    )
+
+    assert seen["connector"] == "github/hatchery"
+    assert seen["subject"] == auth.connect.ConnectUserTokenSubject(id="user_1")
+    assert seen["installation_id"] == "inst_1"
+    assert seen["deleted"] == "user_1"
 
 
 async def test_logout_deletes_server_session(monkeypatch):

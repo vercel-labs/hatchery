@@ -7,9 +7,11 @@ import pathlib
 
 import ai.experimental_telemetry
 import httpx
+from vercel import connect
 from vercel import sandbox as vercel_sandbox
 from vercel.oidc import aio as vercel_oidc
 
+import auth
 from worker import git, models
 from worker.daemon import main as daemon_main
 
@@ -54,11 +56,28 @@ class Provisioned:
     routes: list[models.Route]
 
 
+async def _github_credential(user_id: str | None) -> str | None:
+    if user_id is None:
+        return await git.git_credentials()
+    try:
+        return await auth.github_token(user_id)
+    except (
+        connect.UserAuthorizationRequiredError,
+        connect.NoValidTokenError,
+        connect.ConnectorInstallationRequiredError,
+    ) as error:
+        raise RuntimeError("connect GitHub before creating a repository sandbox") from error
+
+
 async def provision(
-    worker_id: str, spec: models.WorkerSpec, daemon_token: str
+    worker_id: str,
+    spec: models.WorkerSpec,
+    daemon_token: str,
+    *,
+    user_id: str | None = None,
 ) -> Provisioned:
     name = f"hatchery-{worker_id}"
-    credential = await git.git_credentials()
+    credential = await _github_credential(user_id) if spec.repos else None
     network_policy = await _network_policy(credential, os.environ.get("VERCEL_REGION"))
     source = None
     if spec.repos:
@@ -124,9 +143,10 @@ async def prepare_for_command(record: models.Worker) -> None:
         box = await vercel_sandbox.resume_sandbox(name=record.sandbox_name)
         span.set_attrs(region=box.region or "")
         await box.update(execution_time_limit=EXECUTION_TIME_LIMIT)
-        await box.update_network_policy(
-            await _network_policy(await git.git_credentials(), box.region)
+        credential = (
+            await _github_credential(record.user_id) if record.spec.repos else None
         )
+        await box.update_network_policy(await _network_policy(credential, box.region))
         routes = [models.Route(port=route.port, url=route.url) for route in box.routes]
         async with ai.experimental_telemetry.span("sandbox.daemon.repair") as repair:
             repair.set_attrs(

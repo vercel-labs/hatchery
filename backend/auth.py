@@ -11,6 +11,7 @@ import urllib.parse
 import fastapi
 import httpx
 import jwt
+from vercel import connect
 
 from store import auth as auth_store
 
@@ -19,6 +20,7 @@ TOKEN_URL = "https://api.vercel.com/login/oauth/token"
 JWKS_URL = "https://vercel.com/.well-known/jwks"
 COOKIE = "hatchery_session"
 SCOPES = "openid email profile"
+GITHUB_API = "https://api.github.com"
 
 log = logging.getLogger("auth")
 
@@ -179,6 +181,77 @@ async def session_user(session_id: str) -> dict | None:
 
 async def current_user(request: fastapi.Request) -> dict | None:
     return await session_user(request.cookies.get(COOKIE, ""))
+
+
+def _github_connector() -> str:
+    return os.environ["GITHUB_CONNECTOR"]
+
+
+def _github_subject(user: dict) -> connect.ConnectUserTokenSubject:
+    return connect.ConnectUserTokenSubject(id=user["id"])
+
+
+def github_connection(user: dict) -> dict | None:
+    saved = user.get("github")
+    return saved if isinstance(saved, dict) else None
+
+
+async def begin_github(request: fastapi.Request, user: dict) -> fastapi.responses.RedirectResponse:
+    authorization = await connect.start_authorization(
+        _github_connector(),
+        subject=_github_subject(user),
+        return_url=f"{request_origin(request)}/api/connections/github/return",
+    )
+    return fastapi.responses.RedirectResponse(authorization.url)
+
+
+async def finish_github(user: dict) -> fastapi.responses.RedirectResponse:
+    token = await connect.get_token_response(
+        _github_connector(), subject=_github_subject(user)
+    )
+    async with httpx.AsyncClient(
+        base_url=GITHUB_API,
+        timeout=30,
+        headers={
+            "accept": "application/vnd.github+json",
+            "authorization": f"Bearer {token.token}",
+            "x-github-api-version": "2022-11-28",
+        },
+    ) as http:
+        response = await http.get("/user")
+    if response.status_code >= 300:
+        raise fastapi.HTTPException(502, "GitHub identity lookup failed")
+    profile = response.json()
+    connection = {
+        "id": str(profile["id"]),
+        "login": profile["login"],
+        "avatar_url": profile.get("avatar_url"),
+        "installation_id": token.installation_id,
+        "connected_at": datetime.datetime.now(datetime.UTC).isoformat(),
+    }
+    await auth_store.save_github_connection(user["id"], connection)
+    return fastapi.responses.RedirectResponse("/")
+
+
+async def disconnect_github(user: dict) -> None:
+    connection = user.get("github") if isinstance(user.get("github"), dict) else {}
+    try:
+        await connect.revoke_token(
+            _github_connector(),
+            subject=_github_subject(user),
+            installation_id=connection.get("installation_id"),
+        )
+    except (connect.UserAuthorizationRequiredError, connect.NoValidTokenError):
+        pass
+    await auth_store.delete_github_connection(user["id"])
+
+
+async def github_token(user_id: str, installation_id: str | None = None) -> str:
+    return await connect.get_token(
+        _github_connector(),
+        subject=connect.ConnectUserTokenSubject(id=user_id),
+        installation_id=installation_id,
+    )
 
 
 async def logout(request: fastapi.Request) -> fastapi.responses.Response:

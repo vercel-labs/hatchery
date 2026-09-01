@@ -58,6 +58,62 @@ async def test_websocket_auth_rejects_missing_session(monkeypatch):
     assert ws.closed == (4401, "sign in required")
 
 
+async def test_legacy_chat_is_claimed_on_direct_access():
+    chat = await chats.create(None, "legacy")
+
+    async with client() as c:
+        response = await c.get(f"/api/chats/{chat.id}/messages")
+
+    assert response.status_code == 200
+    assert (await chats.get(chat.id)).user_id == "user_test"
+
+
+async def test_chat_routes_hide_another_users_chat(monkeypatch):
+    chat = await chats.create(None, "private", user_id="user_other")
+
+    async with client() as c:
+        listed = await c.get("/api/chats")
+        direct = await c.get(f"/api/chats/{chat.id}/messages")
+
+    assert listed.json() == []
+    assert direct.status_code == 404
+
+
+async def test_github_connection_routes(monkeypatch):
+    seen = {}
+
+    async def begin(request, user):
+        seen["authorized"] = user["id"]
+        return server.fastapi.responses.RedirectResponse("https://connect.example")
+
+    async def disconnect(user):
+        seen["disconnected"] = user["id"]
+
+    async def token(_user_id, _installation_id=None):
+        return "token"
+
+    monkeypatch.setattr(server.auth, "begin_github", begin)
+    monkeypatch.setattr(server.auth, "disconnect_github", disconnect)
+    monkeypatch.setattr(server.auth, "github_token", token)
+    monkeypatch.setattr(
+        server.auth,
+        "github_connection",
+        lambda user: {"login": "octocat", "id": "42"},
+    )
+
+    async with client() as c:
+        status = await c.get("/api/connections/github")
+        authorized = await c.get("/api/connections/github/authorize", follow_redirects=False)
+        disconnected = await c.delete(
+            "/api/connections/github", headers={"origin": "http://test"}
+        )
+
+    assert status.json() == {"connection": {"login": "octocat", "id": "42"}}
+    assert authorized.headers["location"] == "https://connect.example"
+    assert disconnected.status_code == 204
+    assert seen == {"authorized": "user_test", "disconnected": "user_test"}
+
+
 async def test_spaces_seed_default():
     async with client() as c:
         listed = (await c.get("/api/spaces")).json()

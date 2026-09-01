@@ -189,8 +189,14 @@ app = fastapi.FastAPI(title="hatchery", lifespan=lifespan)
 async def browser_session(request: fastapi.Request, call_next):
     path = request.url.path
     public = path == "/api/health" or path.startswith("/api/auth/") or path.startswith("/channels/")
-    if path.startswith("/api/") and not public and await auth.current_user(request) is None:
+    user = await auth.current_user(request) if path.startswith("/api/") and not public else None
+    if path.startswith("/api/") and not public and user is None:
         return fastapi.responses.JSONResponse({"detail": "sign in required"}, status_code=401)
+    match = re.match(r"^/api/chats/([^/]+)", path)
+    if match is not None and user is not None:
+        chat = await chats.claim_user(match.group(1), user["id"])
+        if chat is not None and chat.user_id != user["id"]:
+            return fastapi.responses.JSONResponse({"detail": "unknown chat"}, status_code=404)
     if path.startswith("/api/") and request.method not in {"GET", "HEAD", "OPTIONS"} and not auth.valid_origin(request):
         return fastapi.responses.JSONResponse({"detail": "invalid origin"}, status_code=403)
     return await call_next(request)
@@ -232,6 +238,56 @@ async def auth_me(request: fastapi.Request) -> dict:
 @app.post("/api/auth/logout")
 async def auth_logout(request: fastapi.Request):
     return await auth.logout(request)
+
+
+@app.get("/api/connections/github")
+async def github_connection(request: fastapi.Request) -> dict:
+    user = await auth.current_user(request)
+    if user is None:
+        raise fastapi.HTTPException(401, "sign in required")
+    connection = auth.github_connection(user)
+    if connection is None:
+        return {"connection": None}
+    try:
+        await auth.github_token(user["id"], connection.get("installation_id"))
+    except (
+        auth.connect.UserAuthorizationRequiredError,
+        auth.connect.NoValidTokenError,
+        auth.connect.ConnectorInstallationRequiredError,
+    ):
+        return {"connection": None}
+    return {"connection": connection}
+
+
+@app.get("/api/connections/github/authorize")
+async def authorize_github(request: fastapi.Request):
+    user = await auth.current_user(request)
+    if user is None:
+        raise fastapi.HTTPException(401, "sign in required")
+    return await auth.begin_github(request, user)
+
+
+@app.get("/api/connections/github/return")
+async def github_return(request: fastapi.Request):
+    user = await auth.current_user(request)
+    if user is None:
+        raise fastapi.HTTPException(401, "sign in required")
+    try:
+        return await auth.finish_github(user)
+    except (
+        auth.connect.UserAuthorizationRequiredError,
+        auth.connect.NoValidTokenError,
+        auth.connect.ConnectorInstallationRequiredError,
+    ) as error:
+        raise fastapi.HTTPException(409, "GitHub authorization was not completed") from error
+
+
+@app.delete("/api/connections/github", status_code=204)
+async def disconnect_github(request: fastapi.Request) -> None:
+    user = await auth.current_user(request)
+    if user is None:
+        raise fastapi.HTTPException(401, "sign in required")
+    await auth.disconnect_github(user)
 
 
 @app.get("/api/spaces")
@@ -321,8 +377,15 @@ async def update_space_resources(
 
 
 @app.get("/api/chats")
-async def list_chats() -> list[models.Chat]:
-    found = await chats.list_all()
+async def list_chats(request: fastapi.Request) -> list[models.Chat]:
+    user = await auth.current_user(request)
+    found = []
+    if user is not None:
+        for chat in await chats.list_all():
+            if chat.user_id is None:
+                chat = await chats.claim_user(chat.id, user["id"]) or chat
+            if chat.user_id == user["id"]:
+                found.append(chat)
     for chat in found:
         if not chat.trigger.startswith("slack:") or chat.title.startswith("slack:"):
             continue
@@ -338,13 +401,18 @@ class CreateChatRequest(pydantic.BaseModel):
 
 
 @app.post("/api/chats")
-async def create_chat(request: CreateChatRequest) -> models.Chat:
+async def create_chat(request: CreateChatRequest, http_request: fastapi.Request) -> models.Chat:
+    user = await auth.current_user(http_request)
     found = await spaces.list_all()
     if not found:
         found = [await spaces.default()]
     if request.space_id is not None and not any(space.id == request.space_id for space in found):
         raise fastapi.HTTPException(404, "unknown space")
-    return await chats.create(request.space_id, request.title)
+    return await chats.create(
+        request.space_id,
+        request.title,
+        user_id=user["id"] if user is not None else None,
+    )
 
 
 class AssignChatSpaceRequest(pydantic.BaseModel):
@@ -589,7 +657,10 @@ async def suggest_chat_sandbox(chat_id: str) -> sandbox.Launch:
 async def create_chat_sandbox(chat_id: str, request: sandbox.Launch) -> dict:
     if await chats.get(chat_id) is None:
         raise fastapi.HTTPException(404, "unknown chat")
-    created = await sandbox.create(chat_id, request)
+    try:
+        created = await sandbox.create(chat_id, request)
+    except RuntimeError as error:
+        raise fastapi.HTTPException(409, str(error)) from error
     return created.model_dump(exclude={"daemon_token"})
 
 

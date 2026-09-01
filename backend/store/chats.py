@@ -76,9 +76,11 @@ async def create(
     space_id: str | None,
     title: str,
     trigger: str = "ui",
+    user_id: str | None = None,
 ) -> models.Chat:
     chat = models.Chat(
         id=f"chat_{uuid.uuid4().hex[:12]}",
+        user_id=user_id,
         space_id=space_id,
         title=title,
         trigger=trigger,
@@ -121,6 +123,29 @@ async def list_all() -> list[models.Chat]:
         found = [c for c in chats if c is not None]
         found.sort(key=lambda c: c.created_at, reverse=True)
         return found
+
+
+async def claim_user(chat_id: str, user_id: str) -> models.Chat | None:
+    if store.use_postgres():
+        from store import db
+
+        row = await (await db.pool()).fetchrow(
+            "UPDATE hatchery_chats SET data = jsonb_set(data, '{user_id}', to_jsonb($2::text)) "
+            "WHERE id = $1 AND (data->>'user_id' IS NULL) RETURNING data",
+            chat_id,
+            user_id,
+        )
+        if row is not None:
+            return _chat(row["data"])
+        return await get(chat_id)
+    with _lock:
+        chat = _read_chat(chat_id)
+        if chat is None:
+            return None
+        if chat.user_id is None:
+            chat.user_id = user_id
+            _write_chat(chat)
+        return chat
 
 
 async def assign_space(chat_id: str, space_id: str) -> models.Chat | None:

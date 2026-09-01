@@ -44,11 +44,26 @@ def hash_secret(value: str) -> str:
 async def save_user(user: dict) -> dict:
     await (await db.pool()).execute(
         "INSERT INTO hatchery_users (id, data) VALUES ($1, $2::jsonb) "
-        "ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data",
+        "ON CONFLICT (id) DO UPDATE SET data = hatchery_users.data || EXCLUDED.data",
         user["id"],
         json.dumps(user),
     )
     return user
+
+
+async def save_github_connection(user_id: str, connection: dict) -> None:
+    await (await db.pool()).execute(
+        "UPDATE hatchery_users SET data = jsonb_set(data, '{github}', $2::jsonb) WHERE id = $1",
+        user_id,
+        json.dumps(connection),
+    )
+
+
+async def delete_github_connection(user_id: str) -> None:
+    await (await db.pool()).execute(
+        "UPDATE hatchery_users SET data = data - 'github' WHERE id = $1",
+        user_id,
+    )
 
 
 async def create_session(user_id: str, lifetime: datetime.timedelta) -> str:

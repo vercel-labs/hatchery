@@ -72,16 +72,21 @@ def test_launch_validates_sandbox_parameters():
 async def test_sandbox_operations_delegate_with_chat_scope(monkeypatch):
     seen = {}
 
-    async def create(chat_id, spec):
-        seen.update(chat_id=chat_id, spec=spec)
+    async def get(_chat_id):
+        return type("Chat", (), {"user_id": "user_1"})()
+
+    async def create(chat_id, spec, *, user_id=None):
+        seen.update(chat_id=chat_id, spec=spec, user_id=user_id)
         return "created"
 
+    monkeypatch.setattr(sandbox.chats, "get", get)
     monkeypatch.setattr(sandbox.worker, "create", create)
 
     result = await sandbox.create("chat_1", sandbox.Launch(repos=["acme/app"]))
 
     assert result == "created"
     assert seen["chat_id"] == "chat_1"
+    assert seen["user_id"] == "user_1"
     assert seen["spec"].repos == ["acme/app"]
 
 

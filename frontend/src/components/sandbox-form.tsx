@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Loader2Icon } from "lucide-react";
+import { GitBranchIcon, Loader2Icon } from "lucide-react";
 
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
@@ -16,7 +17,7 @@ import {
 } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
-import { apiFetch } from "@/lib/api";
+import { apiBase, apiFetch } from "@/lib/api";
 
 type Launch = {
   title: string;
@@ -186,7 +187,26 @@ export function SandboxForm({
                 onChange={(event) => setLaunch({ ...launch, git_sha: event.target.value || null })}
               />
             </Field>
-            {error && <FieldError>{error}</FieldError>}
+            {error && (
+              error.toLowerCase().includes("connect github") ? (
+                <Alert>
+                  <GitBranchIcon />
+                  <AlertTitle>Connect GitHub</AlertTitle>
+                  <AlertDescription className="flex flex-col gap-3">
+                    <span>Connect your account to clone repositories, push branches, and create pull requests.</span>
+                    <Button
+                      size="sm"
+                      nativeButton={false}
+                      render={<a href={`${apiBase()}/api/connections/github/authorize`} />}
+                    >
+                      Connect GitHub
+                    </Button>
+                  </AlertDescription>
+                </Alert>
+              ) : (
+                <FieldError>{error}</FieldError>
+              )
+            )}
           </FieldGroup>
           )}
           <SheetFooter>
