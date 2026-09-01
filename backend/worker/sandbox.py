@@ -24,6 +24,7 @@ GIT_RUNTIME_PATH = "/opt/hatchery/git_runtime.py"
 SHIM_PATH = "/opt/hatchery/bin"
 AI_GATEWAY_HOST = "ai-gateway.vercel.sh"
 AI_GATEWAY_PLACEHOLDER = "sandbox-network-policy-placeholder"
+GITHUB_TOKEN_PLACEHOLDER = "sandbox-network-policy-placeholder"
 QUEUE_TOKEN_PLACEHOLDER = "sandbox-queue-policy-placeholder"
 EXECUTION_TIME_LIMIT = 24 * 60 * 60
 
@@ -56,7 +57,9 @@ class Provisioned:
     routes: list[models.Route]
 
 
-async def _github_credential(user_id: str | None) -> str | None:
+async def _github_credential(
+    user_id: str | None, *, required: bool = True
+) -> str | None:
     if user_id is None:
         return await git.git_credentials()
     try:
@@ -66,6 +69,8 @@ async def _github_credential(user_id: str | None) -> str | None:
         connect.NoValidTokenError,
         connect.ConnectorInstallationRequiredError,
     ) as error:
+        if not required:
+            return None
         raise RuntimeError("connect GitHub before creating a repository sandbox") from error
 
 
@@ -83,7 +88,7 @@ async def _git_identity(user_id: str | None) -> tuple[str, str] | None:
 
 
 async def _canonicalize_repos(spec: models.WorkerSpec, credential: str | None) -> None:
-    if not credential:
+    if not spec.repos or not credential:
         return
     headers = {
         "accept": "application/vnd.github+json",
@@ -91,7 +96,9 @@ async def _canonicalize_repos(spec: models.WorkerSpec, credential: str | None) -
         "x-github-api-version": "2022-11-28",
     }
     canonical = []
-    async with httpx.AsyncClient(base_url="https://api.github.com", headers=headers, timeout=30) as client:
+    async with httpx.AsyncClient(
+        base_url="https://api.github.com", headers=headers, timeout=30, follow_redirects=True
+    ) as client:
         for repo in spec.repos:
             response = await client.get(f"/repos/{repo}")
             response.raise_for_status()
@@ -117,7 +124,7 @@ async def provision(
     user_id: str | None = None,
 ) -> Provisioned:
     name = f"hatchery-{worker_id}"
-    credential = await _github_credential(user_id) if spec.repos else None
+    credential = await _github_credential(user_id, required=bool(spec.repos))
     await _canonicalize_repos(spec, credential)
     network_policy = await _network_policy(credential, os.environ.get("VERCEL_REGION"))
     source = None
@@ -184,8 +191,8 @@ async def prepare_for_command(record: models.Worker) -> None:
         box = await vercel_sandbox.resume_sandbox(name=record.sandbox_name)
         span.set_attrs(region=box.region or "")
         await box.update(execution_time_limit=EXECUTION_TIME_LIMIT)
-        credential = (
-            await _github_credential(record.user_id) if record.spec.repos else None
+        credential = await _github_credential(
+            record.user_id, required=bool(record.spec.repos)
         )
         await box.update_network_policy(await _network_policy(credential, box.region))
         await git.configure(box, await _git_identity(record.user_id))
@@ -278,6 +285,7 @@ async def _bootstrap(
         await box.run_process(
             "/bin/sh",
             ["-lc", spec.setup_script],
+            env={"GH_TOKEN": GITHUB_TOKEN_PLACEHOLDER},
             check=True,
             capture_output=True,
         )
