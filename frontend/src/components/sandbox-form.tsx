@@ -16,7 +16,7 @@ import {
 } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
-import { apiBase } from "@/lib/api";
+import { apiFetch } from "@/lib/api";
 
 type Launch = {
   title: string;
@@ -54,7 +54,7 @@ export function SandboxForm({
 
   useEffect(() => {
     if (!open) return;
-    fetch(`${apiBase()}/api/chats/${chatId}/sandboxes/suggestion`)
+    apiFetch(`/api/chats/${chatId}/sandboxes/suggestion`)
       .then(async (response) => {
         if (!response.ok) throw new Error("Could not suggest sandbox settings");
         setLaunch(await response.json());
@@ -71,7 +71,7 @@ export function SandboxForm({
     setCreating(true);
     setError("");
     try {
-      const response = await fetch(`${apiBase()}/api/chats/${chatId}/sandboxes`, {
+      const response = await apiFetch(`/api/chats/${chatId}/sandboxes`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(launch),

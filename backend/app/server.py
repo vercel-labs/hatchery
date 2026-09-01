@@ -28,6 +28,7 @@ import websockets.asyncio.client
 import ai
 import ai.ui.ai_sdk.outbound_stream
 import ai.ui.ai_sdk.ui_events
+import auth
 import channels
 import models
 import store
@@ -183,6 +184,18 @@ async def lifespan(_: fastapi.FastAPI):
 
 app = fastapi.FastAPI(title="hatchery", lifespan=lifespan)
 
+
+@app.middleware("http")
+async def browser_session(request: fastapi.Request, call_next):
+    path = request.url.path
+    public = path == "/api/health" or path.startswith("/api/auth/") or path.startswith("/channels/")
+    if path.startswith("/api/") and not public and await auth.current_user(request) is None:
+        return fastapi.responses.JSONResponse({"detail": "sign in required"}, status_code=401)
+    if path.startswith("/api/") and request.method not in {"GET", "HEAD", "OPTIONS"} and not auth.valid_origin(request):
+        return fastapi.responses.JSONResponse({"detail": "invalid origin"}, status_code=403)
+    return await call_next(request)
+
+
 # local dev: the ui talks to :8000 directly for streams — next's dev proxy
 # severs quiet/long sse responses (and can't proxy websockets at all).
 app.add_middleware(
@@ -190,12 +203,35 @@ app.add_middleware(
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_credentials=True,
 )
 
 
 @app.get("/api/health")
 async def health() -> dict:
     return {"ok": True, "channels": list(bot.channels)}
+
+
+@app.get("/api/auth/login")
+async def auth_login(request: fastapi.Request):
+    return await auth.begin(request)
+
+
+@app.get("/api/auth/callback")
+async def auth_callback(request: fastapi.Request, code: str = "", state: str = ""):
+    if not code or not state:
+        raise fastapi.HTTPException(400, "missing OAuth code or state")
+    return await auth.callback(request, code, state)
+
+
+@app.get("/api/auth/me")
+async def auth_me(request: fastapi.Request) -> dict:
+    return {"user": await auth.current_user(request)}
+
+
+@app.post("/api/auth/logout")
+async def auth_logout(request: fastapi.Request):
+    return await auth.logout(request)
 
 
 @app.get("/api/spaces")
@@ -629,6 +665,19 @@ async def delete_chat_sandbox(chat_id: str, sandbox_id: str) -> None:
         raise fastapi.HTTPException(404, str(error)) from error
 
 
+async def _authenticate_websocket(ws: fastapi.WebSocket) -> bool:
+    if not auth.valid_origin(ws):
+        await ws.accept()
+        await ws.close(code=4403, reason="invalid origin")
+        return False
+    session_id = getattr(ws, "cookies", {}).get(auth.COOKIE, "")
+    if await auth.session_user(session_id) is not None:
+        return True
+    await ws.accept()
+    await ws.close(code=4401, reason="sign in required")
+    return False
+
+
 async def _bridge_tty(
     ws: fastapi.WebSocket,
     record: worker.Worker,
@@ -702,6 +751,8 @@ async def _bridge_tty(
 
 @app.websocket("/api/chats/{chat_id}/sandboxes/{sandbox_id}/ssh")
 async def sandbox_ssh(ws: fastapi.WebSocket, chat_id: str, sandbox_id: str) -> None:
+    if not await _authenticate_websocket(ws):
+        return
     record = await worker.get(sandbox_id)
     if record is None or record.chat_id != chat_id:
         await ws.accept()
@@ -778,6 +829,8 @@ async def task_readiness(chat_id: str, subagent_id: str) -> dict:
 
 @app.websocket("/api/chats/{chat_id}/subagents/{subagent_id}/tty")
 async def task_tty(ws: fastapi.WebSocket, chat_id: str, subagent_id: str) -> None:
+    if not await _authenticate_websocket(ws):
+        return
     task = await worker.get_task(chat_id, subagent_id)
     if task is None:
         await ws.accept()
@@ -797,6 +850,8 @@ async def task_tty(ws: fastapi.WebSocket, chat_id: str, subagent_id: str) -> Non
 
 @app.websocket("/api/chats/{chat_id}/terminals/{terminal_id}/tty")
 async def manual_tty(ws: fastapi.WebSocket, chat_id: str, terminal_id: str) -> None:
+    if not await _authenticate_websocket(ws):
+        return
     terminal = await worker.store.get_terminal(terminal_id)
     if terminal is None or terminal.chat_id != chat_id:
         await ws.accept()

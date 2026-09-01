@@ -6,6 +6,7 @@ import {
   CheckIcon,
   FolderGitIcon,
   LinkIcon,
+  LogOutIcon,
   PencilIcon,
   PlusIcon,
   TerminalIcon,
@@ -15,13 +16,19 @@ import {
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import { apiBase, type Chat, type Resource, type Space } from "@/lib/api";
+import { apiBase, apiFetch, type Chat, type Resource, type Space, type User } from "@/lib/api";
 import type { ChatUIMessage } from "@/lib/messages";
 import { ChatView } from "@/components/chat";
 import { SandboxForm } from "@/components/sandbox-form";
 import { TerminalPane, type SandboxWorkspace } from "@/components/terminal-pane";
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import {
   Empty,
   EmptyDescription,
@@ -99,6 +106,7 @@ function ChatOriginIcon({ trigger }: { trigger: string }) {
 }
 
 export default function Home() {
+  const [user, setUser] = useState<User | null | undefined>(undefined);
   const [spaces, setSpaces] = useState<Space[] | null>(null);
   const [chats, setChats] = useState<Chat[] | null>(null);
   const [failed, setFailed] = useState(false);
@@ -110,9 +118,14 @@ export default function Home() {
 
   useEffect(() => {
     const load = async () => {
+      const identity = await apiFetch("/api/auth/me");
+      if (!identity.ok) throw new Error("backend unreachable");
+      const me: { user: User | null } = await identity.json();
+      setUser(me.user);
+      if (!me.user) return;
       const [s, c] = await Promise.all([
-        fetch("/api/spaces"),
-        fetch("/api/chats"),
+        apiFetch("/api/spaces"),
+        apiFetch("/api/chats"),
       ]);
       if (!s.ok || !c.ok) throw new Error("backend unreachable");
       setSpaces(await s.json());
@@ -145,7 +158,7 @@ export default function Home() {
   const createSpace = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!spaceName.trim()) return;
-    const res = await fetch("/api/spaces", {
+    const res = await apiFetch("/api/spaces", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: spaceName }),
@@ -161,7 +174,7 @@ export default function Home() {
 
   const deleteSpace = async (space: Space) => {
     if (!window.confirm(`Remove ${space.name}?`)) return;
-    const res = await fetch(`/api/spaces/${space.id}`, { method: "DELETE" });
+    const res = await apiFetch(`/api/spaces/${space.id}`, { method: "DELETE" });
     if (res.status === 409) {
       window.alert("Remove this space's chats first.");
       return;
@@ -173,7 +186,7 @@ export default function Home() {
   };
 
   const refreshChats = useCallback(() => {
-    fetch("/api/chats")
+    apiFetch("/api/chats")
       .then((res) => (res.ok ? res.json() : null))
       .then((found: Chat[] | null) => {
         if (found) setChats(found);
@@ -182,7 +195,7 @@ export default function Home() {
   }, []);
 
   const createChat = async () => {
-    const res = await fetch("/api/chats", {
+    const res = await apiFetch("/api/chats", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -196,7 +209,7 @@ export default function Home() {
   };
 
   const assignChatSpace = async (chat: Chat, spaceId: string) => {
-    const res = await fetch(`/api/chats/${chat.id}/space`, {
+    const res = await apiFetch(`/api/chats/${chat.id}/space`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ space_id: spaceId }),
@@ -208,14 +221,53 @@ export default function Home() {
     );
   };
 
+  if (!failed && user === undefined) return <div className="h-svh" />;
+
+  if (!failed && user === null) {
+    return (
+      <main className="flex h-svh items-center justify-center p-6">
+        <Card className="w-full max-w-sm">
+          <CardHeader>
+            <CardTitle>Sign in to hatchery</CardTitle>
+            <CardDescription>Use your Vercel account to continue.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button
+              className="w-full"
+              nativeButton={false}
+              render={<a href="/api/auth/login" />}
+            >
+              Sign in with Vercel
+            </Button>
+          </CardContent>
+        </Card>
+      </main>
+    );
+  }
+
   return (
     <SidebarProvider className="h-svh overflow-hidden">
       <Sidebar>
         <SidebarHeader className="px-4 py-3">
-          <span className="text-sm font-semibold">hatchery</span>
-          <span className="text-xs text-muted-foreground">
-            a software factory
-          </span>
+          <div className="flex items-center gap-2">
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-semibold">hatchery</div>
+              <div className="truncate text-xs text-muted-foreground">
+                {user?.name ?? user?.username ?? user?.email}
+              </div>
+            </div>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label="Sign out"
+              onClick={async () => {
+                await apiFetch("/api/auth/logout", { method: "POST" });
+                window.location.reload();
+              }}
+            >
+              <LogOutIcon />
+            </Button>
+          </div>
         </SidebarHeader>
         <SidebarSeparator />
 
@@ -514,7 +566,7 @@ function SpacePane({
     setSavingDocument(true);
     setDocumentError("");
     try {
-      const response = await fetch(`/api/spaces/${space.id}`, {
+      const response = await apiFetch(`/api/spaces/${space.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: documentName, about: documentAbout }),
@@ -570,7 +622,7 @@ function SpacePane({
     setSavingResources(true);
     setResourceError("");
     try {
-      const response = await fetch(`/api/spaces/${space.id}/resources`, {
+      const response = await apiFetch(`/api/spaces/${space.id}/resources`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ repos, resources: links }),
@@ -808,7 +860,7 @@ function LiveChat({
   const [preferredSandboxId, setPreferredSandboxId] = useState<string>();
 
   const loadSandboxes = useCallback(() => {
-    fetch(`${apiBase()}/api/chats/${chat.id}/sandboxes`)
+    apiFetch(`/api/chats/${chat.id}/sandboxes`)
       .then((res) => (res.ok ? res.json() : []))
       .then((found: SandboxWorkspace[]) => {
         setSandboxes(found);
@@ -818,7 +870,7 @@ function LiveChat({
   }, [chat.id]);
 
   useEffect(() => {
-    fetch(`${apiBase()}/api/chats/${chat.id}/messages`)
+    apiFetch(`/api/chats/${chat.id}/messages`)
       .then((res) => (res.ok ? res.json() : []))
       .then(setInitialMessages)
       .catch(() => setInitialMessages([]));
@@ -828,6 +880,7 @@ function LiveChat({
   useEffect(() => {
     const source = new EventSource(
       `${apiBase()}/api/chats/${chat.id}/events`,
+      { withCredentials: true },
     );
     source.onmessage = (message) => {
       const event = JSON.parse(message.data) as { type?: string };

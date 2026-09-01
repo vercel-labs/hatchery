@@ -9,6 +9,10 @@ export function apiBase(): string {
   return BACKEND_ORIGIN;
 }
 
+export function apiFetch(path: string, init?: RequestInit): Promise<Response> {
+  return fetch(`${BACKEND_ORIGIN}${path}`, { credentials: "include", ...init });
+}
+
 export function wsBase(): string {
   if (BACKEND_ORIGIN) return BACKEND_ORIGIN.replace(/^http/, "ws");
   return (
@@ -16,6 +20,14 @@ export function wsBase(): string {
     window.location.host
   );
 }
+
+export type User = {
+  id: string;
+  email: string | null;
+  name: string | null;
+  username: string | null;
+  picture: string | null;
+};
 
 export type Resource = {
   title: string;

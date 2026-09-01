@@ -10,6 +10,7 @@ dependencies = [
     "braintrust[otel]>=0.35.0",
     "fastapi>=0.115",
     "httpx>=0.28",
+    "pyjwt[crypto]>=2.10",
     "pydantic>=2.7",
     "vercel",
     "vercel-connect",

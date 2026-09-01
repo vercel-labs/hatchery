@@ -28,6 +28,36 @@ def generated_topic(monkeypatch):
     monkeypatch.setattr(server.topic, "generate", generate)
 
 
+async def test_browser_api_requires_session(monkeypatch):
+    async def current_user(_request):
+        return None
+
+    monkeypatch.setattr(server.auth, "current_user", current_user)
+    async with client() as c:
+        protected = await c.get("/api/spaces")
+        health = await c.get("/api/health")
+        identity = await c.get("/api/auth/me")
+
+    assert protected.status_code == 401
+    assert protected.json() == {"detail": "sign in required"}
+    assert health.status_code == 200
+    assert identity.status_code == 200
+    assert identity.json() == {"user": None}
+
+
+async def test_websocket_auth_rejects_missing_session(monkeypatch):
+    async def session_user(_session_id):
+        return None
+
+    monkeypatch.setattr(server.auth, "session_user", session_user)
+    ws = BridgeWebSocket()
+    ws.cookies = {}
+    ws.headers = {}
+
+    assert await server._authenticate_websocket(ws) is False
+    assert ws.closed == (4401, "sign in required")
+
+
 async def test_spaces_seed_default():
     async with client() as c:
         listed = (await c.get("/api/spaces")).json()

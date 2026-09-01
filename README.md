@@ -8,6 +8,12 @@ subscriber as cloud.
 
 ## Local development
 
+Hatchery auth uses the same Vercel OAuth flow and Postgres tables locally and in
+deployments. Set `DATABASE_URL`, `VERCEL_APP_CLIENT_ID`, and
+`VERCEL_APP_CLIENT_SECRET`. Register `http://localhost:3000/api/auth/callback`
+on the Vercel app. Set `HATCHERY_APP_ORIGIN=http://localhost:3000` if the
+browser-facing origin cannot be inferred from forwarded headers.
+
 Expose `vercel dev` so cloud sandboxes can reach its Queue broker:
 
 ```sh
@@ -26,5 +32,5 @@ sandbox and subagent. `vercel dev` supplies the local Queue endpoint and token;
 Hatchery rewrites that endpoint to the public vgrok origin for the sandbox.
 
 Deployments use hosted Vercel Queues through deployment OIDC. No local worker or
-in-process task bypass exists. Sandbox and subagent terminals connect through the
-backend WebSocket bridge to the authenticated in-sandbox daemon.
+in-process task bypass exists. Sandbox and subagent terminals require the browser
+session before the backend bridges them to the authenticated in-sandbox daemon.
