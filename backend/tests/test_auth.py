@@ -1,4 +1,5 @@
 import datetime
+import json
 import urllib.parse
 
 import fastapi
@@ -18,6 +19,28 @@ def request(headers=None, cookies=None):
             "url": type("URL", (), {"scheme": "http", "netloc": "localhost:3000"})(),
         },
     )()
+
+
+async def test_save_user_is_compatible_with_existing_auth_schema(monkeypatch):
+    class Database:
+        def __init__(self):
+            self.calls = []
+
+        async def execute(self, query, *args):
+            self.calls.append((query, args))
+
+    database = Database()
+
+    async def pool():
+        return database
+
+    monkeypatch.setattr(auth.auth_store.db, "pool", pool)
+    user = {"id": "user_1", "name": "Ada"}
+
+    assert await auth.auth_store.save_user(user) == user
+    query, args = database.calls[0]
+    assert "updated_at" not in query
+    assert args == ("user_1", json.dumps(user))
 
 
 def test_request_origin_uses_browser_facing_origin(monkeypatch):

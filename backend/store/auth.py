@@ -11,8 +11,7 @@ _SCHEMA = """\
 CREATE TABLE IF NOT EXISTS hatchery_users (
     id         TEXT PRIMARY KEY,
     data       JSONB NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE TABLE IF NOT EXISTS hatchery_sessions (
     id_hash    TEXT PRIMARY KEY,
@@ -45,7 +44,7 @@ def hash_secret(value: str) -> str:
 async def save_user(user: dict) -> dict:
     await (await db.pool()).execute(
         "INSERT INTO hatchery_users (id, data) VALUES ($1, $2::jsonb) "
-        "ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = now()",
+        "ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data",
         user["id"],
         json.dumps(user),
     )
