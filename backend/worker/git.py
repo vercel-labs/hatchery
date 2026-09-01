@@ -134,13 +134,17 @@ async def configure_gh(box) -> None:
     )
 
 
-async def configure(box) -> None:
+async def configure(box, identity: tuple[str, str] | None = None) -> None:
     await configure_git_auth(box)
     await configure_gh(box)
-    for key in ("commit.gpgsign", "tag.gpgsign"):
+    values = []
+    if identity is not None:
+        values.extend((("user.name", identity[0]), ("user.email", identity[1])))
+    values.extend((("commit.gpgsign", "false"), ("tag.gpgsign", "false")))
+    for key, value in values:
         await box.run_process(
             "git",
-            ["config", "--global", "--replace-all", key, "false"],
+            ["config", "--global", "--replace-all", key, value],
             check=True,
             capture_output=True,
         )

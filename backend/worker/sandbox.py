@@ -69,6 +69,46 @@ async def _github_credential(user_id: str | None) -> str | None:
         raise RuntimeError("connect GitHub before creating a repository sandbox") from error
 
 
+async def _git_identity(user_id: str | None) -> tuple[str, str] | None:
+    if user_id is None:
+        return None
+    connection = await auth.github_identity(user_id)
+    if connection is None:
+        return None
+    login = str(connection.get("login") or "")
+    github_id = str(connection.get("id") or "")
+    if not login or not github_id:
+        return None
+    return str(connection.get("name") or login), f"{github_id}+{login}@users.noreply.github.com"
+
+
+async def _canonicalize_repos(spec: models.WorkerSpec, credential: str | None) -> None:
+    if not credential:
+        return
+    headers = {
+        "accept": "application/vnd.github+json",
+        "authorization": f"Bearer {credential}",
+        "x-github-api-version": "2022-11-28",
+    }
+    canonical = []
+    async with httpx.AsyncClient(base_url="https://api.github.com", headers=headers, timeout=30) as client:
+        for repo in spec.repos:
+            response = await client.get(f"/repos/{repo}")
+            response.raise_for_status()
+            canonical.append(str(response.json()["full_name"]))
+    spec.repos = canonical
+
+
+async def _configure_repo_remotes(box, spec: models.WorkerSpec) -> None:
+    for repo in spec.repos:
+        await box.run_process(
+            "git",
+            ["-C", f"/vercel/{repo.split('/')[-1]}", "remote", "set-url", "origin", f"https://github.com/{repo}.git"],
+            check=True,
+            capture_output=True,
+        )
+
+
 async def provision(
     worker_id: str,
     spec: models.WorkerSpec,
@@ -78,6 +118,7 @@ async def provision(
 ) -> Provisioned:
     name = f"hatchery-{worker_id}"
     credential = await _github_credential(user_id) if spec.repos else None
+    await _canonicalize_repos(spec, credential)
     network_policy = await _network_policy(credential, os.environ.get("VERCEL_REGION"))
     source = None
     if spec.repos:
@@ -106,7 +147,7 @@ async def provision(
     await box.update_network_policy(await _network_policy(credential, box.region))
     process = None
     if created:
-        process = await _bootstrap(box, worker_id, spec, daemon_token)
+        process = await _bootstrap(box, worker_id, spec, daemon_token, user_id=user_id)
     routes = [models.Route(port=route.port, url=route.url) for route in box.routes]
     await repair_daemon(box, worker_id, spec, daemon_token, routes, process=process)
     return Provisioned(name, routes)
@@ -147,6 +188,9 @@ async def prepare_for_command(record: models.Worker) -> None:
             await _github_credential(record.user_id) if record.spec.repos else None
         )
         await box.update_network_policy(await _network_policy(credential, box.region))
+        await git.configure(box, await _git_identity(record.user_id))
+        await _canonicalize_repos(record.spec, credential)
+        await _configure_repo_remotes(box, record.spec)
         routes = [models.Route(port=route.port, url=route.url) for route in box.routes]
         async with ai.experimental_telemetry.span("sandbox.daemon.repair") as repair:
             repair.set_attrs(
@@ -199,7 +243,9 @@ async def repair_daemon(
         )
 
 
-async def _bootstrap(box, worker_id: str, spec: models.WorkerSpec, token: str):
+async def _bootstrap(
+    box, worker_id: str, spec: models.WorkerSpec, token: str, *, user_id: str | None = None
+):
     await box.fs.mkdir("/opt/hatchery")
     await box.fs.mkdir(SHIM_PATH)
     await box.fs.write_text(DAEMON_PATH, daemon_main.source(), mode=0o755)
@@ -220,7 +266,7 @@ async def _bootstrap(box, worker_id: str, spec: models.WorkerSpec, token: str):
         check=True,
         capture_output=True,
     )
-    await git.configure(box)
+    await git.configure(box, await _git_identity(user_id))
     for repo in spec.repos[1:]:
         await box.run_process(
             "git",

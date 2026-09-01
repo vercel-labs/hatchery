@@ -233,7 +233,12 @@ async def test_github_return_saves_identity_without_token(monkeypatch):
         assert http_request.headers["authorization"] == "Bearer private-token"
         return httpx.Response(
             200,
-            json={"id": 42, "login": "octocat", "avatar_url": "https://github/avatar"},
+            json={
+                "id": 42,
+                "login": "octocat",
+                "name": "The Octocat",
+                "avatar_url": "https://github/avatar",
+            },
         )
 
     class Client(httpx.AsyncClient):
@@ -251,6 +256,7 @@ async def test_github_return_saves_identity_without_token(monkeypatch):
     assert saved["user_id"] == "user_1"
     assert saved["connection"]["id"] == "42"
     assert saved["connection"]["login"] == "octocat"
+    assert saved["connection"]["name"] == "The Octocat"
     assert saved["connection"]["installation_id"] == "inst_1"
     assert "token" not in saved["connection"]
 

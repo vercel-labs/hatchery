@@ -225,6 +225,7 @@ async def finish_github(user: dict) -> fastapi.responses.RedirectResponse:
     connection = {
         "id": str(profile["id"]),
         "login": profile["login"],
+        "name": profile.get("name"),
         "avatar_url": profile.get("avatar_url"),
         "installation_id": token.installation_id,
         "connected_at": datetime.datetime.now(datetime.UTC).isoformat(),
@@ -246,10 +247,14 @@ async def disconnect_github(user: dict) -> None:
     await auth_store.delete_github_connection(user["id"])
 
 
+async def github_identity(user_id: str) -> dict | None:
+    user = await auth_store.get_user(user_id)
+    return github_connection(user or {})
+
+
 async def github_token(user_id: str, installation_id: str | None = None) -> str:
     if installation_id is None:
-        user = await auth_store.get_user(user_id)
-        connection = github_connection(user or {}) or {}
+        connection = await github_identity(user_id) or {}
         installation_id = connection.get("installation_id")
     return await connect.get_token(
         _github_connector(),

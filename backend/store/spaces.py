@@ -25,16 +25,11 @@ CREATE TABLE IF NOT EXISTS hatchery_spaces (
 
 DEFAULT_ID = "spc_hatchery"
 _DEFAULT_ABOUT = (
-    "An agent deployed to the cloud, running mostly unattended. Reachable "
-    "from slack, github, and this ui.\n\n"
-    "## Goal\n\n"
-    "Work on itself: respond to issues, ping on slack, and ship prs to its "
-    "own repo.\n\n"
+    "A workspace for repositories, instructions, and reference material.\n\n"
     "## Conventions\n\n"
     "Keep changes small and reviewable. Prefer a report over a pr when "
     "uncertain."
 )
-_LEGACY_DEFAULT_ABOUT = f"# hatchery\n\n{_DEFAULT_ABOUT}"
 
 _schema_ready = False
 
@@ -129,26 +124,15 @@ async def list_all() -> list[models.Space]:
 
 
 async def default() -> models.Space:
-    """Hatchery's own space, created on first call."""
+    """Default empty workspace, created on first call."""
     existing = await get(DEFAULT_ID)
     if existing is not None:
-        if existing.about == _LEGACY_DEFAULT_ABOUT:
-            existing.about = _DEFAULT_ABOUT
-            return await save(existing)
         return existing
     return await save(
         models.Space(
             id=DEFAULT_ID,
-            name="hatchery",
+            name="workspace",
             about=_DEFAULT_ABOUT,
-            repos=["vercel/vercel-py"],
-            resources=[
-                models.Resource(
-                    title="ai sdk for python",
-                    url="https://vercel.com/docs/ai-sdk-python",
-                    kind="reference",
-                ),
-            ],
             color="#38bdf8",
             created_at=datetime.datetime.now(datetime.UTC).isoformat(),
         )

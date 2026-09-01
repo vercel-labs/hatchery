@@ -187,7 +187,7 @@ async def test_space_resources_update():
         response = await c.patch(
             "/api/spaces/spc_hatchery/resources",
             json={
-                "repos": ["anbuzin/hatchery"],
+                "repos": ["acme/app"],
                 "resources": [
                     {"title": "docs", "url": "https://example.com/docs", "kind": "link"}
                 ],
@@ -196,7 +196,7 @@ async def test_space_resources_update():
         listed = (await c.get("/api/spaces")).json()
 
     assert response.status_code == 200
-    assert response.json()["repos"] == ["anbuzin/hatchery"]
+    assert response.json()["repos"] == ["acme/app"]
     assert response.json()["resources"] == [
         {"title": "docs", "url": "https://example.com/docs", "kind": "link"}
     ]
@@ -211,7 +211,7 @@ async def test_space_resources_update_rejects_unknown_space_and_invalid_repo():
         )
         invalid = await c.patch(
             "/api/spaces/spc_hatchery/resources",
-            json={"repos": ["https://github.com/anbuzin/hatchery"], "resources": []},
+            json={"repos": ["https://github.com/acme/app"], "resources": []},
         )
 
     assert missing.status_code == 404
