@@ -122,6 +122,33 @@ async def test_spaces_seed_default():
     assert not listed[0]["about"].startswith("# hatchery")
 
 
+async def test_space_warnings_check_main_repo_and_log(monkeypatch, caplog):
+    space = await server.spaces.create("docs")
+    space.repos = ["acme/main", "acme/secondary"]
+    await server.spaces.save(space)
+    checked = []
+
+    async def warning(user_id, repo):
+        checked.append((user_id, repo))
+        return "Install the Hatchery GitHub app on acme."
+
+    monkeypatch.setattr(server.auth, "github_repo_warning", warning)
+
+    with caplog.at_level("WARNING", logger="app"):
+        async with client() as c:
+            response = await c.get("/api/spaces/warnings")
+
+    assert response.json() == [
+        {
+            "space_id": space.id,
+            "repo": "acme/main",
+            "warning": "Install the Hatchery GitHub app on acme.",
+        }
+    ]
+    assert checked == [("user_test", "acme/main")]
+    assert "space main repository lacks Hatchery GitHub access" in caplog.text
+
+
 async def test_space_create_and_delete():
     async with client() as c:
         created = await c.post("/api/spaces", json={"name": "  docs  "})

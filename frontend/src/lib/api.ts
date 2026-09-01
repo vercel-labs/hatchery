@@ -54,6 +54,12 @@ export type Space = {
   created_at: string;
 };
 
+export type SpaceWarning = {
+  space_id: string;
+  repo: string;
+  warning: string;
+};
+
 export type Chat = {
   id: string;
   user_id: string | null;

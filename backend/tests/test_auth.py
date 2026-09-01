@@ -281,6 +281,90 @@ async def test_github_token_uses_saved_installation(monkeypatch):
     assert seen["installation_id"] == "inst_1"
 
 
+async def test_github_repo_warning_reports_missing_organization_installation(monkeypatch):
+    async def identity(_user_id):
+        return {"installation_id": "inst_personal"}
+
+    async def token(_user_id, _installation_id=None):
+        return "private-token"
+
+    def responder(request):
+        if request.url.path == "/repos/old-owner/app":
+            return httpx.Response(200, json={"full_name": "acme/app"})
+        if request.url.path == "/user/installations":
+            return httpx.Response(
+                200,
+                json={
+                    "installations": [
+                        {
+                            "id": 1,
+                            "account": {"login": "octocat"},
+                            "permissions": {
+                                "contents": "write",
+                                "pull_requests": "write",
+                            },
+                        }
+                    ]
+                },
+            )
+        raise AssertionError(request.url)
+
+    class Client(httpx.AsyncClient):
+        def __init__(self, **kwargs):
+            super().__init__(transport=httpx.MockTransport(responder), **kwargs)
+
+    monkeypatch.setattr(auth, "github_identity", identity)
+    monkeypatch.setattr(auth, "github_token", token)
+    monkeypatch.setattr(auth.httpx, "AsyncClient", Client)
+
+    assert await auth.github_repo_warning("user_1", "old-owner/app") == (
+        "Install the Hatchery GitHub app on acme to make pull requests to acme/app."
+    )
+
+
+async def test_github_repo_warning_accepts_writable_selected_repository(monkeypatch):
+    async def identity(_user_id):
+        return {"installation_id": "inst_acme"}
+
+    async def token(_user_id, _installation_id=None):
+        return "private-token"
+
+    def responder(request):
+        if request.url.path == "/repos/acme/app":
+            return httpx.Response(200, json={"full_name": "acme/app"})
+        if request.url.path == "/user/installations":
+            return httpx.Response(
+                200,
+                json={
+                    "installations": [
+                        {
+                            "id": 42,
+                            "account": {"login": "acme"},
+                            "permissions": {
+                                "contents": "write",
+                                "pull_requests": "write",
+                            },
+                        }
+                    ]
+                },
+            )
+        if request.url.path == "/user/installations/42/repositories":
+            return httpx.Response(
+                200, json={"repositories": [{"full_name": "acme/app"}]}
+            )
+        raise AssertionError(request.url)
+
+    class Client(httpx.AsyncClient):
+        def __init__(self, **kwargs):
+            super().__init__(transport=httpx.MockTransport(responder), **kwargs)
+
+    monkeypatch.setattr(auth, "github_identity", identity)
+    monkeypatch.setattr(auth, "github_token", token)
+    monkeypatch.setattr(auth.httpx, "AsyncClient", Client)
+
+    assert await auth.github_repo_warning("user_1", "acme/app") is None
+
+
 async def test_disconnect_github_revokes_grant_and_metadata(monkeypatch):
     seen = {}
 

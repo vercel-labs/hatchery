@@ -263,6 +263,60 @@ async def github_token(user_id: str, installation_id: str | None = None) -> str:
     )
 
 
+async def github_repo_warning(user_id: str, repo: str) -> str | None:
+    """Return why the connected GitHub app cannot make a PR to one repository."""
+    connection = await github_identity(user_id)
+    if connection is None:
+        return f"Connect GitHub to let Hatchery make pull requests to {repo}."
+    token = await github_token(user_id, connection.get("installation_id"))
+    headers = {
+        "accept": "application/vnd.github+json",
+        "authorization": f"Bearer {token}",
+        "x-github-api-version": "2022-11-28",
+    }
+    try:
+        async with httpx.AsyncClient(
+            base_url=GITHUB_API, timeout=30, headers=headers, follow_redirects=True
+        ) as http:
+            repository = await http.get(f"/repos/{repo}")
+            if repository.status_code >= 300:
+                return f"Could not verify the Hatchery GitHub app for {repo}."
+            canonical = str(repository.json()["full_name"])
+            owner = canonical.split("/", 1)[0]
+            installations = await http.get("/user/installations", params={"per_page": 100})
+            if installations.status_code >= 300:
+                return f"Could not verify the Hatchery GitHub app for {canonical}."
+            installation = next(
+                (
+                    item
+                    for item in installations.json().get("installations", [])
+                    if str((item.get("account") or {}).get("login", "")).lower()
+                    == owner.lower()
+                ),
+                None,
+            )
+            if installation is None:
+                return f"Install the Hatchery GitHub app on {owner} to make pull requests to {canonical}."
+            permissions = installation.get("permissions") or {}
+            if permissions.get("contents") != "write" or permissions.get("pull_requests") != "write":
+                return f"Give the Hatchery GitHub app contents and pull requests write access for {canonical}."
+            repositories = await http.get(
+                f"/user/installations/{installation['id']}/repositories",
+                params={"per_page": 100},
+            )
+            if repositories.status_code >= 300:
+                return f"Could not verify the Hatchery GitHub app for {canonical}."
+            accessible = {
+                str(item.get("full_name", "")).lower()
+                for item in repositories.json().get("repositories", [])
+            }
+            if canonical.lower() not in accessible:
+                return f"Give the Hatchery GitHub app access to {canonical}."
+    except httpx.HTTPError:
+        return f"Could not verify the Hatchery GitHub app for {repo}."
+    return None
+
+
 async def logout(request: fastapi.Request) -> fastapi.responses.Response:
     session_id = request.cookies.get(COOKIE)
     if session_id:

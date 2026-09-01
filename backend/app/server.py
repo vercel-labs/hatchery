@@ -290,10 +290,44 @@ async def disconnect_github(request: fastapi.Request) -> None:
     await auth.disconnect_github(user)
 
 
+class SpaceWarning(pydantic.BaseModel):
+    space_id: str
+    repo: str
+    warning: str
+
+
 @app.get("/api/spaces")
 async def list_spaces() -> list[models.Space]:
     found = await spaces.list_all()
     return found or [await spaces.default()]
+
+
+@app.get("/api/spaces/warnings")
+async def space_warnings(request: fastapi.Request) -> list[SpaceWarning]:
+    user = await auth.current_user(request)
+    if user is None:
+        raise fastapi.HTTPException(401, "sign in required")
+    warnings = []
+    for space in await spaces.list_all() or [await spaces.default()]:
+        if not space.repos:
+            continue
+        repo = space.repos[0]
+        try:
+            warning = await auth.github_repo_warning(user["id"], repo)
+        except (
+            auth.connect.UserAuthorizationRequiredError,
+            auth.connect.NoValidTokenError,
+            auth.connect.ConnectorInstallationRequiredError,
+        ):
+            warning = f"Connect GitHub to let Hatchery make pull requests to {repo}."
+        if warning is None:
+            continue
+        log.warning(
+            "space main repository lacks Hatchery GitHub access",
+            extra={"space_id": space.id, "repo": repo, "user_id": user["id"]},
+        )
+        warnings.append(SpaceWarning(space_id=space.id, repo=repo, warning=warning))
+    return warnings
 
 
 class CreateSpaceRequest(pydantic.BaseModel):

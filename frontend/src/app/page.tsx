@@ -8,6 +8,7 @@ import {
   FolderGitIcon,
   GitBranchIcon,
   LinkIcon,
+  TriangleAlertIcon,
   LogOutIcon,
   PencilIcon,
   PlusIcon,
@@ -18,11 +19,20 @@ import {
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import { apiBase, apiFetch, type Chat, type Resource, type Space, type User } from "@/lib/api";
+import {
+  apiBase,
+  apiFetch,
+  type Chat,
+  type Resource,
+  type Space,
+  type SpaceWarning,
+  type User,
+} from "@/lib/api";
 import type { ChatUIMessage } from "@/lib/messages";
 import { ChatView } from "@/components/chat";
 import { SandboxForm } from "@/components/sandbox-form";
 import { TerminalPane, type SandboxWorkspace } from "@/components/terminal-pane";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
@@ -121,6 +131,7 @@ export default function Home() {
   const [user, setUser] = useState<User | null | undefined>(undefined);
   const [spaces, setSpaces] = useState<Space[] | null>(null);
   const [chats, setChats] = useState<Chat[] | null>(null);
+  const [spaceWarnings, setSpaceWarnings] = useState<SpaceWarning[]>([]);
   const [failed, setFailed] = useState(false);
   const [selection, setSelection] = useState<Selection>(null);
   const [addingSpace, setAddingSpace] = useState(false);
@@ -147,16 +158,20 @@ export default function Home() {
         setUser(null);
         return;
       }
-      const [s, c, github] = await Promise.all([
+      const [s, c, github, warnings] = await Promise.all([
         apiFetch("/api/spaces"),
         apiFetch("/api/chats"),
         apiFetch("/api/connections/github"),
+        apiFetch("/api/spaces/warnings"),
       ]);
-      if (!s.ok || !c.ok || !github.ok) throw new Error("backend unreachable");
+      if (!s.ok || !c.ok || !github.ok || !warnings.ok) {
+        throw new Error("backend unreachable");
+      }
       const connection: { connection: User["github"] | null } = await github.json();
       setUser({ ...me.user, github: connection.connection ?? undefined });
       setSpaces(await s.json());
       setChats(await c.json());
+      setSpaceWarnings(await warnings.json());
     };
     load().catch(() => setFailed(true));
   }, []);
@@ -172,6 +187,10 @@ export default function Home() {
     selection?.kind === "chat"
       ? (chats?.find((c) => c.id === selection.id) ?? null)
       : null;
+  const selectedWarning = spaceWarnings.find(
+    (warning) =>
+      warning.space_id === (selectedSpace?.id ?? selectedChat?.space_id),
+  );
 
   const sortedChats =
     chats && sortSpaceId
@@ -501,6 +520,7 @@ export default function Home() {
           <LiveChat
             key={selectedChat.id}
             chat={selectedChat}
+            warning={selectedWarning?.warning}
             onChatChanged={refreshChats}
             onSpaceAssigned={(spaceId) =>
               setChats((current) => {
@@ -535,6 +555,7 @@ export default function Home() {
             ) : selectedSpace ? (
               <SpacePane
                 space={selectedSpace}
+                warning={selectedWarning?.warning}
                 onChange={(updated) =>
                   setSpaces((current) =>
                     current?.map((space) =>
@@ -586,11 +607,23 @@ function ResourceCard({ resource }: { resource: Resource }) {
   );
 }
 
+function RepositoryWarning({ warning }: { warning: string }) {
+  return (
+    <Alert>
+      <TriangleAlertIcon />
+      <AlertTitle>GitHub access needed</AlertTitle>
+      <AlertDescription>{warning}</AlertDescription>
+    </Alert>
+  );
+}
+
 function SpacePane({
   space,
+  warning,
   onChange,
 }: {
   space: Space;
+  warning?: string;
   onChange: (space: Space) => void;
 }) {
   const [editingDocument, setEditingDocument] = useState(false);
@@ -705,6 +738,7 @@ function SpacePane({
   return (
     <div className="mx-auto grid w-full max-w-6xl gap-10 lg:grid-cols-[minmax(0,1fr)_18rem]">
       <section className="mx-auto flex w-full max-w-2xl min-w-0 flex-col gap-6">
+        {warning && <RepositoryWarning warning={warning} />}
         {editingDocument ? (
           <FieldGroup>
             <Field data-invalid={Boolean(documentError)}>
@@ -908,10 +942,12 @@ function EditableResource({
 // Keyed by chat.id at the call site so useChat remounts per chat.
 function LiveChat({
   chat,
+  warning,
   onChatChanged,
   onSpaceAssigned,
 }: {
   chat: Chat;
+  warning?: string;
   onChatChanged: () => void;
   onSpaceAssigned: (spaceId: string) => void;
 }) {
@@ -987,6 +1023,11 @@ function LiveChat({
     <div className="@container flex min-h-0 flex-1">
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col @4xl:flex-row">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col @4xl:min-w-[28rem]">
+          {warning && (
+            <div className="p-3 pb-0">
+              <RepositoryWarning warning={warning} />
+            </div>
+          )}
           <ChatView
             chatId={chat.id}
             initialMessages={initialMessages}
