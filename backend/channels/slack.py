@@ -47,11 +47,14 @@ TEXT_LIMIT = 40_000
 log = logging.getLogger(__name__)
 
 THREAD_REPLY_SYSTEM = """\
-Decide whether the newest Slack thread message is implicitly addressed to
-Hatchery. Invoke Hatchery only when the message asks it for action or a decision
-in the context of the thread. Do not invoke it for conversation between people,
-acknowledgements, thanks, reactions, or status updates. A direct mention of
-Hatchery is handled elsewhere. Return only the requested structured output."""
+Decide whether the newest Slack thread message requires a response from Hatchery.
+Invoke Hatchery when the newest message asks Hatchery for an answer, action,
+decision, clarification, confirmation, or acknowledgement in the context of the
+thread. Plain-text addressing such as "hatchery, ..." counts as addressing
+Hatchery. Do not invoke it for conversation between people, thanks, reactions,
+or status updates that require no response. The request identifies Hatchery's
+Slack user ID and marks the newest message explicitly. Return only the requested
+structured output."""
 
 
 class ThreadReplyDecision(pydantic.BaseModel):
@@ -187,8 +190,14 @@ class SlackChannel:
             )
             messages = body.get("messages") or [event]
 
+        newest_ts = str(event.get("ts", ""))
         transcript = [
-            {"sender": message.get("user") or message.get("bot_id") or "unknown", "text": message.get("text", "")}
+            {
+                "sender": message.get("user") or message.get("bot_id") or "unknown",
+                "text": message.get("text", ""),
+                "ts": str(message.get("ts", "")),
+                "newest": str(message.get("ts", "")) == newest_ts,
+            }
             for message in messages
         ]
         bot_user_ids = {
@@ -221,7 +230,7 @@ class SlackChannel:
         if invoke is not None or not trigger_stored:
             return
         try:
-            should_invoke = await self._should_invoke(transcript, str(event.get("ts", "")))
+            should_invoke = await self._should_invoke(transcript, newest_ts, sorted(bot_user_ids))
         except Exception:
             log.exception("slack thread classifier failed; stored without invoking")
             return
@@ -229,9 +238,18 @@ class SlackChannel:
             inbound.persist = False
             await bus.dispatch(inbound)
 
-    async def _should_invoke(self, transcript: list[dict], newest_ts: str) -> bool:
+    async def _should_invoke(
+        self, transcript: list[dict], newest_ts: str, bot_user_ids: list[str]
+    ) -> bool:
         agent = ai.Agent()
-        request = json.dumps({"thread": transcript, "newest_ts": newest_ts}, ensure_ascii=False)
+        request = json.dumps(
+            {
+                "hatchery_user_ids": bot_user_ids,
+                "newest_ts": newest_ts,
+                "thread": transcript,
+            },
+            ensure_ascii=False,
+        )
         async with agent.run(
             model(),
             [ai.system_message(THREAD_REPLY_SYSTEM), ai.user_message(request)],

@@ -142,8 +142,8 @@ async def test_untagged_thread_reply_dispatches_when_classifier_selects_it(monke
     channel = slack.channel(connector="slack/e2e-bot", transport=httpx.MockTransport(responder))
     seen = {}
 
-    async def should_invoke(transcript, newest_ts):
-        seen["classification"] = (transcript, newest_ts)
+    async def should_invoke(transcript, newest_ts, bot_user_ids):
+        seen["classification"] = (transcript, newest_ts, bot_user_ids)
         return True
 
     monkeypatch.setattr(channel, "_should_invoke", should_invoke)
@@ -166,10 +166,16 @@ async def test_untagged_thread_reply_dispatches_when_classifier_selects_it(monke
     assert params == {"channel": "C1", "ts": "1.0", "limit": "100"}
     assert seen["classification"] == (
         [
-            {"sender": "UBOT", "text": "Should I open the pull request?"},
-            {"sender": "U1", "text": "yes, please do"},
+            {
+                "sender": "UBOT",
+                "text": "Should I open the pull request?",
+                "ts": "1.1",
+                "newest": False,
+            },
+            {"sender": "U1", "text": "yes, please do", "ts": "1.2", "newest": True},
         ],
         "1.2",
+        ["UBOT"],
     )
     assert len(bus.dispatched) == 2
     stored, wake = bus.dispatched
@@ -186,7 +192,7 @@ async def test_untagged_thread_reply_is_stored_when_classifier_rejects_it(monkey
     async def replies(method, **params):
         return {"ok": True, "messages": [mention(ts="1.0"), {"user": "U1", "text": "thanks", "ts": "1.2"}]}
 
-    async def should_invoke(transcript, newest_ts):
+    async def should_invoke(transcript, newest_ts, bot_user_ids):
         return False
 
     monkeypatch.setattr(channel, "_api", replies)
@@ -222,7 +228,7 @@ async def test_classifier_failure_still_stores_thread_reply(monkeypatch):
             ],
         }
 
-    async def should_invoke(transcript, newest_ts):
+    async def should_invoke(transcript, newest_ts, bot_user_ids):
         raise ValueError("empty structured output")
 
     monkeypatch.setattr(channel, "_api", replies)
