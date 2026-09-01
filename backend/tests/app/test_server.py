@@ -465,6 +465,34 @@ async def test_hub_lands_inbound_in_one_chat(monkeypatch):
     ]
 
 
+async def test_hub_can_store_without_invoking_then_wake_without_persisting(monkeypatch):
+    async def classify(prompt, metadata, candidates):
+        return candidates[0]
+
+    runs = []
+
+    async def run(chat_id):
+        runs.append(chat_id)
+
+    monkeypatch.setattr(server.classifier, "classify", classify)
+    monkeypatch.setattr(server, "_run_inbound_turn", run)
+    hub = server.bot.hub
+    await hub.dispatch(
+        "slack",
+        channels.Inbound(token="C1:1.0", text="context", state={}, invoke=False),
+    )
+    [chat] = await chats.list_all()
+    await hub.dispatch(
+        "slack",
+        channels.Inbound(token="C1:1.0", text="context", state={}, persist=False),
+    )
+
+    stored = await events.read(chat.id, "messages")
+    assert len(stored) == 1
+    assert await events.read(chat.id, "ui") == [(0, {"type": "messages.changed"})]
+    assert runs == [chat.id]
+
+
 async def test_ambiguous_repo_classifies_then_runs_original_request(monkeypatch):
     first = await server.spaces.create("docs")
     first.repos = ["vercel/repo"]

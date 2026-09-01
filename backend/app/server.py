@@ -88,9 +88,11 @@ class _StoreHub:
                 created=created,
             )
             if created:
-                await events.append(
-                    chat.id, "messages", ai.user_message(inbound.text).model_dump(mode="json")
-                )
+                if inbound.persist:
+                    await events.append(
+                        chat.id, "messages", ai.user_message(inbound.text).model_dump(mode="json")
+                    )
+                    await events.append(chat.id, "ui", {"type": "messages.changed"})
                 await _classify_chat(
                     chat.id,
                     inbound.text,
@@ -117,13 +119,15 @@ class _StoreHub:
                     found,
                 )
                 chat = await chats.get(chat.id) or chat
-            else:
+            elif inbound.persist:
                 await events.append(
                     chat.id, "messages", ai.user_message(inbound.text).model_dump(mode="json")
                 )
-            span.set_attrs({"space.id": chat.space_id or ""})
+                await events.append(chat.id, "ui", {"type": "messages.changed"})
+            span.set_attrs({"space.id": chat.space_id or ""}, invoke=inbound.invoke)
             log.info("inbound %s -> %s chat %s", channel, "new" if created else "existing", chat.id)
-            await _run_inbound_turn(chat.id)
+            if inbound.invoke:
+                await _run_inbound_turn(chat.id)
 
     async def dedupe(self, key: str) -> bool:
         return await chats.dedupe(key)

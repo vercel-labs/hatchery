@@ -29,6 +29,7 @@ Behavior ported from eve's slack channel defaults, trimmed:
 
 import html
 import json
+import logging
 import os
 import re
 import urllib.parse
@@ -42,6 +43,8 @@ import channels
 
 STATUS_LIMIT = 50
 TEXT_LIMIT = 40_000
+
+log = logging.getLogger(__name__)
 
 THREAD_REPLY_SYSTEM = """\
 Decide whether the newest Slack thread message is implicitly addressed to
@@ -105,8 +108,8 @@ class SlackChannel:
         if event_id and not await bus.dedupe(str(event_id)):
             return channels.Ack()
         if inbound is not None:
-            return channels.Ack(work=bus.dispatch(inbound))
-        return channels.Ack(work=self._classify_thread_reply(payload, event, bus))
+            return channels.Ack(work=self._sync_thread(payload, event, inbound, bus, invoke=True))
+        return channels.Ack(work=self._sync_thread(payload, event, candidate, bus, invoke=None))
 
     def _gate(self, payload: dict, event: dict) -> channels.Inbound | None:
         bot_user_id = ""
@@ -165,22 +168,65 @@ class SlackChannel:
         }
         return channels.Inbound(token=f"{channel_id}:{thread_ts}", text=text, state=state)
 
-    async def _classify_thread_reply(self, payload: dict, event: dict, bus: channels.Bus) -> None:
-        inbound = self._thread_candidate(payload, event)
-        if inbound is None:
-            return
-        body = await self._api(
-            "conversations.replies",
-            channel=inbound.state["channel_id"],
-            ts=inbound.state["thread_ts"],
-            limit="100",
-        )
-        messages = body.get("messages") or []
+    async def _sync_thread(
+        self,
+        payload: dict,
+        event: dict,
+        inbound: channels.Inbound,
+        bus: channels.Bus,
+        invoke: bool | None,
+    ) -> None:
+        is_thread = bool(event.get("thread_ts")) and event.get("channel_type") != "im"
+        messages = [event]
+        if is_thread:
+            body = await self._api(
+                "conversations.replies",
+                channel=inbound.state["channel_id"],
+                ts=inbound.state["thread_ts"],
+                limit="100",
+            )
+            messages = body.get("messages") or [event]
+
         transcript = [
             {"sender": message.get("user") or message.get("bot_id") or "unknown", "text": message.get("text", "")}
             for message in messages
         ]
-        if await self._should_invoke(transcript, str(event.get("ts", ""))):
+        bot_user_ids = {
+            authorization.get("user_id", "")
+            for authorization in payload.get("authorizations") or []
+        }
+        subscribed = any(
+            message.get("user") in bot_user_ids
+            or any(user_id and f"<@{user_id}>" in str(message.get("text", "")) for user_id in bot_user_ids)
+            for message in messages
+        )
+        if invoke is None and not subscribed:
+            return
+        should_invoke = bool(invoke)
+        trigger_stored = False
+        for message in messages:
+            ts = str(message.get("ts", ""))
+            if not ts or message.get("bot_id") or message.get("user") in bot_user_ids:
+                continue
+            if not await bus.dedupe(f"message:{inbound.state['channel_id']}:{ts}"):
+                continue
+            synced = self._inbound(payload, {**message, "channel": inbound.state["channel_id"], "thread_ts": inbound.state["thread_ts"]})
+            if synced is None:
+                continue
+            synced.title = inbound.title
+            synced.invoke = invoke is True and ts == str(event.get("ts", ""))
+            await bus.dispatch(synced)
+            trigger_stored = trigger_stored or ts == str(event.get("ts", ""))
+
+        if invoke is not None or not trigger_stored:
+            return
+        try:
+            should_invoke = await self._should_invoke(transcript, str(event.get("ts", "")))
+        except Exception:
+            log.exception("slack thread classifier failed; stored without invoking")
+            return
+        if should_invoke:
+            inbound.persist = False
             await bus.dispatch(inbound)
 
     async def _should_invoke(self, transcript: list[dict], newest_ts: str) -> bool:
@@ -192,7 +238,6 @@ class SlackChannel:
             output_type=ThreadReplyDecision,
             params=ai.InferenceRequestParams(
                 sampling={ai.TemperatureSamplerParams: ai.TemperatureSamplerParams(temperature=0)},
-                output=ai.OutputParams(max_tokens=20),
             ),
         ) as result:
             async for _ in result:

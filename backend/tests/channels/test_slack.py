@@ -103,7 +103,17 @@ async def test_app_mention_dispatches_with_thread_token_and_attribution():
 
 
 async def test_thread_reply_reuses_thread_root_token():
-    _, bus = await handled(forwarded(envelope(mention(thread_ts="50.0", ts="100.2"))))
+    calls: list[httpx.Request] = []
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200, json={"ok": True, "messages": [mention(thread_ts="50.0", ts="100.2")]})
+
+    bus = FakeBus()
+    channel = slack.channel(connector="slack/e2e-bot", transport=httpx.MockTransport(responder))
+    ack = await channel.handle(forwarded(envelope(mention(thread_ts="50.0", ts="100.2"))), bus)
+    assert ack.work is not None
+    await ack.work
     assert bus.dispatched[0].token == "C1:50.0"
 
 
@@ -123,8 +133,8 @@ async def test_untagged_thread_reply_dispatches_when_classifier_selects_it(monke
             json={
                 "ok": True,
                 "messages": [
-                    {"user": "UBOT", "text": "Should I open the pull request?"},
-                    {"user": "U1", "text": "yes, please do"},
+                    {"user": "UBOT", "text": "Should I open the pull request?", "ts": "1.1"},
+                    {"user": "U1", "text": "yes, please do", "ts": "1.2"},
                 ],
             },
         )
@@ -161,17 +171,25 @@ async def test_untagged_thread_reply_dispatches_when_classifier_selects_it(monke
         ],
         "1.2",
     )
-    [inbound] = bus.dispatched
-    assert inbound.token == "C1:1.0"
-    assert "yes, please do" in inbound.text
+    assert len(bus.dispatched) == 2
+    stored, wake = bus.dispatched
+    assert stored.token == "C1:1.0"
+    assert stored.invoke is False
+    assert "yes, please do" in stored.text
+    assert wake.persist is False
+    assert wake.invoke is True
 
 
-async def test_untagged_thread_reply_is_ignored_when_classifier_rejects_it(monkeypatch):
+async def test_untagged_thread_reply_is_stored_when_classifier_rejects_it(monkeypatch):
     channel = api_channel([])
+
+    async def replies(method, **params):
+        return {"ok": True, "messages": [mention(ts="1.0"), {"user": "U1", "text": "thanks", "ts": "1.2"}]}
 
     async def should_invoke(transcript, newest_ts):
         return False
 
+    monkeypatch.setattr(channel, "_api", replies)
     monkeypatch.setattr(channel, "_should_invoke", should_invoke)
     bus = FakeBus()
     reply = {
@@ -186,7 +204,46 @@ async def test_untagged_thread_reply_is_ignored_when_classifier_rejects_it(monke
     ack = await channel.handle(forwarded(envelope(reply)), bus)
     assert ack.work is not None
     await ack.work
-    assert bus.dispatched == []
+    root, stored = bus.dispatched
+    assert root.invoke is False
+    assert stored.invoke is False
+    assert "thanks" in stored.text
+
+
+async def test_classifier_failure_still_stores_thread_reply(monkeypatch):
+    channel = api_channel([])
+
+    async def replies(method, **params):
+        return {
+            "ok": True,
+            "messages": [
+                mention(ts="1.0"),
+                {"user": "U1", "text": "are you receiving this?", "ts": "1.2"},
+            ],
+        }
+
+    async def should_invoke(transcript, newest_ts):
+        raise ValueError("empty structured output")
+
+    monkeypatch.setattr(channel, "_api", replies)
+    monkeypatch.setattr(channel, "_should_invoke", should_invoke)
+    bus = FakeBus()
+    reply = {
+        "type": "message",
+        "channel_type": "channel",
+        "channel": "C1",
+        "thread_ts": "1.0",
+        "ts": "1.2",
+        "user": "U1",
+        "text": "are you receiving this?",
+    }
+    ack = await channel.handle(forwarded(envelope(reply)), bus)
+    assert ack.work is not None
+    await ack.work
+    root, stored = bus.dispatched
+    assert root.invoke is False
+    assert stored.invoke is False
+    assert "are you receiving this?" in stored.text
 
 
 async def test_ignores_plain_channel_message_bots_and_self():
@@ -207,12 +264,17 @@ async def test_dedupes_event_id():
     await handled(forwarded(envelope(mention(), event_id="Ev1")), bus)
     await handled(forwarded(envelope(mention(), event_id="Ev1")), bus)
     await handled(forwarded(envelope(mention(), event_id="Ev2")), bus)
-    assert len(bus.dispatched) == 2
+    assert len(bus.dispatched) == 1  # the second event id still names the same Slack message
 
 
 def api_channel(calls: list) -> slack.SlackChannel:
     def responder(request: httpx.Request) -> httpx.Response:
         calls.append(request)
+        if request.url.path == "/api/conversations.replies":
+            return httpx.Response(
+                200,
+                json={"ok": True, "messages": [{"user": "U1", "text": "thanks", "ts": "1.2"}]},
+            )
         return httpx.Response(200, json={"ok": True})
 
     return slack.channel(connector="slack/e2e-bot", transport=httpx.MockTransport(responder))
