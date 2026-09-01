@@ -247,6 +247,10 @@ async def disconnect_github(user: dict) -> None:
 
 
 async def github_token(user_id: str, installation_id: str | None = None) -> str:
+    if installation_id is None:
+        user = await auth_store.get_user(user_id)
+        connection = github_connection(user or {}) or {}
+        installation_id = connection.get("installation_id")
     return await connect.get_token(
         _github_connector(),
         subject=connect.ConnectUserTokenSubject(id=user_id),

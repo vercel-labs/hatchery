@@ -51,6 +51,16 @@ async def save_user(user: dict) -> dict:
     return user
 
 
+async def get_user(user_id: str) -> dict | None:
+    row = await (await db.pool()).fetchrow(
+        "SELECT data FROM hatchery_users WHERE id = $1", user_id
+    )
+    if row is None:
+        return None
+    raw = row["data"]
+    return json.loads(raw) if isinstance(raw, str) else dict(raw)
+
+
 async def save_github_connection(user_id: str, connection: dict) -> None:
     await (await db.pool()).execute(
         "UPDATE hatchery_users SET data = jsonb_set(data, '{github}', $2::jsonb) WHERE id = $1",

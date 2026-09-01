@@ -126,6 +126,19 @@ def test_workspace_matches_vercel_git_source_layout():
     assert sandbox._workspace(models.WorkerSpec()) == "/vercel"
 
 
+async def test_github_credential_uses_connected_user(monkeypatch):
+    seen = []
+
+    async def token(user_id):
+        seen.append(user_id)
+        return "user-token"
+
+    monkeypatch.setattr(sandbox.auth, "github_token", token)
+
+    assert await sandbox._github_credential("user_1") == "user-token"
+    assert seen == ["user_1"]
+
+
 async def test_wait_for_daemon_retries_route_warmup(monkeypatch):
     calls = 0
 

@@ -107,4 +107,5 @@ def test_agent_environment_scrubs_control_plane_secrets():
     assert env["PATH"].startswith("/opt/hatchery/bin:")
     assert "HATCHERY_DAEMON_TOKEN" not in env
     assert "VERCEL_QUEUE_TOKEN" not in env
-    assert "GH_TOKEN" not in env
+    assert env["GH_TOKEN"] == "sandbox-network-policy-placeholder"
+    assert env["GH_TOKEN"] != "github"

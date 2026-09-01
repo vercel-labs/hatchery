@@ -30,7 +30,7 @@ import uuid
 import asyncssh
 import websockets.asyncio.server
 
-VERSION = 10
+VERSION = 11
 REPLAY_LIMIT = 1024 * 1024
 FX_INPUT_READY = b"\x1b[?2004h"
 FX_INTERRUPT_SETTLE = 0.75
@@ -59,6 +59,9 @@ def agent_environment(env: dict[str, str] | None = None) -> dict[str, str]:
     }
     result = {name: value for name, value in source.items() if name not in private}
     result["PATH"] = f"/opt/hatchery/bin:{result.get('PATH', '/usr/local/bin:/usr/bin:/bin')}"
+    # gh requires a local credential before it sends a request. The Sandbox
+    # network policy replaces this non-secret marker with the connected user's token.
+    result["GH_TOKEN"] = "sandbox-network-policy-placeholder"
     return result
 
 

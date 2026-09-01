@@ -255,6 +255,26 @@ async def test_github_return_saves_identity_without_token(monkeypatch):
     assert "token" not in saved["connection"]
 
 
+async def test_github_token_uses_saved_installation(monkeypatch):
+    seen = {}
+
+    async def user(_user_id):
+        return {"id": "user_1", "github": {"installation_id": "inst_1"}}
+
+    async def token(connector, **kwargs):
+        seen.update(connector=connector, **kwargs)
+        return "private-token"
+
+    monkeypatch.setenv("GITHUB_CONNECTOR", "github/hatchery")
+    monkeypatch.setattr(auth.auth_store, "get_user", user)
+    monkeypatch.setattr(auth.connect, "get_token", token)
+
+    assert await auth.github_token("user_1") == "private-token"
+    assert seen["connector"] == "github/hatchery"
+    assert seen["subject"] == auth.connect.ConnectUserTokenSubject(id="user_1")
+    assert seen["installation_id"] == "inst_1"
+
+
 async def test_disconnect_github_revokes_grant_and_metadata(monkeypatch):
     seen = {}
 
