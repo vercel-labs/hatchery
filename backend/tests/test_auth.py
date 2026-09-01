@@ -78,6 +78,61 @@ async def test_callback_rejects_replayed_or_expired_state(monkeypatch):
         await auth.callback(request(), "code", "state")
 
 
+async def test_callback_logs_safe_token_exchange_error(monkeypatch, caplog):
+    async def consume(_state):
+        return {"nonce": "nonce", "verifier": "private-verifier", "redirect_uri": "https://app/callback"}
+
+    def responder(_request):
+        return httpx.Response(
+            400,
+            json={
+                "error": "invalid_client",
+                "error_description": "Client authentication failed",
+            },
+        )
+
+    class Client(httpx.AsyncClient):
+        def __init__(self, **kwargs):
+            super().__init__(transport=httpx.MockTransport(responder), **kwargs)
+
+    monkeypatch.setattr(auth.auth_store, "consume_oauth_state", consume)
+    monkeypatch.setattr(auth.httpx, "AsyncClient", Client)
+
+    with caplog.at_level("WARNING", logger="auth"):
+        with pytest.raises(fastapi.HTTPException) as raised:
+            await auth.callback(request(), "private-code", "state")
+
+    assert raised.value.detail == (
+        "Vercel token exchange failed: invalid_client: Client authentication failed"
+    )
+    assert "status=400 error=invalid_client description=Client authentication failed" in caplog.text
+    assert "private-code" not in caplog.text
+    assert "private-verifier" not in caplog.text
+    assert "test-secret" not in caplog.text
+
+
+async def test_callback_logs_nested_token_exchange_error(monkeypatch, caplog):
+    async def consume(_state):
+        return {"nonce": "nonce", "verifier": "verifier", "redirect_uri": "https://app/callback"}
+
+    def responder(_request):
+        return httpx.Response(400, json={"error": {"code": "invalid_grant", "message": "Code expired"}})
+
+    class Client(httpx.AsyncClient):
+        def __init__(self, **kwargs):
+            super().__init__(transport=httpx.MockTransport(responder), **kwargs)
+
+    monkeypatch.setattr(auth.auth_store, "consume_oauth_state", consume)
+    monkeypatch.setattr(auth.httpx, "AsyncClient", Client)
+
+    with caplog.at_level("WARNING", logger="auth"):
+        with pytest.raises(fastapi.HTTPException) as raised:
+            await auth.callback(request(), "code", "state")
+
+    assert raised.value.detail == "Vercel token exchange failed: invalid_grant: Code expired"
+    assert "error=invalid_grant description=Code expired" in caplog.text
+
+
 async def test_callback_creates_session_without_storing_provider_tokens(monkeypatch):
     seen = {}
 

@@ -3,6 +3,7 @@
 import base64
 import datetime
 import hashlib
+import logging
 import os
 import secrets
 import urllib.parse
@@ -18,6 +19,8 @@ TOKEN_URL = "https://api.vercel.com/login/oauth/token"
 JWKS_URL = "https://vercel.com/.well-known/jwks"
 COOKIE = "hatchery_session"
 SCOPES = "openid email profile"
+
+log = logging.getLogger("auth")
 
 
 def _client_id() -> str:
@@ -100,7 +103,31 @@ async def callback(
             auth=(_client_id(), _client_secret()),
         )
     if response.status_code >= 400:
-        raise fastapi.HTTPException(502, "Vercel token exchange failed")
+        error_code = "unknown_error"
+        error_description = "Vercel rejected the token exchange"
+        try:
+            payload = response.json()
+            if isinstance(payload, dict):
+                raw_error = payload.get("error")
+                if isinstance(raw_error, dict):
+                    error_code = str(raw_error.get("code") or error_code)
+                    error_description = str(raw_error.get("message") or error_description)
+                elif raw_error:
+                    error_code = str(raw_error)
+                error_description = str(
+                    payload.get("error_description") or payload.get("message") or error_description
+                )
+        except ValueError:
+            pass
+        log.warning(
+            "Vercel token exchange failed: status=%s error=%s description=%s",
+            response.status_code,
+            error_code,
+            error_description,
+        )
+        raise fastapi.HTTPException(
+            502, f"Vercel token exchange failed: {error_code}: {error_description}"
+        )
     tokens = response.json()
     claims = await verify_id_token(tokens["id_token"], pending["nonce"])
     user = await auth_store.save_user(
