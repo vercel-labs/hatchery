@@ -424,14 +424,14 @@ def test_dedupe_tool_history_repairs_old_ui_duplicates():
 
 async def test_hub_lands_inbound_in_one_chat(monkeypatch):
     async def turn(chat_id, record):
-        return "reply"
+        return ["reply"]
 
     async def classify(prompt, metadata, candidates):
         return candidates[0]
 
     delivered = []
 
-    async def deliver(chat_id, message):
+    async def deliver(chat_id, message, *, final=True):
         delivered.append((chat_id, message))
         return []
 
@@ -523,6 +523,23 @@ async def test_ambiguous_repo_classifies_then_runs_original_request(monkeypatch)
     assert runs == [chat.id]
 
 
+async def test_inbound_turn_delivers_every_assistant_message(monkeypatch):
+    delivered = []
+
+    async def turn(chat_id, record):
+        return ["I will inspect that.", "Done."]
+
+    async def deliver(chat_id, message, *, final=True):
+        delivered.append((message, final))
+        return []
+
+    monkeypatch.setattr(server, "_run_dispatcher_turn", turn)
+    monkeypatch.setattr(server, "_deliver", deliver)
+    await server._run_inbound_turn("chat_x")
+
+    assert delivered == [("I will inspect that.", False), ("Done.", True)]
+
+
 async def test_inbound_turn_delivers_failure(monkeypatch):
     delivered = []
 
@@ -561,7 +578,7 @@ async def test_slack_webhook_runs_dispatcher_and_replies_in_thread(monkeypatch):
     async def turn(chat_id, record):
         seen["chat_id"] = chat_id
         seen["record"] = record
-        return "I can help with that."
+        return ["I can help with that."]
 
     async def classify(prompt, metadata, candidates):
         return candidates[0]
@@ -681,7 +698,11 @@ async def test_ui_turn_is_mirrored_to_bound_channel(monkeypatch):
 
     class FakeRun:
         def __init__(self, history):
-            self.messages = [*history, ai.assistant_message("answer from AI")]
+            self.messages = [
+                *history,
+                ai.assistant_message("I will handle that."),
+                ai.assistant_message("answer from AI"),
+            ]
 
         async def __aenter__(self):
             return self
@@ -721,13 +742,16 @@ async def test_ui_turn_is_mirrored_to_bound_channel(monkeypatch):
             channels.protocol.MESSAGE_RECEIVED,
             channels.protocol.TURN_STARTED,
             channels.protocol.MESSAGE_COMPLETED,
+            channels.protocol.MESSAGE_COMPLETED,
         ]
         assert channel.delivered[0][0].data == {"message": "continue in UI", "origin": "ui"}
+        assert channel.delivered[2][0].data == {"message": "I will handle that.", "final": False}
         assert channel.delivered[-1][0].data == {"message": "answer from AI"}
         assert all(state == {"thread": "1"} for _, state in channel.delivered)
         stored = [ai.messages.Message.model_validate(data) for _, data in await events.read(chat.id, "messages")]
         assert [(message.role, message.text) for message in stored] == [
             ("user", "continue in UI"),
+            ("assistant", "I will handle that."),
             ("assistant", "answer from AI"),
         ]
     finally:
@@ -869,9 +893,9 @@ async def test_worker_completion_wakes_dispatcher_with_hidden_persisted_result(m
             "messages",
             ai.assistant_message("The subagent fixed and tested it.").model_dump(mode="json"),
         )
-        return "The subagent fixed and tested it."
+        return ["The subagent fixed and tested it."]
 
-    async def deliver(chat_id, message):
+    async def deliver(chat_id, message, *, final=True):
         delivered.append((chat_id, message))
         return []
 
@@ -921,9 +945,9 @@ async def test_worker_completion_retries_delivery_without_rerunning_dispatcher(m
         await events.append(
             chat_id, "messages", ai.assistant_message("done").model_dump(mode="json")
         )
-        return "done"
+        return ["done"]
 
-    async def deliver(chat_id, message):
+    async def deliver(chat_id, message, *, final=True):
         nonlocal delivery_calls
         delivery_calls += 1
         return ["temporary"] if delivery_calls == 1 else []
@@ -1336,7 +1360,11 @@ async def test_dispatcher_turn_flushes_telemetry(monkeypatch):
 
     class FakeRun:
         def __init__(self, history):
-            self.messages = [*history, ai.assistant_message("done")]
+            self.messages = [
+                *history,
+                ai.assistant_message("I will inspect that."),
+                ai.assistant_message("done"),
+            ]
 
         async def __aenter__(self):
             return self
@@ -1358,5 +1386,8 @@ async def test_dispatcher_turn_flushes_telemetry(monkeypatch):
     monkeypatch.setattr(server.dispatcher, "agent_for", lambda record: FakeAgent())
     monkeypatch.setattr(server.telemetry, "flush", flush)
 
-    assert await server._run_dispatcher_turn(chat.id, {"id": chat.id}) == "done"
+    assert await server._run_dispatcher_turn(chat.id, {"id": chat.id}) == [
+        "I will inspect that.",
+        "done",
+    ]
     flush.assert_called_once_with()

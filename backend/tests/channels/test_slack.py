@@ -181,6 +181,18 @@ async def test_reply_posts_into_thread():
     assert params == {"channel": "C1", "thread_ts": "100.1", "text": "done!"}
 
 
+async def test_intermediate_reply_becomes_opaque_status():
+    calls: list[httpx.Request] = []
+    await api_channel(calls).on_event(
+        channels.event(channels.protocol.MESSAGE_COMPLETED, message="I will inspect that.", final=False),
+        state(),
+    )
+    [request] = calls
+    assert request.url.path == "/api/assistant.threads.setStatus"
+    params = dict(urllib.parse.parse_qsl(request.read().decode()))
+    assert params == {"channel_id": "C1", "thread_ts": "100.1", "status": "is working..."}
+
+
 async def test_ui_message_uses_slack_user_profile_with_ui_attribution():
     calls: list[httpx.Request] = []
 

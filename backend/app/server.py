@@ -625,12 +625,13 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                         await events.append(
                             request.chat_id, "messages", message.model_dump(mode="json")
                         )
-                reply = next(
-                    (message.text for message in reversed(added) if message.role == "assistant" and message.text),
-                    "",
-                )
-                if reply:
-                    await _deliver(request.chat_id, reply)
+                replies = [
+                    message.text
+                    for message in added
+                    if message.role == "assistant" and message.text
+                ]
+                for index, reply in enumerate(replies):
+                    await _deliver(request.chat_id, reply, final=index == len(replies) - 1)
             except Exception as error:
                 await _emit(
                     request.chat_id,
@@ -1181,7 +1182,11 @@ async def complete_worker_task(task: worker.Task) -> None:
                 "",
             )
         if not message:
-            message = await _run_dispatcher_turn(current.chat_id, {"id": current.chat_id})
+            messages = await _run_dispatcher_turn(current.chat_id, {"id": current.chat_id})
+            for intermediate in messages[:-1]:
+                if await _deliver(current.chat_id, intermediate, final=False):
+                    return
+            message = messages[-1]
         if current.completion_message != message:
             current = await worker.get_task(current.chat_id, current.id) or current
             current.completion_message = message
@@ -1230,10 +1235,11 @@ async def _emit(chat_id: str, event: channels.Event) -> list[str]:
         return failures
 
 
-async def _deliver(chat_id: str, message: str) -> list[str]:
-    return await _emit(
-        chat_id, channels.event(channels.protocol.MESSAGE_COMPLETED, message=message)
-    )
+async def _deliver(chat_id: str, message: str, *, final: bool = True) -> list[str]:
+    data = {"message": message}
+    if not final:
+        data["final"] = False
+    return await _emit(chat_id, channels.event(channels.protocol.MESSAGE_COMPLETED, **data))
 
 
 async def _run_inbound_turn(chat_id: str) -> None:
@@ -1243,8 +1249,9 @@ async def _run_inbound_turn(chat_id: str) -> None:
         span.set_attrs({"chat.id": chat_id}, origin="channel")
         await _emit(chat_id, channels.event(channels.protocol.TURN_STARTED))
         try:
-            message = await _run_dispatcher_turn(chat_id, {"id": chat_id})
-            await _deliver(chat_id, message)
+            messages = await _run_dispatcher_turn(chat_id, {"id": chat_id})
+            for index, message in enumerate(messages):
+                await _deliver(chat_id, message, final=index == len(messages) - 1)
         except Exception as error:
             log.exception("inbound dispatcher turn failed: %s", chat_id)
             await _emit(
@@ -1255,7 +1262,7 @@ async def _run_inbound_turn(chat_id: str) -> None:
 
 async def _run_dispatcher_turn(
     chat_id: str, record: dict, wake: ai.messages.Message | None = None
-) -> str:
+) -> list[str]:
     """Run a dispatcher turn; wake context is model-only, never persisted."""
     stored = await _transcript(chat_id)
     space = await _space_for_chat(chat_id)
@@ -1272,10 +1279,12 @@ async def _run_dispatcher_turn(
                 await events.append(chat_id, "messages", message.model_dump(mode="json"))
     finally:
         telemetry.flush()
-    return next(
-        (message.text for message in reversed(added) if message.role == "assistant" and message.text),
-        "subagent completion recorded",
-    )
+    messages = [
+        message.text
+        for message in added
+        if message.role == "assistant" and message.text
+    ]
+    return messages or ["subagent completion recorded"]
 
 
 app.include_router(bot.router)

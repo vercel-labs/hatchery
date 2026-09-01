@@ -135,7 +135,10 @@ class SlackChannel:
         elif event.type == channels.protocol.MESSAGE_RECEIVED and event.data.get("origin") == "ui":
             await self._post_ui_message(state, str(event.data.get("message", ""))[:TEXT_LIMIT])
         elif event.type == channels.protocol.MESSAGE_COMPLETED:
-            await self._post(state, str(event.data.get("message", ""))[:TEXT_LIMIT])
+            if event.data.get("final", True):
+                await self._post(state, str(event.data.get("message", ""))[:TEXT_LIMIT])
+            else:
+                await self._set_status(state, "is working...")
         elif event.type == channels.protocol.TURN_FAILED:
             await self._post(state, f"something went wrong: {event.data.get('error', 'unknown error')}")
 
