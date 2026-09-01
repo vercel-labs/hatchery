@@ -13,8 +13,13 @@ Setup (route must point at this channel, /channels/v1/slack):
     vercel connect detach <uid> --yes
     vercel connect attach <uid> --triggers --trigger-path /channels/v1/slack --yes
 
+In Connect's Advanced settings, add the message.channels trigger and the
+channels:history bot scope. Private channels also need message.groups and
+groups:history.
+
 Behavior ported from eve's slack channel defaults, trimmed:
-- respond to app_mention and direct messages; ignore other traffic
+- respond to app mentions and DMs directly
+- classify untagged thread replies against the full Slack thread
 - drop http_timeout retries, dedupe event_id durably, never reply to bots
 - one session per thread: token is "<channel_id>:<thread_ts>"
 - progress via assistant typing status, one post on the final reply
@@ -28,13 +33,32 @@ import os
 import re
 import urllib.parse
 
+import ai
 import httpx
+import pydantic
 from vercel import connect
 
 import channels
 
 STATUS_LIMIT = 50
 TEXT_LIMIT = 40_000
+
+THREAD_REPLY_SYSTEM = """\
+Decide whether the newest Slack thread message is implicitly addressed to
+Hatchery. Invoke Hatchery only when the message asks it for action or a decision
+in the context of the thread. Do not invoke it for conversation between people,
+acknowledgements, thanks, reactions, or status updates. A direct mention of
+Hatchery is handled elsewhere. Return only the requested structured output."""
+
+
+class ThreadReplyDecision(pydantic.BaseModel):
+    model_config = pydantic.ConfigDict(extra="forbid")
+
+    invoke: bool
+
+
+def model() -> ai.Model:
+    return ai.get_model("openai/gpt-5.6-luna")
 
 
 def channel(
@@ -74,12 +98,15 @@ class SlackChannel:
 
         event = payload.get("event") or {}
         inbound = self._gate(payload, event)
-        if inbound is None:
+        candidate = self._thread_candidate(payload, event)
+        if inbound is None and candidate is None:
             return channels.Ack()
         event_id = payload.get("event_id")
         if event_id and not await bus.dedupe(str(event_id)):
             return channels.Ack()
-        return channels.Ack(work=bus.dispatch(inbound))
+        if inbound is not None:
+            return channels.Ack(work=bus.dispatch(inbound))
+        return channels.Ack(work=self._classify_thread_reply(payload, event, bus))
 
     def _gate(self, payload: dict, event: dict) -> channels.Inbound | None:
         bot_user_id = ""
@@ -95,6 +122,31 @@ class SlackChannel:
         if kind != "app_mention" and not is_dm:
             return None
 
+        inbound = self._inbound(payload, event)
+        if inbound is None:
+            return None
+        title_text = re.sub(rf"<@{re.escape(bot_user_id)}>", "", str(event.get("text", "")))
+        title_text = html.unescape(" ".join(title_text.split())).strip()
+        inbound.title = f"slack: {title_text[:53]}" if title_text else "slack: thread"
+        return inbound
+
+    def _thread_candidate(self, payload: dict, event: dict) -> channels.Inbound | None:
+        bot_user_ids = {
+            authorization.get("user_id", "")
+            for authorization in payload.get("authorizations") or []
+        }
+        if event.get("bot_id") or event.get("user") in bot_user_ids:
+            return None
+        if event.get("type") != "message" or event.get("channel_type") == "im":
+            return None
+        if event.get("subtype") not in (None, "file_share") or not event.get("thread_ts"):
+            return None
+        text = str(event.get("text", ""))
+        if any(user_id and f"<@{user_id}>" in text for user_id in bot_user_ids):
+            return None  # app_mention is delivered separately for the same message
+        return self._inbound(payload, event)
+
+    def _inbound(self, payload: dict, event: dict) -> channels.Inbound | None:
         channel_id = event.get("channel", "")
         ts = event.get("ts", "")
         thread_ts = event.get("thread_ts") or ts
@@ -111,15 +163,41 @@ class SlackChannel:
             "team_id": payload.get("team_id", ""),
             "user_id": event.get("user", ""),
         }
-        title_text = re.sub(rf"<@{re.escape(bot_user_id)}>", "", str(event.get("text", "")))
-        title_text = html.unescape(" ".join(title_text.split())).strip()
-        title = f"slack: {title_text[:53]}" if title_text else "slack: thread"
-        return channels.Inbound(
-            token=f"{channel_id}:{thread_ts}",
-            text=text,
-            state=state,
-            title=title,
+        return channels.Inbound(token=f"{channel_id}:{thread_ts}", text=text, state=state)
+
+    async def _classify_thread_reply(self, payload: dict, event: dict, bus: channels.Bus) -> None:
+        inbound = self._thread_candidate(payload, event)
+        if inbound is None:
+            return
+        body = await self._api(
+            "conversations.replies",
+            channel=inbound.state["channel_id"],
+            ts=inbound.state["thread_ts"],
+            limit="100",
         )
+        messages = body.get("messages") or []
+        transcript = [
+            {"sender": message.get("user") or message.get("bot_id") or "unknown", "text": message.get("text", "")}
+            for message in messages
+        ]
+        if await self._should_invoke(transcript, str(event.get("ts", ""))):
+            await bus.dispatch(inbound)
+
+    async def _should_invoke(self, transcript: list[dict], newest_ts: str) -> bool:
+        agent = ai.Agent()
+        request = json.dumps({"thread": transcript, "newest_ts": newest_ts}, ensure_ascii=False)
+        async with agent.run(
+            model(),
+            [ai.system_message(THREAD_REPLY_SYSTEM), ai.user_message(request)],
+            output_type=ThreadReplyDecision,
+            params=ai.InferenceRequestParams(
+                sampling={ai.TemperatureSamplerParams: ai.TemperatureSamplerParams(temperature=0)},
+                output=ai.OutputParams(max_tokens=20),
+            ),
+        ) as result:
+            async for _ in result:
+                pass
+            return result.output.invoke
 
     async def on_event(self, event: channels.Event, state: dict) -> None:
         if event.type == channels.protocol.TURN_STARTED:
