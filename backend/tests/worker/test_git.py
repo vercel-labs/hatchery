@@ -84,10 +84,18 @@ def test_sign_request_preserves_chain_and_omits_app_author():
         git.Commit("a", "tree", ("base",), "first", "A", "a@example.com"),
         git.Commit("b", "tree2", ("a",), "second", git.GITHUB_BOT_NAME, git.GITHUB_BOT_EMAIL),
     ]
-    request = git.sign_request(commits, "acme", "app", base_ref="origin/main", env={"GIT_CONFIG_COUNT": "1", "PATH": "x"})
+    request = git.sign_request(
+        commits,
+        "acme",
+        "app",
+        base_oid="a" * 40,
+        branch="hatchery/sign-1",
+        env={"GIT_CONFIG_COUNT": "1", "PATH": "x"},
+    )
     assert request["commits"][0]["original_author"]["email"] == "a@example.com"
     assert "original_author" not in request["commits"][1]
-    assert request["base_ref"] == "origin/main"
+    assert request["base_oid"] == "a" * 40
+    assert request["branch"] == "hatchery/sign-1"
     assert request["env"] == {"PATH": "x"}
     assert git.first_unsigned_commit([git.Commit("a", "t", (), "m", git.GITHUB_BOT_NAME, git.GITHUB_BOT_EMAIL)]) == -1
 

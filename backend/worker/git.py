@@ -321,7 +321,15 @@ def first_unsigned_commit(commits: list[Commit | dict]) -> int:
     return -1
 
 
-def sign_request(commits: list[Commit | dict], owner: str, repo: str, *, base_ref: str = "", env=None) -> dict:
+def sign_request(
+    commits: list[Commit | dict],
+    owner: str,
+    repo: str,
+    *,
+    base_oid: str = "",
+    branch: str = "",
+    env=None,
+) -> dict:
     items = []
     for value in commits:
         commit = value if isinstance(value, Commit) else Commit(**value)
@@ -329,9 +337,12 @@ def sign_request(commits: list[Commit | dict], owner: str, repo: str, *, base_re
         if commit.committer_name and commit.committer_email and not is_signed_by_app(commit):
             item["original_author"] = {"name": commit.committer_name, "email": commit.committer_email}
         items.append(item)
-    request = {"repo": {"owner": owner, "name": repo}, "commits": items}
-    if base_ref:
-        request["base_ref"] = base_ref
+    request = {
+        "repo": {"owner": owner, "name": repo},
+        "base_oid": base_oid,
+        "branch": branch,
+        "commits": items,
+    }
     if env is not None:
         request["env"] = scrub_git_config_env(env)
     return request
@@ -443,19 +454,22 @@ def _commit_chain(repo_dir: str, env: dict[str, str]) -> tuple[str, list[Commit]
 
 
 def _sign_chain(repo_dir: str, env: dict[str, str]) -> None:
-    """Upload commit objects, ask the daemon to recreate them, and adopt the signed tip."""
-    _, commits = _commit_chain(repo_dir, env)
+    """Ask GitHub to replay commits onto a temporary, automatically signed branch."""
+    base, commits = _commit_chain(repo_dir, env)
     first = first_unsigned_commit(commits)
     if first < 0:
         return
     commits = commits[first:]
+    base = commits[0].parents[0] if commits[0].parents else base
     owner, repo = origin_owner_repo(repo_dir)
-    head = commits[-1].sha
-    temporary = f"refs/hatchery/sign-{uuid.uuid4().hex}"
+    suffix = uuid.uuid4().hex
+    branch = f"hatchery/sign-{suffix}"
+    source_branch = f"hatchery/source-{suffix}"
     remote = f"https://github.com/{owner}/{repo}.git"
-    _git(repo_dir, env, "push", remote, f"{head}:{temporary}")
+    _git(repo_dir, env, "push", remote, f"{base}:refs/heads/{branch}")
+    _git(repo_dir, env, "push", remote, f"{commits[-1].sha}:refs/heads/{source_branch}")
     try:
-        request = sign_request(commits, owner, repo)
+        request = sign_request(commits, owner, repo, base_oid=base, branch=branch)
         url = os.environ.get("HATCHERY_SIGN_URL", "http://127.0.0.1:8787/sign-commits")
         body = json.dumps(request).encode()
         with urllib.request.urlopen(urllib.request.Request(url, data=body, headers={"content-type": "application/json"}), timeout=300) as response:
@@ -467,8 +481,19 @@ def _sign_chain(repo_dir: str, env: dict[str, str]) -> None:
         _git(repo_dir, env, "reset", "--hard", signed[-1])
     finally:
         subprocess.run(
-            ["/usr/bin/git", "-C", repo_dir, "push", remote, f":{temporary}"],
-            env=env, text=True, capture_output=True, check=False,
+            [
+                "/usr/bin/git",
+                "-C",
+                repo_dir,
+                "push",
+                remote,
+                f":refs/heads/{branch}",
+                f":refs/heads/{source_branch}",
+            ],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
         )
 
 
