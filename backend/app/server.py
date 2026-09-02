@@ -1036,9 +1036,13 @@ async def complete_signing(event: worker_protocol.Event) -> None:
         requested = f"{repo.get('owner', '')}/{repo.get('name', '')}"
         if requested not in record.spec.repos:
             error = "repository is not attached to this worker"
+        elif not record.user_id:
+            error = "commit signing requires a connected GitHub user"
         else:
             try:
-                signed = await signing.sign_commits(os.environ["GITHUB_CONNECTOR"], body)
+                signed = await signing.sign_commits(
+                    os.environ["GITHUB_CONNECTOR"], body
+                )
             except Exception as caught:
                 error = str(caught)
     await vercel.queue.send(

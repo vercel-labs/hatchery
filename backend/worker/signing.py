@@ -7,9 +7,6 @@ from vercel import connect
 
 
 async def sign_commits(connector: str, request: dict) -> list[str]:
-    token = await connect.get_token(
-        connector, subject=connect.ConnectAppTokenSubject()
-    )
     repo = request.get("repo") or {}
     owner = str(repo.get("owner") or "")
     name = str(repo.get("name") or "")
@@ -17,9 +14,18 @@ async def sign_commits(connector: str, request: dict) -> list[str]:
         r"[A-Za-z0-9_.-]+", name
     ):
         raise ValueError("invalid GitHub repository")
+    token = await connect.get_token_response(
+        connector,
+        subject=connect.ConnectAppTokenSubject(),
+        authorization_details=[
+            connect.ConnectGitHubAppInstallationAuthorizationDetail(
+                org=owner, repositories=[name]
+            )
+        ],
+    )
     signed: list[str] = []
     headers = {
-        "authorization": f"Bearer {token}",
+        "authorization": f"Bearer {token.token}",
         "accept": "application/vnd.github+json",
         "x-github-api-version": "2022-11-28",
     }
@@ -49,6 +55,12 @@ async def sign_commits(connector: str, request: dict) -> list[str]:
             response = await client.post(
                 f"/repos/{owner}/{name}/git/commits", json=body
             )
-            response.raise_for_status()
+            if response.is_error:
+                detail = response.text[:500]
+                accepted = response.headers.get("x-accepted-github-permissions", "")
+                suffix = f"; accepted permissions: {accepted}" if accepted else ""
+                raise RuntimeError(
+                    f"GitHub create commit failed ({response.status_code}): {detail}{suffix}"
+                )
             signed.append(str(response.json()["sha"]))
     return signed
