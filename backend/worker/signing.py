@@ -1,6 +1,5 @@
 """Backend-only GitHub-signed commit replay for sandbox workers."""
 
-import base64
 import logging
 import re
 
@@ -51,7 +50,6 @@ async def sign_commits(
         )
         raise
     signed: list[str] = []
-    source_parent = expected
     headers = {
         "authorization": f"Bearer {token.token}",
         "accept": "application/vnd.github+json",
@@ -59,38 +57,15 @@ async def sign_commits(
     }
     async with httpx.AsyncClient(headers=headers, timeout=60) as client:
         for commit in request.get("commits") or []:
-            original = str(commit.get("sha") or "")
-            diff = await client.get(
-                f"https://api.github.com/repos/{owner}/{name}/compare/{source_parent}...{original}",
-                headers={"accept": "application/vnd.github.raw+json"},
-            )
-            if diff.is_error:
-                raise RuntimeError(
-                    f"GitHub compare failed ({diff.status_code}): {diff.text[:500]}"
-                )
-            additions = []
-            deletions = []
-            for file in diff.json().get("files") or []:
-                path = str(file.get("filename") or "")
-                status = str(file.get("status") or "")
-                if status in ("removed", "renamed"):
-                    deletions.append({"path": str(file.get("previous_filename") or path)})
-                if status != "removed":
-                    content = await client.get(
-                        f"https://api.github.com/repos/{owner}/{name}/contents/{path}",
-                        params={"ref": original},
-                        headers={"accept": "application/vnd.github.raw+json"},
-                    )
-                    if content.is_error:
-                        raise RuntimeError(
-                            f"GitHub content read failed ({content.status_code}): {content.text[:500]}"
-                        )
-                    additions.append(
-                        {
-                            "path": path,
-                            "contents": base64.b64encode(content.content).decode(),
-                        }
-                    )
+            changes = commit.get("file_changes") or {}
+            additions = changes.get("additions") or []
+            deletions = changes.get("deletions") or []
+            if not additions and not deletions:
+                raise ValueError("commit signing requires local file changes")
+            for item in [*additions, *deletions]:
+                path = str(item.get("path") or "")
+                if not path or path.startswith("/") or ".." in path.split("/"):
+                    raise ValueError("invalid commit signing path")
             message = str(commit.get("message") or "")
             headline, separator, body = message.partition("\n")
             author = commit.get("original_author")
@@ -131,7 +106,6 @@ async def sign_commits(
             created = payload["data"]["createCommitOnBranch"]["commit"]
             if not (created.get("signature") or {}).get("isValid"):
                 raise RuntimeError("GitHub created a commit without a valid signature")
-            source_parent = original
             expected = str(created["oid"])
             signed.append(expected)
     return signed

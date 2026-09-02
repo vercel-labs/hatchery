@@ -100,6 +100,97 @@ def test_sign_request_preserves_chain_and_omits_app_author():
     assert git.first_unsigned_commit([git.Commit("a", "t", (), "m", git.GITHUB_BOT_NAME, git.GITHUB_BOT_EMAIL)]) == -1
 
 
+def test_commit_changes_are_read_locally_without_uploading_unsigned_commit(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "a@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "commit.gpgsign", "false"],
+        check=True,
+    )
+    (repo / "old.txt").write_text("old\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "base"], check=True)
+    base = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    (repo / "old.txt").unlink()
+    (repo / "new.txt").write_bytes(b"new\x00content")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "change"], check=True)
+    head = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+
+    assert git._commit_changes(str(repo), dict(__import__("os").environ), base, head) == {
+        "additions": [
+            {
+                "path": "new.txt",
+                "contents": __import__("base64").b64encode(b"new\x00content").decode(),
+            }
+        ],
+        "deletions": [{"path": "old.txt"}],
+    }
+
+
+def test_sign_chain_sends_local_changes_without_unsigned_source_ref(monkeypatch):
+    commit = git.Commit(
+        "b" * 40,
+        "tree",
+        ("a" * 40,),
+        "change",
+        "A",
+        "a@example.com",
+    )
+    monkeypatch.setattr(git, "_commit_chain", lambda *_: ("a" * 40, [commit]))
+    monkeypatch.setattr(git, "origin_owner_repo", lambda *_: ("acme", "app"))
+    monkeypatch.setattr(
+        git,
+        "_commit_changes",
+        lambda *_: {"additions": [{"path": "new.txt", "contents": "bmV3"}], "deletions": []},
+    )
+    calls = []
+
+    def run_git(_repo, _env, *args):
+        calls.append(args)
+        return ""
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return json.dumps({"signed_shas": ["c" * 40]}).encode()
+
+    requests = []
+
+    def urlopen(request, timeout):
+        requests.append((json.loads(request.data), timeout))
+        return Response()
+
+    monkeypatch.setattr(git, "_git", run_git)
+    monkeypatch.setattr(git.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(git.subprocess, "run", lambda *args, **kwargs: completed())
+
+    git._sign_chain("repo", {})
+
+    assert calls[0][:3] == (
+        "push",
+        "https://github.com/acme/app.git",
+        next(arg for arg in calls[0] if arg.startswith("a" * 40 + ":refs/heads/hatchery/sign-")),
+    )
+    assert not any("source-" in arg for call in calls for arg in call)
+    assert requests[0][0]["commits"][0]["file_changes"]["additions"][0]["path"] == "new.txt"
+    assert calls[-2:] == [
+        ("fetch", "https://github.com/acme/app.git", "c" * 40),
+        ("reset", "--hard", "c" * 40),
+    ]
+
+
 def test_origin_parser_accepts_https_and_ssh():
     assert git.origin_owner_repo(remote="https://github.com/acme/app.git") == ("acme", "app")
     assert git.origin_owner_repo(remote="git@github.com:acme/app.git") == ("acme", "app")

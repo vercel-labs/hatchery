@@ -453,6 +453,58 @@ def _commit_chain(repo_dir: str, env: dict[str, str]) -> tuple[str, list[Commit]
     return base, commits
 
 
+def _commit_changes(repo_dir: str, env: dict[str, str], parent: str, commit: str) -> dict:
+    names = subprocess.run(
+        [
+            "/usr/bin/git",
+            "-C",
+            repo_dir,
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "--no-renames",
+            "-r",
+            "-z",
+            parent,
+            commit,
+        ],
+        env=env,
+        capture_output=True,
+        check=True,
+    ).stdout.split(b"\0")
+    additions = []
+    deletions = []
+    for raw_path in names:
+        if not raw_path:
+            continue
+        path = raw_path.decode("utf-8")
+        old = _git(repo_dir, env, "ls-tree", parent, "--", path).split()
+        new = _git(repo_dir, env, "ls-tree", commit, "--", path).split()
+        old_mode = old[0] if old else ""
+        new_mode = new[0] if new else ""
+        if old_mode not in ("", "100644", "100755") or new_mode not in (
+            "",
+            "100644",
+            "100755",
+        ):
+            raise RuntimeError(f"GitHub signing does not support the Git mode for {path}")
+        if old_mode != new_mode and "100755" in (old_mode, new_mode):
+            raise RuntimeError(f"GitHub signing does not support executable mode changes for {path}")
+        if not new:
+            deletions.append({"path": path})
+            continue
+        content = subprocess.run(
+            ["/usr/bin/git", "-C", repo_dir, "show", f"{commit}:{path}"],
+            env=env,
+            capture_output=True,
+            check=True,
+        ).stdout
+        additions.append(
+            {"path": path, "contents": base64.b64encode(content).decode()}
+        )
+    return {"additions": additions, "deletions": deletions}
+
+
 def _sign_chain(repo_dir: str, env: dict[str, str]) -> None:
     """Ask GitHub to replay commits onto a temporary, automatically signed branch."""
     base, commits = _commit_chain(repo_dir, env)
@@ -462,14 +514,17 @@ def _sign_chain(repo_dir: str, env: dict[str, str]) -> None:
     commits = commits[first:]
     base = commits[0].parents[0] if commits[0].parents else base
     owner, repo = origin_owner_repo(repo_dir)
-    suffix = uuid.uuid4().hex
-    branch = f"hatchery/sign-{suffix}"
-    source_branch = f"hatchery/source-{suffix}"
+    branch = f"hatchery/sign-{uuid.uuid4().hex}"
     remote = f"https://github.com/{owner}/{repo}.git"
     _git(repo_dir, env, "push", remote, f"{base}:refs/heads/{branch}")
-    _git(repo_dir, env, "push", remote, f"{commits[-1].sha}:refs/heads/{source_branch}")
     try:
         request = sign_request(commits, owner, repo, base_oid=base, branch=branch)
+        parent = base
+        for item in request["commits"]:
+            item["file_changes"] = _commit_changes(
+                repo_dir, env, parent, str(item["sha"])
+            )
+            parent = str(item["sha"])
         url = os.environ.get("HATCHERY_SIGN_URL", "http://127.0.0.1:8787/sign-commits")
         body = json.dumps(request).encode()
         with urllib.request.urlopen(urllib.request.Request(url, data=body, headers={"content-type": "application/json"}), timeout=300) as response:
@@ -488,7 +543,6 @@ def _sign_chain(repo_dir: str, env: dict[str, str]) -> None:
                 "push",
                 remote,
                 f":refs/heads/{branch}",
-                f":refs/heads/{source_branch}",
             ],
             env=env,
             text=True,

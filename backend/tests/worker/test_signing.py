@@ -1,4 +1,5 @@
 import base64
+import json
 
 import httpx
 import pytest
@@ -6,7 +7,7 @@ import pytest
 from worker import signing
 
 
-async def test_sign_commits_uses_github_signed_graphql_mutation(monkeypatch):
+async def test_sign_commits_uses_local_changes_with_github_signed_graphql(monkeypatch):
     seen = {}
 
     async def token(connector, **kwargs):
@@ -14,24 +15,14 @@ async def test_sign_commits_uses_github_signed_graphql_mutation(monkeypatch):
         return type("Token", (), {"token": "app-token"})()
 
     def responder(request):
-        assert request.headers["authorization"].startswith("Bearer ")
-        if request.url.path.endswith("/compare/" + "a" * 40 + "..." + "b" * 40):
-            return httpx.Response(
-                200,
-                json={
-                    "files": [
-                        {"filename": "new.txt", "status": "added"},
-                        {"filename": "old.txt", "status": "removed"},
-                    ]
-                },
-            )
-        if request.url.path.endswith("/contents/new.txt"):
-            return httpx.Response(200, content=b"new content")
         assert request.url.path == "/graphql"
-        body = __import__("json").loads(request.read())
-        commit = body["variables"]["input"]
+        assert request.headers["authorization"].startswith("Bearer ")
+        commit = json.loads(request.read())["variables"]["input"]
         assert commit["branch"]["branchName"] == "hatchery/sign-1"
         assert commit["expectedHeadOid"] == "a" * 40
+        assert commit["message"]["body"].endswith(
+            "Co-Authored-By: A <a@example.com>"
+        )
         assert commit["fileChanges"] == {
             "additions": [
                 {
@@ -70,8 +61,16 @@ async def test_sign_commits_uses_github_signed_graphql_mutation(monkeypatch):
                 {
                     "sha": "b" * 40,
                     "message": "change",
-                    "tree_sha": "tree",
-                    "parents": ["a" * 40],
+                    "original_author": {"name": "A", "email": "a@example.com"},
+                    "file_changes": {
+                        "additions": [
+                            {
+                                "path": "new.txt",
+                                "contents": base64.b64encode(b"new content").decode(),
+                            }
+                        ],
+                        "deletions": [{"path": "old.txt"}],
+                    },
                 }
             ],
         },
@@ -111,9 +110,7 @@ async def test_sign_commits_rejects_unsigned_graphql_result(monkeypatch):
     async def token(_connector, **_kwargs):
         return type("Token", (), {"token": "app-token"})()
 
-    def responder(request):
-        if "/compare/" in request.url.path:
-            return httpx.Response(200, json={"files": []})
+    def responder(_request):
         return httpx.Response(
             200,
             json={
@@ -140,6 +137,18 @@ async def test_sign_commits_rejects_unsigned_graphql_result(monkeypatch):
                 "repo": {"owner": "acme", "name": "app"},
                 "branch": "hatchery/sign-1",
                 "base_oid": "a" * 40,
-                "commits": [{"sha": "b" * 40, "message": "change"}],
+                "commits": [
+                    {
+                        "message": "change",
+                        "file_changes": {
+                            "additions": [
+                                {
+                                    "path": "new.txt",
+                                    "contents": base64.b64encode(b"new").decode(),
+                                }
+                            ]
+                        },
+                    }
+                ],
             },
         )
