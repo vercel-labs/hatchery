@@ -1,0 +1,35 @@
+# Sandbox
+
+- Hatchery runs coding environments as persistent Vercel Sandboxes.
+- Each sandbox has a stable Hatchery worker record stored in Postgres, or in local JSON files when `DATABASE_URL` is absent.
+- Sandbox creation can clone a primary GitHub repository, clone additional repositories, select a branch or commit, run a setup script, expose ports, and set CPU and memory limits.
+- Hatchery stores the sandbox name, declared routes, daemon token, specification, status, and timestamps.
+- Each sandbox exposes its declared application ports through Vercel Sandbox routes.
+- Internal daemon and SSH ports are declared with the application ports when the sandbox is created.
+- A small Python daemon runs inside each sandbox and owns health checks, Queue access, process supervision, terminal sessions, SSH, and restart recovery.
+- The daemon authenticates control traffic with a per-sandbox bearer token.
+- Hatchery checks the daemon version and Queue connection before treating the sandbox as ready.
+- Hatchery resumes a stopped sandbox and repairs or replaces its daemon before sending control commands.
+- The daemon persists command sequence numbers, event sequence numbers, and active process metadata in `/opt/hatchery/daemon-state.json`.
+- Control commands use one Vercel Queue topic per sandbox.
+- Sandbox events use one shared Vercel Queue topic consumed by the backend.
+- Queue messages use stable IDs, sequence numbers, and idempotency keys because delivery is at least once.
+- Hosted Queue access uses Vercel deployment OIDC.
+- Local development exposes the `vercel dev` Queue broker through a public reverse proxy while keeping the same Queue protocol.
+- Interactive processes run in real Linux PTYs with input, output, resize, signals, exit status, bounded replay, and byte offsets for reconnects.
+- Multiple viewers can attach to the same PTY without owning or stopping its process.
+- The frontend reaches PTYs through a backend WebSocket bridge to the authenticated daemon route.
+- Manual shell terminals run `/bin/bash -l` in the sandbox workspace.
+- SSH runs through an in-sandbox AsyncSSH server exposed by an authenticated reconnectable WebSocket transport.
+- SSH supports interactive PTYs, non-PTY execution, exit status, and forwarding to loopback services only.
+- Hatchery installs and configures `fx` inside each sandbox with private settings, yolo acknowledgement, model selection, AI Gateway access, and resume support.
+- Repository instructions remain outside Git worktrees, while non-repository workspaces can receive an `AGENTS.md` file.
+- Git and `gh` run through Hatchery shims installed ahead of the system binaries on `PATH`.
+- GitHub credentials are injected by Vercel Sandbox network policy and are removed from agent process environments.
+- GitHub authentication uses an explicit user token when supplied and otherwise uses the configured Vercel Connect App token.
+- SSH GitHub remotes are rewritten to authenticated HTTPS remotes.
+- Local commit and tag signing are disabled inside the sandbox.
+- A push rejected for missing verified signatures invokes the daemon signing proxy, recreates the commit chain through the GitHub API, and retries the push.
+- Successful `gh pr create` calls report the pull request URL to the daemon.
+- Sandbox filesystem snapshots can be created and restored through the Vercel Sandbox API.
+- Restoring a snapshot reapplies network policy, Git configuration, routes, and daemon health checks.
