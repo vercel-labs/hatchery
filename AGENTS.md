@@ -31,21 +31,8 @@ do not overcomplicate. this is a test application, it should prioritize clarity.
 slack/github webhooks only reach deployments (vercel connect); point them at
 the current branch with `scripts/triggers.sh`.
 
-## store
+## how to verify and debug
 
-everything durable lives in backend/store/ (neon postgres via DATABASE_URL,
-jsonl/json files under backend/.data without it — tests always use files).
-the primitive is an append-only stream keyed by (stream_id, namespace),
-seal's shape: a chat's transcript is its (chat_id, "messages") stream (one
-model message per event, source of truth), its devbox record the tail of
-(chat_id, "worker"). chats/spaces/bindings/dedupe are rows next to it.
-schema is idempotent DDL, created on startup — no migrations.
+1. use `docs/use-agent-browser.md` to access live deployments and run real agent sessions.
+2. for completed runs, inspect telemetry traces in `docs/use-braintrust.md` to understand exactly what happened during the run.
 
-## worker layer
-
-the previous DevBox integration has been removed. sandbox and subagent control
-uses Vercel Sandbox and Queues; terminal traffic uses the authenticated daemon
-route through the backend websocket bridge. see `migration.md`.
-
-`.reference/api` is specification material for retained behavior only. excluded
-DevBox subsystems must not be copied into hatchery.
