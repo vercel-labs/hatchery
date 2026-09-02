@@ -1,6 +1,6 @@
 # hatchery
 
-See `AGENTS.md` for layout and development commands.
+See `AGENTS.md` for layout and development commands. This repository is used for authentication testing.
 
 The worker layer always uses Vercel Sandbox and Queues. Local development uses
 Vercel's local Queue broker through the same daemon, topics, protocol, and
