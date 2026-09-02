@@ -335,6 +335,86 @@ async def test_github_token_uses_saved_installation(monkeypatch):
     assert seen["installation_id"] == "inst_1"
 
 
+async def test_github_installation_uses_saved_owner_mapping(monkeypatch):
+    async def identity(_user_id):
+        return {"installations": {"acme": "inst_acme"}}
+
+    async def token(*_args, **_kwargs):
+        raise AssertionError("cached installation should not request a token")
+
+    monkeypatch.setattr(auth, "github_identity", identity)
+    monkeypatch.setattr(auth.connect, "get_token_response", token)
+
+    assert await auth.github_installation_id("user_1", "Acme", "app") == "inst_acme"
+
+
+async def test_github_installation_resolves_repo_and_saves_owner_mapping(monkeypatch):
+    seen = {}
+
+    async def identity(_user_id):
+        return {"id": "42", "login": "octocat"}
+
+    async def token(connector, **kwargs):
+        seen.update(connector=connector, **kwargs)
+        return type("Token", (), {"installation_id": "inst_acme"})()
+
+    async def save(user_id, owner, installation_id):
+        seen.update(saved=(user_id, owner, installation_id))
+
+    monkeypatch.setenv("GITHUB_CONNECTOR", "github/hatchery")
+    monkeypatch.setattr(auth, "github_identity", identity)
+    monkeypatch.setattr(auth.connect, "get_token_response", token)
+    monkeypatch.setattr(auth.auth_store, "save_github_installation", save)
+
+    assert await auth.github_installation_id("user_1", "Acme", "app") == "inst_acme"
+    assert seen["connector"] == "github/hatchery"
+    assert seen["subject"] == auth.connect.ConnectUserTokenSubject(id="user_1")
+    assert seen["authorization_details"] == [
+        auth.connect.ConnectGitHubAppInstallationAuthorizationDetail(
+            org="Acme", repositories=["app"]
+        )
+    ]
+    assert seen["saved"] == ("user_1", "acme", "inst_acme")
+
+
+async def test_github_installation_logs_resolution_failure(monkeypatch, caplog):
+    async def identity(_user_id):
+        return {"id": "42"}
+
+    async def token(*_args, **_kwargs):
+        raise RuntimeError("connect failed")
+
+    monkeypatch.setenv("GITHUB_CONNECTOR", "github/hatchery")
+    monkeypatch.setattr(auth, "github_identity", identity)
+    monkeypatch.setattr(auth.connect, "get_token_response", token)
+
+    with caplog.at_level("ERROR", logger="auth"):
+        with pytest.raises(RuntimeError, match="connect failed"):
+            await auth.github_installation_id("user_1", "acme", "app")
+
+    assert "GitHub installation resolution failed" in caplog.text
+
+
+async def test_github_token_resolves_installation_for_repo(monkeypatch):
+    seen = {}
+
+    async def installation(user_id, owner, repo):
+        seen["resolved"] = (user_id, owner, repo)
+        return "inst_acme"
+
+    async def token(connector, **kwargs):
+        seen.update(connector=connector, **kwargs)
+        return "private-token"
+
+    monkeypatch.setenv("GITHUB_CONNECTOR", "github/hatchery")
+    monkeypatch.setattr(auth, "github_installation_id", installation)
+    monkeypatch.setattr(auth.connect, "get_token", token)
+
+    assert await auth.github_token("user_1", repo="acme/app") == "private-token"
+    assert seen["resolved"] == ("user_1", "acme", "app")
+    assert seen["installation_id"] == "inst_acme"
+
+
 async def test_github_repo_warning_reports_missing_organization_installation(monkeypatch):
     async def identity(_user_id):
         return {"installation_id": "inst_personal"}

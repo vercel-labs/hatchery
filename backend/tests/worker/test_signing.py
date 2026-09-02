@@ -4,7 +4,7 @@ import pytest
 from worker import signing
 
 
-async def test_sign_commits_resolves_installation_for_repository(monkeypatch):
+async def test_sign_commits_uses_explicit_installation(monkeypatch):
     seen = {}
 
     async def token(connector, **kwargs):
@@ -26,6 +26,7 @@ async def test_sign_commits_resolves_installation_for_repository(monkeypatch):
 
     result = await signing.sign_commits(
         "github/hatchery",
+        "inst_acme",
         {
             "repo": {"owner": "acme", "name": "app"},
             "commits": [
@@ -42,12 +43,25 @@ async def test_sign_commits_resolves_installation_for_repository(monkeypatch):
     assert seen == {
         "connector": "github/hatchery",
         "subject": signing.connect.ConnectAppTokenSubject(),
-        "authorization_details": [
-            signing.connect.ConnectGitHubAppInstallationAuthorizationDetail(
-                org="acme", repositories=["app"]
-            )
-        ],
+        "installation_id": "inst_acme",
     }
+
+
+async def test_sign_commits_logs_app_token_failure(monkeypatch, caplog):
+    async def token(_connector, **_kwargs):
+        raise RuntimeError("mint failed")
+
+    monkeypatch.setattr(signing.connect, "get_token_response", token)
+
+    with caplog.at_level("ERROR", logger="worker.signing"):
+        with pytest.raises(RuntimeError, match="mint failed"):
+            await signing.sign_commits(
+                "github/hatchery",
+                "inst_acme",
+                {"repo": {"owner": "acme", "name": "app"}, "commits": []},
+            )
+
+    assert "GitHub app token mint failed" in caplog.text
 
 
 async def test_sign_commits_surfaces_github_permission_detail(monkeypatch):
@@ -71,6 +85,7 @@ async def test_sign_commits_surfaces_github_permission_detail(monkeypatch):
     with pytest.raises(RuntimeError, match="contents=write"):
         await signing.sign_commits(
             "github/hatchery",
+            "inst_acme",
             {
                 "repo": {"owner": "acme", "name": "app"},
                 "commits": [

@@ -171,8 +171,13 @@ async def test_worker_signing_returns_result_over_worker_queue(monkeypatch):
     async def get(_worker_id):
         return record
 
-    async def sign(connector, body):
+    async def installation(user_id, owner, repo):
+        assert (user_id, owner, repo) == ("user_test", "acme", "app")
+        return "inst_acme"
+
+    async def sign(connector, installation_id, body):
         assert connector == "github/hatchery"
+        assert installation_id == "inst_acme"
         assert body["repo"] == {"owner": "acme", "name": "app"}
         return ["signed"]
 
@@ -181,6 +186,7 @@ async def test_worker_signing_returns_result_over_worker_queue(monkeypatch):
 
     monkeypatch.setenv("GITHUB_CONNECTOR", "github/hatchery")
     monkeypatch.setattr(server.worker, "get", get)
+    monkeypatch.setattr(server.auth, "github_installation_id", installation)
     monkeypatch.setattr(server.signing, "sign_commits", sign)
     monkeypatch.setattr(server.vercel.queue, "send", send)
     body = {"repo": {"owner": "acme", "name": "app"}, "commits": []}

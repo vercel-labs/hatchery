@@ -1,12 +1,18 @@
 """Backend-only GitHub App commit signing for sandbox workers."""
 
+import logging
 import re
 
 import httpx
 from vercel import connect
 
 
-async def sign_commits(connector: str, request: dict) -> list[str]:
+log = logging.getLogger("worker.signing")
+
+
+async def sign_commits(
+    connector: str, installation_id: str, request: dict
+) -> list[str]:
     repo = request.get("repo") or {}
     owner = str(repo.get("owner") or "")
     name = str(repo.get("name") or "")
@@ -14,15 +20,22 @@ async def sign_commits(connector: str, request: dict) -> list[str]:
         r"[A-Za-z0-9_.-]+", name
     ):
         raise ValueError("invalid GitHub repository")
-    token = await connect.get_token_response(
-        connector,
-        subject=connect.ConnectAppTokenSubject(),
-        authorization_details=[
-            connect.ConnectGitHubAppInstallationAuthorizationDetail(
-                org=owner, repositories=[name]
-            )
-        ],
-    )
+    try:
+        token = await connect.get_token_response(
+            connector,
+            subject=connect.ConnectAppTokenSubject(),
+            installation_id=installation_id,
+        )
+    except Exception:
+        log.exception(
+            "GitHub app token mint failed",
+            extra={
+                "github_owner": owner,
+                "github_repo": name,
+                "installation_id": installation_id,
+            },
+        )
+        raise
     signed: list[str] = []
     headers = {
         "authorization": f"Bearer {token.token}",
@@ -59,6 +72,17 @@ async def sign_commits(connector: str, request: dict) -> list[str]:
                 detail = response.text[:500]
                 accepted = response.headers.get("x-accepted-github-permissions", "")
                 suffix = f"; accepted permissions: {accepted}" if accepted else ""
+                log.error(
+                    "GitHub create signed commit failed",
+                    extra={
+                        "github_owner": owner,
+                        "github_repo": name,
+                        "installation_id": installation_id,
+                        "status_code": response.status_code,
+                        "accepted_permissions": accepted,
+                        "commit_index": len(signed),
+                    },
+                )
                 raise RuntimeError(
                     f"GitHub create commit failed ({response.status_code}): {detail}{suffix}"
                 )

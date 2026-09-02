@@ -225,12 +225,14 @@ async def finish_github(user: dict) -> fastapi.responses.RedirectResponse:
     if response.status_code >= 300:
         raise fastapi.HTTPException(502, "GitHub identity lookup failed")
     profile = response.json()
+    previous = github_connection(user) or {}
     connection = {
         "id": str(profile["id"]),
         "login": profile["login"],
         "name": profile.get("name"),
         "avatar_url": profile.get("avatar_url"),
         "installation_id": token.installation_id,
+        "installations": previous.get("installations", {}),
         "connected_at": datetime.datetime.now(datetime.UTC).isoformat(),
     }
     await auth_store.save_github_connection(user["id"], connection)
@@ -239,14 +241,28 @@ async def finish_github(user: dict) -> fastapi.responses.RedirectResponse:
 
 async def disconnect_github(user: dict) -> None:
     connection = user.get("github") if isinstance(user.get("github"), dict) else {}
-    try:
-        await connect.revoke_token(
-            _github_connector(),
-            subject=_github_subject(user),
-            installation_id=connection.get("installation_id"),
-        )
-    except (connect.UserAuthorizationRequiredError, connect.NoValidTokenError):
-        pass
+    mapped = connection.get("installations")
+    installation_ids = {
+        str(value)
+        for value in (mapped.values() if isinstance(mapped, dict) else ())
+        if value
+    }
+    if connection.get("installation_id"):
+        installation_ids.add(str(connection["installation_id"]))
+    for installation_id in installation_ids or {""}:
+        try:
+            await connect.revoke_token(
+                _github_connector(),
+                subject=_github_subject(user),
+                installation_id=installation_id or None,
+            )
+        except (connect.UserAuthorizationRequiredError, connect.NoValidTokenError):
+            pass
+        except Exception:
+            log.exception(
+                "GitHub token revocation failed",
+                extra={"user_id": user["id"], "installation_id": installation_id},
+            )
     await auth_store.delete_github_connection(user["id"])
 
 
@@ -255,8 +271,62 @@ async def github_identity(user_id: str) -> dict | None:
     return github_connection(user or {})
 
 
-async def github_token(user_id: str, installation_id: str | None = None) -> str:
-    if installation_id is None:
+async def github_installation_id(user_id: str, owner: str, repo: str) -> str:
+    connection = await github_identity(user_id)
+    if connection is None:
+        raise RuntimeError("connect GitHub before accessing repositories")
+    key = owner.lower()
+    installations = connection.get("installations")
+    if isinstance(installations, dict) and installations.get(key):
+        return str(installations[key])
+    try:
+        token = await connect.get_token_response(
+            _github_connector(),
+            subject=connect.ConnectUserTokenSubject(id=user_id),
+            authorization_details=[
+                connect.ConnectGitHubAppInstallationAuthorizationDetail(
+                    org=owner, repositories=[repo]
+                )
+            ],
+        )
+    except Exception:
+        log.exception(
+            "GitHub installation resolution failed",
+            extra={"user_id": user_id, "github_owner": owner, "github_repo": repo},
+        )
+        raise
+    installation_id = str(token.installation_id or "")
+    if not installation_id:
+        log.error(
+            "GitHub installation resolution returned no installation",
+            extra={"user_id": user_id, "github_owner": owner, "github_repo": repo},
+        )
+        raise RuntimeError(f"Hatchery GitHub app is not installed for {owner}")
+    await auth_store.save_github_installation(user_id, key, installation_id)
+    log.info(
+        "GitHub installation resolved",
+        extra={
+            "user_id": user_id,
+            "github_owner": owner,
+            "github_repo": repo,
+            "installation_id": installation_id,
+        },
+    )
+    return installation_id
+
+
+async def github_token(
+    user_id: str,
+    installation_id: str | None = None,
+    *,
+    repo: str | None = None,
+) -> str:
+    if repo:
+        owner, separator, name = repo.partition("/")
+        if not separator or not owner or not name:
+            raise ValueError("invalid GitHub repository")
+        installation_id = await github_installation_id(user_id, owner, name)
+    elif installation_id is None:
         connection = await github_identity(user_id) or {}
         installation_id = connection.get("installation_id")
     return await connect.get_token(

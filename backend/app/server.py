@@ -1040,11 +1040,25 @@ async def complete_signing(event: worker_protocol.Event) -> None:
             error = "commit signing requires a connected GitHub user"
         else:
             try:
+                installation_id = await auth.github_installation_id(
+                    record.user_id,
+                    str(repo.get("owner") or ""),
+                    str(repo.get("name") or ""),
+                )
                 signed = await signing.sign_commits(
-                    os.environ["GITHUB_CONNECTOR"], body
+                    os.environ["GITHUB_CONNECTOR"], installation_id, body
                 )
             except Exception as caught:
                 error = str(caught)
+                log.exception(
+                    "commit signing failed",
+                    extra={
+                        "worker_id": event.worker_id,
+                        "user_id": record.user_id,
+                        "repo": requested,
+                        "request_id": request_id,
+                    },
+                )
     await vercel.queue.send(
         worker_protocol.command_topic(event.worker_id),
         worker_protocol.command(
