@@ -1,5 +1,7 @@
 # hatchery
 
+<!-- Remote GitHub API authentication test only; no functional changes. -->
+
 See `AGENTS.md` for layout and development commands.
 
 The worker layer always uses Vercel Sandbox and Queues. Local development uses
