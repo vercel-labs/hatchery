@@ -648,6 +648,7 @@ def test_daemon_env_bridges_vercel_dev_queue_through_public_origin(monkeypatch):
         "https://hatchery.vgrok.example/_svc/_queues"
     )
     assert env["VERCEL_REGION"] == "dev1"
+    assert "HATCHERY_SIGN_URL" not in env
     assert "VERCEL_DEPLOYMENT_ID" not in env
 
 

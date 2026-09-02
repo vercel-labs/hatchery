@@ -152,7 +152,7 @@ async def test_vercel_cli_connection_routes(monkeypatch):
     }
 
 
-async def test_worker_signing_requires_worker_token_and_attached_repo(monkeypatch):
+async def test_worker_signing_returns_result_over_worker_queue(monkeypatch):
     record = server.worker.Worker(
         id="wrk_1",
         chat_id="chat_1",
@@ -166,6 +166,7 @@ async def test_worker_signing_requires_worker_token_and_attached_repo(monkeypatc
         created_at="now",
         updated_at="now",
     )
+    sent = {}
 
     async def get(_worker_id):
         return record
@@ -175,27 +176,74 @@ async def test_worker_signing_requires_worker_token_and_attached_repo(monkeypatc
         assert body["repo"] == {"owner": "acme", "name": "app"}
         return ["signed"]
 
+    async def send(topic, message, **kwargs):
+        sent.update(topic=topic, message=message, kwargs=kwargs)
+
     monkeypatch.setenv("GITHUB_CONNECTOR", "github/hatchery")
     monkeypatch.setattr(server.worker, "get", get)
     monkeypatch.setattr(server.signing, "sign_commits", sign)
+    monkeypatch.setattr(server.vercel.queue, "send", send)
     body = {"repo": {"owner": "acme", "name": "app"}, "commits": []}
+    signature = server.hmac.new(
+        b"secret",
+        f"sign_1:{server.json.dumps(body, sort_keys=True, separators=(',', ':'))}".encode(),
+        server.hashlib.sha256,
+    ).hexdigest()
+    await server.worker_event(server.worker_protocol.Event(
+        id="evt_sign",
+        worker_id="wrk_1",
+        task_id="",
+        sequence=0,
+        type="sign.requested",
+        created_at="now",
+        payload={
+            "request_id": "sign_1",
+            "signature": signature,
+            "request": body,
+        },
+    ))
 
-    async with client() as c:
-        denied = await c.post("/api/workers/wrk_1/sign-commits", json=body)
-        signed = await c.post(
-            "/api/workers/wrk_1/sign-commits",
-            json=body,
-            headers={"authorization": "Bearer secret"},
-        )
-        wrong_repo = await c.post(
-            "/api/workers/wrk_1/sign-commits",
-            json={"repo": {"owner": "other", "name": "app"}},
-            headers={"authorization": "Bearer secret"},
-        )
+    assert sent["topic"] == server.worker_protocol.command_topic("wrk_1")
+    assert sent["message"]["type"] == "sign.completed"
+    assert sent["message"]["payload"] == {
+        "request_id": "sign_1", "error": "", "signed_shas": ["signed"]
+    }
+    assert sent["kwargs"]["idempotency_key"] == "cmd_evt_sign"
 
-    assert denied.status_code == 401
-    assert signed.json() == {"signed_shas": ["signed"]}
-    assert wrong_repo.status_code == 403
+
+async def test_worker_signing_rejects_invalid_queue_request(monkeypatch):
+    record = server.worker.Worker(
+        id="wrk_1", chat_id="chat_1", sandbox_name="hatchery-wrk_1",
+        command_topic="topic", title="worker", status="running",
+        spec=server.worker.WorkerSpec(repos=["acme/app"]), daemon_token="secret",
+        created_at="now", updated_at="now",
+    )
+    sent = {}
+
+    async def get(_worker_id):
+        return record
+
+    async def send(_topic, message, **_kwargs):
+        sent.update(message)
+
+    monkeypatch.setattr(server.worker, "get", get)
+    monkeypatch.setattr(server.vercel.queue, "send", send)
+    await server.worker_event(server.worker_protocol.Event(
+        id="evt_sign",
+        worker_id="wrk_1",
+        task_id=None,
+        sequence=0,
+        type="sign.requested",
+        created_at="now",
+        payload={
+            "request_id": "sign_1",
+            "signature": "wrong",
+            "request": {"repo": {"owner": "acme", "name": "app"}},
+        },
+    ))
+
+    assert sent["type"] == "sign.failed"
+    assert sent["payload"]["error"] == "invalid commit signing request"
 
 
 async def test_spaces_seed_default():

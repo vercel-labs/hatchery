@@ -9,6 +9,7 @@ import collections
 import datetime
 import fcntl
 import hashlib
+import hmac
 import http
 import http.server
 import ipaddress
@@ -99,7 +100,8 @@ class Runtime:
         self.fx_home = pathlib.Path(os.environ.get("FX_HOME", pathlib.Path.home() / ".fx"))
         self.instructions = os.environ.get("HATCHERY_AGENT_INSTRUCTIONS", "")
         self.loop: asyncio.AbstractEventLoop | None = None
-        self.sign_commits = None
+        self.sign_requests: dict[str, tuple[threading.Event, dict]] = {}
+        self.sign_requests_lock = threading.Lock()
 
     async def handle(self, raw: dict) -> None:
         """Accept one command only after its process handoff is complete.
@@ -109,13 +111,23 @@ class Runtime:
         the daemon crashed between those two steps.
         """
         task_id = str(raw.get("task_id") or "")
-        if not task_id or raw.get("worker_id") != self.worker_id:
+        if raw.get("worker_id") != self.worker_id:
+            return
+        kind = raw.get("type")
+        if kind in ("sign.completed", "sign.failed"):
+            request_id = str((raw.get("payload") or {}).get("request_id") or "")
+            with self.sign_requests_lock:
+                pending = self.sign_requests.get(request_id)
+                if pending is not None:
+                    pending[1].update(raw.get("payload") or {})
+                    pending[0].set()
+            return
+        if not task_id:
             return
         sequence = int(raw.get("sequence", -1))
         async with self.command_lock:
             if sequence <= self.sequences.get(task_id, -1):
                 return
-            kind = raw.get("type")
             if kind == "task.cancel":
                 session = self.processes.get(task_id)
                 self.cancel_pending_input(session)
@@ -641,6 +653,43 @@ class Runtime:
                 "payload": payload,
             }
         )
+
+    def request_signing(self, request: dict, timeout: float = 300) -> list[str]:
+        if self.loop is None:
+            raise RuntimeError("commit signing is not configured")
+        request_id = f"sign_{uuid.uuid4().hex}"
+        ready = threading.Event()
+        result: dict = {}
+        with self.sign_requests_lock:
+            self.sign_requests[request_id] = (ready, result)
+        try:
+            serialized = json.dumps(request, sort_keys=True, separators=(",", ":"))
+            signature = hmac.new(
+                os.environ.get("HATCHERY_DAEMON_TOKEN", "").encode(),
+                f"{request_id}:{serialized}".encode(),
+                hashlib.sha256,
+            ).hexdigest()
+            future = asyncio.run_coroutine_threadsafe(
+                self._emit(
+                    "",
+                    "sign.requested",
+                    {
+                        "request_id": request_id,
+                        "signature": signature,
+                        "request": request,
+                    },
+                ),
+                self.loop,
+            )
+            future.result(timeout=timeout)
+            if not ready.wait(timeout):
+                raise TimeoutError("commit signing timed out")
+            if error := result.get("error"):
+                raise RuntimeError(str(error))
+            return [str(sha) for sha in result.get("signed_shas") or []]
+        finally:
+            with self.sign_requests_lock:
+                self.sign_requests.pop(request_id, None)
 
     def _save_state(self) -> None:
         if self.state_path is None:
@@ -1209,7 +1258,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     )
                 self._send_json({"ok": True})
                 return
-            if self.runtime is None or self.runtime.sign_commits is None:
+            if self.runtime is None or self.runtime.loop is None:
                 self.send_error(503, "commit signing is not configured")
                 return
             repo = body.get("repo") or {}
@@ -1229,7 +1278,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         ["git", "-C", self.workspace, "cat-file", "-e", f"{sha}^{{commit}}"],
                         capture_output=True, check=True,
                     )
-                signed = self.runtime.sign_commits(body)
+                signed = self.runtime.request_signing(body)
             except Exception as error:
                 self.send_error(502, str(error))
                 return
@@ -1286,29 +1335,6 @@ def source() -> str:
     return pathlib.Path(__file__).read_text(encoding="utf-8")
 
 
-def _sign_commits(request: dict) -> list[str]:
-    import urllib.request
-
-    url = os.environ.get("HATCHERY_SIGN_URL", "")
-    token = os.environ.get("HATCHERY_DAEMON_TOKEN", "")
-    if not url or not token:
-        raise RuntimeError("backend commit signing is not configured")
-    body = json.dumps(request).encode()
-    with urllib.request.urlopen(
-        urllib.request.Request(
-            url,
-            data=body,
-            headers={
-                "authorization": f"Bearer {token}",
-                "content-type": "application/json",
-            },
-        ),
-        timeout=300,
-    ) as response:
-        result = json.load(response)
-    return [str(sha) for sha in result.get("signed_shas") or []]
-
-
 async def poll_commands(queue, runtime: Runtime, worker_id: str, sleep=asyncio.sleep) -> None:
     while True:
         delivered = False
@@ -1362,8 +1388,6 @@ async def run(worker_id: str, workspace: str, port: int, state_path: str) -> Non
         )
 
     runtime = Runtime(worker_id, workspace, publish, state_path)
-    if os.environ.get("HATCHERY_SIGN_URL"):
-        runtime.sign_commits = _sign_commits
     runtime.loop = asyncio.get_running_loop()
     await runtime.recover_active_tasks()
     Handler.workspace = workspace

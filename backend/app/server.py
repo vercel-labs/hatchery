@@ -13,6 +13,8 @@ _StoreHub (dedupe, claim binding, append); no turn runs on inbound yet.
 
 import asyncio
 import contextlib
+import hashlib
+import hmac
 import html
 import json
 import logging
@@ -194,7 +196,6 @@ async def browser_session(request: fastapi.Request, call_next):
         path == "/api/health"
         or path.startswith("/api/auth/")
         or path.startswith("/channels/")
-        or bool(re.fullmatch(r"/api/workers/[^/]+/sign-commits", path))
     )
     user = await auth.current_user(request) if path.startswith("/api/") and not public else None
     if path.startswith("/api/") and not public and user is None:
@@ -329,28 +330,6 @@ async def disconnect_vercel_cli(request: fastapi.Request) -> None:
     if user is None:
         raise fastapi.HTTPException(401, "sign in required")
     await auth.disconnect_vercel_cli(user["id"])
-
-
-@app.post("/api/workers/{worker_id}/sign-commits")
-async def sign_worker_commits(
-    worker_id: str, request: fastapi.Request
-) -> dict:
-    record = await worker.get(worker_id)
-    supplied = request.headers.get("authorization", "").removeprefix("Bearer ")
-    if record is None or not supplied or not secrets.compare_digest(
-        supplied, record.daemon_token
-    ):
-        raise fastapi.HTTPException(401, "invalid worker token")
-    body = await request.json()
-    repo = body.get("repo") or {}
-    requested = f"{repo.get('owner', '')}/{repo.get('name', '')}"
-    if requested not in record.spec.repos:
-        raise fastapi.HTTPException(403, "repository is not attached to this worker")
-    try:
-        signed = await signing.sign_commits(os.environ["GITHUB_CONNECTOR"], body)
-    except (ValueError, httpx.HTTPError) as error:
-        raise fastapi.HTTPException(502, str(error)) from error
-    return {"signed_shas": signed}
 
 
 class SpaceWarning(pydantic.BaseModel):
@@ -1033,6 +1012,53 @@ async def manual_tty(ws: fastapi.WebSocket, chat_id: str, terminal_id: str) -> N
     await _bridge_tty(ws, record, terminal.id, ["/bin/bash", "-l"])
 
 
+async def complete_signing(event: worker_protocol.Event) -> None:
+    request_id = str(event.payload.get("request_id") or "")
+    body = event.payload.get("request") or {}
+    record = await worker.get(event.worker_id)
+    error = ""
+    signed: list[str] = []
+    supplied = str(event.payload.get("signature") or "")
+    serialized = json.dumps(body, sort_keys=True, separators=(",", ":"))
+    expected = (
+        hmac.new(
+            record.daemon_token.encode(),
+            f"{request_id}:{serialized}".encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        if record is not None
+        else ""
+    )
+    if not request_id or not supplied or not secrets.compare_digest(supplied, expected):
+        error = "invalid commit signing request"
+    else:
+        repo = body.get("repo") or {}
+        requested = f"{repo.get('owner', '')}/{repo.get('name', '')}"
+        if requested not in record.spec.repos:
+            error = "repository is not attached to this worker"
+        else:
+            try:
+                signed = await signing.sign_commits(os.environ["GITHUB_CONNECTOR"], body)
+            except Exception as caught:
+                error = str(caught)
+    await vercel.queue.send(
+        worker_protocol.command_topic(event.worker_id),
+        worker_protocol.command(
+            event.worker_id,
+            0,
+            "sign.failed" if error else "sign.completed",
+            payload={
+                "request_id": request_id,
+                "error": error,
+                "signed_shas": signed,
+            },
+            command_id=f"cmd_{event.id}",
+        ).model_dump(mode="json"),
+        idempotency_key=f"cmd_{event.id}",
+        deployment=vercel.queue.ALL_DEPLOYMENTS,
+    )
+
+
 @vercel.queue.subscribe(
     topic=worker_protocol.EVENT_TOPIC,
     consumer_group="hatchery-control-plane-v1",
@@ -1040,6 +1066,9 @@ async def manual_tty(ws: fastapi.WebSocket, chat_id: str, terminal_id: str) -> N
 )
 async def worker_event(event: worker_protocol.Event) -> None:
     """Persist one at-least-once worker event and wake the owning chat."""
+    if event.type == "sign.requested":
+        await complete_signing(event)
+        return
     task = await worker.store.get_task(event.task_id) if event.task_id else None
     parent = (
         ai.experimental_telemetry.Span[

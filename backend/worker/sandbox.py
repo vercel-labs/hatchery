@@ -547,16 +547,6 @@ def _workspace(spec: models.WorkerSpec) -> str:
     return "/vercel"
 
 
-def _backend_origin() -> str:
-    configured = os.environ.get("HATCHERY_PUBLIC_URL", "").rstrip("/")
-    if configured:
-        return configured
-    deployment = os.environ.get("VERCEL_URL", "")
-    if deployment:
-        return f"https://{deployment}"
-    raise RuntimeError("HATCHERY_PUBLIC_URL or VERCEL_URL is required for sandbox callbacks")
-
-
 def _daemon_env(
     worker_id: str,
     spec: models.WorkerSpec,
@@ -567,7 +557,6 @@ def _daemon_env(
 ) -> dict[str, str]:
     env = {
         "HATCHERY_DAEMON_TOKEN": token,
-        "HATCHERY_SIGN_URL": f"{_backend_origin()}/api/workers/{worker_id}/sign-commits",
         "HATCHERY_WORKER_ID": worker_id,
         "HATCHERY_WORKSPACE": _workspace(spec),
         "FX_PERMISSION_MODE": "yolo",
