@@ -49,6 +49,7 @@ def agent_environment(env: dict[str, str] | None = None) -> dict[str, str]:
     source = dict(env or os.environ)
     private = {
         "HATCHERY_DAEMON_TOKEN",
+        "HATCHERY_SIGN_URL",
         "HATCHERY_WORKER_ID",
         "VERCEL_OIDC_TOKEN",
         "VERCEL_QUEUE_TOKEN",
