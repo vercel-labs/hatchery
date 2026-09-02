@@ -348,6 +348,22 @@ async def test_github_installation_uses_saved_owner_mapping(monkeypatch):
     assert await auth.github_installation_id("user_1", "Acme", "app") == "inst_acme"
 
 
+async def test_github_installation_uses_saved_default_before_new_authorization(monkeypatch):
+    async def identity(_user_id):
+        return {"installation_id": "inst_existing"}
+
+    async def token(*_args, **_kwargs):
+        raise AssertionError("saved installation should not request user authorization")
+
+    monkeypatch.setattr(auth, "github_identity", identity)
+    monkeypatch.setattr(auth.connect, "get_token_response", token)
+
+    assert (
+        await auth.github_installation_id("user_1", "vercel-labs", "hatchery")
+        == "inst_existing"
+    )
+
+
 async def test_github_installation_resolves_repo_and_saves_owner_mapping(monkeypatch):
     seen = {}
 

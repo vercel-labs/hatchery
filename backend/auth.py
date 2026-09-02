@@ -279,6 +279,9 @@ async def github_installation_id(user_id: str, owner: str, repo: str) -> str:
     installations = connection.get("installations")
     if isinstance(installations, dict) and installations.get(key):
         return str(installations[key])
+    installation_id = str(connection.get("installation_id") or "")
+    if installation_id:
+        return installation_id
     try:
         token = await connect.get_token_response(
             _github_connector(),
