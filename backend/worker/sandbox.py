@@ -4,6 +4,7 @@ import asyncio
 import dataclasses
 import os
 import pathlib
+import urllib.parse
 
 import ai.experimental_telemetry
 import httpx
@@ -26,6 +27,7 @@ AI_GATEWAY_HOST = "ai-gateway.vercel.sh"
 AI_GATEWAY_PLACEHOLDER = "sandbox-network-policy-placeholder"
 GITHUB_TOKEN_PLACEHOLDER = "sandbox-network-policy-placeholder"
 QUEUE_TOKEN_PLACEHOLDER = "sandbox-queue-policy-placeholder"
+VERCEL_TOKEN_PLACEHOLDER = "sandbox-vercel-policy-placeholder"
 EXECUTION_TIME_LIMIT = 24 * 60 * 60
 
 # The worker adapter exposes the retained behavioral surface while the shared
@@ -72,6 +74,10 @@ async def _github_credential(
         if not required:
             return None
         raise RuntimeError("connect GitHub before creating a repository sandbox") from error
+
+
+async def _vercel_credential(user_id: str | None) -> str | None:
+    return await auth.vercel_cli_token(user_id) if user_id else None
 
 
 async def _git_identity(user_id: str | None) -> tuple[str, str] | None:
@@ -126,7 +132,10 @@ async def provision(
     name = f"hatchery-{worker_id}"
     credential = await _github_credential(user_id, required=bool(spec.repos))
     await _canonicalize_repos(spec, credential)
-    network_policy = await _network_policy(credential, os.environ.get("VERCEL_REGION"))
+    vercel_credential = await _vercel_credential(user_id)
+    network_policy = await _network_policy(
+        credential, os.environ.get("VERCEL_REGION"), vercel_credential
+    )
     source = None
     if spec.repos:
         revision = spec.git_sha or spec.branch
@@ -151,10 +160,19 @@ async def provision(
         tags={"hatchery-worker": worker_id},
     )
     await box.update(execution_time_limit=EXECUTION_TIME_LIMIT)
-    await box.update_network_policy(await _network_policy(credential, box.region))
+    await box.update_network_policy(
+        await _network_policy(credential, box.region, vercel_credential)
+    )
     process = None
     if created:
-        process = await _bootstrap(box, worker_id, spec, daemon_token, user_id=user_id)
+        process = await _bootstrap(
+            box,
+            worker_id,
+            spec,
+            daemon_token,
+            user_id=user_id,
+            vercel_connected=vercel_credential is not None,
+        )
     routes = [models.Route(port=route.port, url=route.url) for route in box.routes]
     await repair_daemon(box, worker_id, spec, daemon_token, routes, process=process)
     return Provisioned(name, routes)
@@ -173,7 +191,7 @@ async def destroy(name: str) -> None:
 async def resume(name: str, worker_id: str, spec: models.WorkerSpec, token: str) -> None:
     box = await vercel_sandbox.resume_sandbox(name=name)
     await box.update_network_policy(
-        await _network_policy(await git.git_credentials(), box.region)
+        await _network_policy(await git.git_credentials(), box.region, None)
     )
     await git.configure(box)
     routes = [models.Route(port=route.port, url=route.url) for route in box.routes]
@@ -194,7 +212,10 @@ async def prepare_for_command(record: models.Worker) -> None:
         credential = await _github_credential(
             record.user_id, required=bool(record.spec.repos)
         )
-        await box.update_network_policy(await _network_policy(credential, box.region))
+        vercel_credential = await _vercel_credential(record.user_id)
+        await box.update_network_policy(
+            await _network_policy(credential, box.region, vercel_credential)
+        )
         await git.configure(box, await _git_identity(record.user_id))
         await _canonicalize_repos(record.spec, credential)
         await _configure_repo_remotes(box, record.spec)
@@ -251,7 +272,13 @@ async def repair_daemon(
 
 
 async def _bootstrap(
-    box, worker_id: str, spec: models.WorkerSpec, token: str, *, user_id: str | None = None
+    box,
+    worker_id: str,
+    spec: models.WorkerSpec,
+    token: str,
+    *,
+    user_id: str | None = None,
+    vercel_connected: bool = False,
 ):
     await box.fs.mkdir("/opt/hatchery")
     await box.fs.mkdir(SHIM_PATH)
@@ -289,10 +316,19 @@ async def _bootstrap(
             check=True,
             capture_output=True,
         )
-    return await _start_daemon(box, worker_id, spec, token)
+    return await _start_daemon(
+        box, worker_id, spec, token, vercel_connected=vercel_connected
+    )
 
 
-async def _start_daemon(box, worker_id: str, spec: models.WorkerSpec, token: str):
+async def _start_daemon(
+    box,
+    worker_id: str,
+    spec: models.WorkerSpec,
+    token: str,
+    *,
+    vercel_connected: bool = False,
+):
     command = " ".join([
         "exec python3",
         DAEMON_PATH,
@@ -308,7 +344,13 @@ async def _start_daemon(box, worker_id: str, spec: models.WorkerSpec, token: str
             f"pkill -f '^python3 {DAEMON_PATH}( |$)' 2>/dev/null || true; "
             f"{command} >>{DAEMON_LOG_PATH} 2>&1",
         ],
-        env=_daemon_env(worker_id, spec, token, region=box.region),
+        env=_daemon_env(
+            worker_id,
+            spec,
+            token,
+            region=box.region,
+            vercel_connected=vercel_connected,
+        ),
     )
 
 
@@ -335,7 +377,11 @@ async def snapshot(record: models.Worker, snapshot_id: str | None = None) -> str
     await box.update(current_snapshot_id=snapshot_id)
     box = await vercel_sandbox.resume_sandbox(name=record.sandbox_name)
     await box.update_network_policy(
-        await _network_policy(await git.git_credentials(), box.region)
+        await _network_policy(
+            await _github_credential(record.user_id, required=False),
+            box.region,
+            await _vercel_credential(record.user_id),
+        )
     )
     await git.configure(box)
     routes = [models.Route(port=route.port, url=route.url) for route in box.routes]
@@ -343,9 +389,37 @@ async def snapshot(record: models.Worker, snapshot_id: str | None = None) -> str
     return snapshot_id
 
 
-async def _network_policy(github_token: str | None, region: str | None):
+async def _network_policy(
+    github_token: str | None,
+    region: str | None,
+    vercel_token: str | None,
+):
     oidc_token = await vercel_oidc.get_vercel_oidc_token()
     allow = dict(git.github_network_policy(github_token).allow)
+    if vercel_token:
+        rule = (
+            vercel_sandbox.NetworkPolicyRule(
+                match=vercel_sandbox.NetworkPolicyRequestMatcher(
+                    headers=[
+                        vercel_sandbox.NetworkPolicyKeyValueMatcher(
+                            key=vercel_sandbox.NetworkPolicyMatcher.exact(
+                                "authorization"
+                            ),
+                            value=vercel_sandbox.NetworkPolicyMatcher.exact(
+                                f"Bearer {VERCEL_TOKEN_PLACEHOLDER}"
+                            ),
+                        )
+                    ]
+                ),
+                transform=[
+                    vercel_sandbox.NetworkPolicyTransform(
+                        headers={"Authorization": f"Bearer {vercel_token}"}
+                    )
+                ],
+            ),
+        )
+        allow["api.vercel.com"] = rule
+        allow["vercel.com"] = rule
     allow[AI_GATEWAY_HOST] = (
         vercel_sandbox.NetworkPolicyRule(
             transform=[
@@ -473,11 +547,27 @@ def _workspace(spec: models.WorkerSpec) -> str:
     return "/vercel"
 
 
+def _backend_origin() -> str:
+    configured = os.environ.get("HATCHERY_PUBLIC_URL", "").rstrip("/")
+    if configured:
+        return configured
+    deployment = os.environ.get("VERCEL_URL", "")
+    if deployment:
+        return f"https://{deployment}"
+    raise RuntimeError("HATCHERY_PUBLIC_URL or VERCEL_URL is required for sandbox callbacks")
+
+
 def _daemon_env(
-    worker_id: str, spec: models.WorkerSpec, token: str, *, region: str | None = None
+    worker_id: str,
+    spec: models.WorkerSpec,
+    token: str,
+    *,
+    region: str | None = None,
+    vercel_connected: bool = False,
 ) -> dict[str, str]:
     env = {
         "HATCHERY_DAEMON_TOKEN": token,
+        "HATCHERY_SIGN_URL": f"{_backend_origin()}/api/workers/{worker_id}/sign-commits",
         "HATCHERY_WORKER_ID": worker_id,
         "HATCHERY_WORKSPACE": _workspace(spec),
         "FX_PERMISSION_MODE": "yolo",
@@ -485,6 +575,8 @@ def _daemon_env(
         "AI_GATEWAY_API_KEY": AI_GATEWAY_PLACEHOLDER,
         "VERCEL_QUEUE_TOKEN": QUEUE_TOKEN_PLACEHOLDER,
     }
+    if vercel_connected:
+        env["HATCHERY_VERCEL_CLI_CONNECTED"] = "1"
     for name in (
         "GITHUB_CONNECTOR",
         "VERCEL_QUEUE_BASE_URL",

@@ -83,10 +83,14 @@ async def test_provision_creates_persistent_sandbox_and_checks_daemon(monkeypatc
         assert user_id == "user_1"
         return "The Octocat", "42+octocat@users.noreply.github.com"
 
+    async def vercel_credential(_user_id):
+        return None
+
     monkeypatch.setattr(sandbox.vercel_sandbox, "get_or_create_sandbox", get_or_create_sandbox)
     monkeypatch.setattr(sandbox.vercel_oidc, "get_vercel_oidc_token", oidc_token)
     monkeypatch.setattr(sandbox.httpx, "AsyncClient", Client)
     monkeypatch.setattr(sandbox, "_github_credential", github_credential)
+    monkeypatch.setattr(sandbox, "_vercel_credential", vercel_credential)
     monkeypatch.setattr(sandbox, "_git_identity", git_identity)
 
     provisioned = await sandbox.provision(
@@ -136,6 +140,23 @@ async def test_provision_creates_persistent_sandbox_and_checks_daemon(monkeypatc
         "https://daemon.example/health",
         {"authorization": "Bearer secret"},
     )
+
+
+async def test_vercel_token_is_injected_only_for_matching_bearer(monkeypatch):
+    async def oidc_token():
+        return "oidc-token"
+
+    monkeypatch.setattr(sandbox.vercel_oidc, "get_vercel_oidc_token", oidc_token)
+    policy = await sandbox._network_policy(None, None, "private-vercel-token")
+
+    rule = policy.allow["api.vercel.com"][0]
+    assert rule.match.headers[0].value.value == (
+        f"Bearer {sandbox.VERCEL_TOKEN_PLACEHOLDER}"
+    )
+    assert dict(rule.transform[0].headers) == {
+        "Authorization": "Bearer private-vercel-token"
+    }
+    assert policy.allow["vercel.com"] == policy.allow["api.vercel.com"]
 
 
 def test_workspace_matches_vercel_git_source_layout():
@@ -478,8 +499,8 @@ async def test_prepare_for_command_resumes_and_repairs_daemon(monkeypatch):
     async def credentials():
         return None
 
-    async def network_policy(credential, region):
-        assert (credential, region) == (None, "iad1")
+    async def network_policy(credential, region, vercel_token):
+        assert (credential, region, vercel_token) == (None, "iad1", None)
         return "queue-policy"
 
     async def configure(box, identity):
@@ -493,8 +514,16 @@ async def test_prepare_for_command_resumes_and_repairs_daemon(monkeypatch):
     async def identity(_user_id):
         return None
 
+    async def github_credential(_user_id, *, required=True):
+        return None
+
+    async def vercel_credential(_user_id):
+        return None
+
     monkeypatch.setattr(sandbox.git, "configure", configure)
     monkeypatch.setattr(sandbox, "_git_identity", identity)
+    monkeypatch.setattr(sandbox, "_github_credential", github_credential)
+    monkeypatch.setattr(sandbox, "_vercel_credential", vercel_credential)
     monkeypatch.setattr(sandbox, "_network_policy", network_policy)
     monkeypatch.setattr(sandbox, "repair_daemon", repair)
     record = models.Worker(
@@ -570,8 +599,15 @@ async def test_snapshot_create_and_restore(monkeypatch):
     async def credentials():
         return None
 
-    async def network_policy(credential, region):
+    async def github_credential(_user_id, *, required=True):
+        return None
+
+    async def vercel_credential(_user_id):
+        return None
+
+    async def network_policy(credential, region, vercel_token):
         assert region == "iad1"
+        assert vercel_token is None
         return "policy"
 
     async def repair(*args, **kwargs):
@@ -581,6 +617,8 @@ async def test_snapshot_create_and_restore(monkeypatch):
     monkeypatch.setattr(sandbox.vercel_sandbox, "resume_sandbox", resume_sandbox)
     monkeypatch.setattr(sandbox.git, "configure", configure)
     monkeypatch.setattr(sandbox.git, "git_credentials", credentials)
+    monkeypatch.setattr(sandbox, "_github_credential", github_credential)
+    monkeypatch.setattr(sandbox, "_vercel_credential", vercel_credential)
     monkeypatch.setattr(sandbox, "_network_policy", network_policy)
     monkeypatch.setattr(sandbox, "repair_daemon", repair)
     record = models.Worker(

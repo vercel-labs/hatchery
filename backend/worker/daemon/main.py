@@ -59,9 +59,11 @@ def agent_environment(env: dict[str, str] | None = None) -> dict[str, str]:
     }
     result = {name: value for name, value in source.items() if name not in private}
     result["PATH"] = f"/opt/hatchery/bin:{result.get('PATH', '/usr/local/bin:/usr/bin:/bin')}"
-    # gh requires a local credential before it sends a request. The Sandbox
-    # network policy replaces this non-secret marker with the connected user's token.
+    # CLIs require a local credential before sending a request. Sandbox network
+    # policy replaces these non-secret markers when the user connected access.
     result["GH_TOKEN"] = "sandbox-network-policy-placeholder"
+    if source.get("HATCHERY_VERCEL_CLI_CONNECTED") == "1":
+        result["VERCEL_TOKEN"] = "sandbox-vercel-policy-placeholder"
     return result
 
 
@@ -1283,38 +1285,27 @@ def source() -> str:
     return pathlib.Path(__file__).read_text(encoding="utf-8")
 
 
-async def _sign_commits(connect, connector: str, request: dict) -> list[str]:
-    import httpx
+def _sign_commits(request: dict) -> list[str]:
+    import urllib.request
 
-    token = await connect.get_token(connector, subject=connect.ConnectAppTokenSubject())
-    repo = request.get("repo") or {}
-    owner = str(repo.get("owner") or "")
-    name = str(repo.get("name") or "")
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+", owner) or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
-        raise ValueError("invalid GitHub repository")
-    signed: list[str] = []
-    headers = {
-        "authorization": f"Bearer {token}",
-        "accept": "application/vnd.github+json",
-        "x-github-api-version": "2022-11-28",
-    }
-    async with httpx.AsyncClient(base_url="https://api.github.com", headers=headers, timeout=60) as client:
-        for commit in request.get("commits") or []:
-            parents = [signed[-1]] if signed else [str(item) for item in commit.get("parents") or []]
-            body = {
-                "message": str(commit.get("message") or ""),
-                "tree": str(commit.get("tree_sha") or ""),
-                "parents": parents,
-            }
-            author = commit.get("original_author")
-            if isinstance(author, dict) and author.get("name") and author.get("email"):
-                trailer = f"Co-Authored-By: {author['name']} <{author['email']}>"
-                if trailer not in body["message"]:
-                    body["message"] = body["message"].rstrip() + f"\n\n{trailer}\n"
-            response = await client.post(f"/repos/{owner}/{name}/git/commits", json=body)
-            response.raise_for_status()
-            signed.append(str(response.json()["sha"]))
-    return signed
+    url = os.environ.get("HATCHERY_SIGN_URL", "")
+    token = os.environ.get("HATCHERY_DAEMON_TOKEN", "")
+    if not url or not token:
+        raise RuntimeError("backend commit signing is not configured")
+    body = json.dumps(request).encode()
+    with urllib.request.urlopen(
+        urllib.request.Request(
+            url,
+            data=body,
+            headers={
+                "authorization": f"Bearer {token}",
+                "content-type": "application/json",
+            },
+        ),
+        timeout=300,
+    ) as response:
+        result = json.load(response)
+    return [str(sha) for sha in result.get("signed_shas") or []]
 
 
 async def poll_commands(queue, runtime: Runtime, worker_id: str, sleep=asyncio.sleep) -> None:
@@ -1352,7 +1343,7 @@ async def redeliver_command(delivery, runtime: Runtime) -> None:
 
 
 async def run(worker_id: str, workspace: str, port: int, state_path: str) -> None:
-    from vercel import connect, queue
+    from vercel import queue
 
     queue_client = queue.QueueClient(
         token=os.environ.get("VERCEL_QUEUE_TOKEN"),
@@ -1370,14 +1361,8 @@ async def run(worker_id: str, workspace: str, port: int, state_path: str) -> Non
         )
 
     runtime = Runtime(worker_id, workspace, publish, state_path)
-    connector = os.environ.get("GITHUB_CONNECTOR", "")
-    if connector:
-        def sign_commits(request: dict) -> list[str]:
-            future = asyncio.run_coroutine_threadsafe(
-                _sign_commits(connect, connector, request), runtime.loop
-            )
-            return future.result(timeout=300)
-        runtime.sign_commits = sign_commits
+    if os.environ.get("HATCHERY_SIGN_URL"):
+        runtime.sign_commits = _sign_commits
     runtime.loop = asyncio.get_running_loop()
     await runtime.recover_active_tasks()
     Handler.workspace = workspace

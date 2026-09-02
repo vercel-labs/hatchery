@@ -8,6 +8,7 @@ dependencies = [
     "asyncpg>=0.31.0",
     "asyncssh>=2.21,<3",
     "braintrust[otel]>=0.35.0",
+    "cryptography>=43",
     "fastapi>=0.115",
     "httpx>=0.28",
     "pyjwt[crypto]>=2.10",

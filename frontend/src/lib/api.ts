@@ -29,6 +29,13 @@ export type GitHubConnection = {
   connected_at: string;
 };
 
+export type VercelCLIConnection = {
+  user_id: string;
+  username: string | null;
+  email: string | null;
+  connected_at: string;
+};
+
 export type User = {
   id: string;
   email: string | null;

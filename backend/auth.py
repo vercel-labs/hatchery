@@ -11,6 +11,7 @@ import urllib.parse
 import fastapi
 import httpx
 import jwt
+from cryptography import fernet
 from vercel import connect
 
 from store import auth as auth_store
@@ -21,6 +22,8 @@ JWKS_URL = "https://vercel.com/.well-known/jwks"
 COOKIE = "hatchery_session"
 SCOPES = "openid email profile"
 GITHUB_API = "https://api.github.com"
+VERCEL_API = "https://api.vercel.com"
+VERCEL_SECRET = "vercel_cli"
 
 log = logging.getLogger("auth")
 
@@ -261,6 +264,62 @@ async def github_token(user_id: str, installation_id: str | None = None) -> str:
         subject=connect.ConnectUserTokenSubject(id=user_id),
         installation_id=installation_id,
     )
+
+
+def _secret_box() -> fernet.Fernet:
+    value = os.environ.get("HATCHERY_CREDENTIAL_KEY", "")
+    if not value:
+        raise RuntimeError("HATCHERY_CREDENTIAL_KEY is required to store credentials")
+    try:
+        return fernet.Fernet(value.encode())
+    except (ValueError, TypeError) as error:
+        raise RuntimeError("HATCHERY_CREDENTIAL_KEY must be a Fernet key") from error
+
+
+async def vercel_cli_connection(user_id: str) -> dict | None:
+    user = await auth_store.get_user(user_id)
+    saved = (user or {}).get(VERCEL_SECRET)
+    return saved if isinstance(saved, dict) else None
+
+
+async def vercel_cli_token(user_id: str) -> str | None:
+    encrypted = await auth_store.get_secret(user_id, VERCEL_SECRET)
+    if encrypted is None:
+        return None
+    try:
+        return _secret_box().decrypt(encrypted.encode()).decode()
+    except fernet.InvalidToken as error:
+        raise RuntimeError("stored Vercel CLI credential cannot be decrypted") from error
+
+
+async def connect_vercel_cli(user_id: str, token: str) -> dict:
+    token = token.strip()
+    if not token:
+        raise ValueError("token is required")
+    headers = {"authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(
+        base_url=VERCEL_API, headers=headers, timeout=30
+    ) as http:
+        response = await http.get("/v2/user")
+    if response.status_code in (401, 403):
+        raise ValueError("Vercel rejected this token")
+    response.raise_for_status()
+    profile = response.json().get("user") or response.json()
+    connection = {
+        "user_id": str(profile["id"]),
+        "username": profile.get("username"),
+        "email": profile.get("email"),
+        "connected_at": datetime.datetime.now(datetime.UTC).isoformat(),
+    }
+    encrypted = _secret_box().encrypt(token.encode()).decode()
+    await auth_store.save_secret(user_id, VERCEL_SECRET, encrypted)
+    await auth_store.save_connection(user_id, VERCEL_SECRET, connection)
+    return connection
+
+
+async def disconnect_vercel_cli(user_id: str) -> None:
+    await auth_store.delete_secret(user_id, VERCEL_SECRET)
+    await auth_store.delete_connection(user_id, VERCEL_SECRET)
 
 
 async def github_repo_warning(user_id: str, repo: str) -> str | None:

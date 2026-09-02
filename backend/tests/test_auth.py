@@ -198,6 +198,60 @@ async def test_callback_creates_session_without_storing_provider_tokens(monkeypa
     assert "access_token" not in seen
 
 
+async def test_vercel_cli_token_is_validated_and_encrypted(monkeypatch):
+    saved = {}
+    monkeypatch.setenv(
+        "HATCHERY_CREDENTIAL_KEY", auth.fernet.Fernet.generate_key().decode()
+    )
+
+    def responder(request):
+        assert request.headers["authorization"] == "Bearer private-token"
+        return httpx.Response(
+            200,
+            json={"user": {"id": "vercel_1", "username": "ada", "email": "ada@example.com"}},
+        )
+
+    class Client(httpx.AsyncClient):
+        def __init__(self, **kwargs):
+            super().__init__(transport=httpx.MockTransport(responder), **kwargs)
+
+    async def save_secret(user_id, name, value):
+        saved["secret"] = (user_id, name, value)
+
+    async def save_connection(user_id, name, connection):
+        saved["connection"] = (user_id, name, connection)
+
+    monkeypatch.setattr(auth.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(auth.auth_store, "save_secret", save_secret)
+    monkeypatch.setattr(auth.auth_store, "save_connection", save_connection)
+
+    connection = await auth.connect_vercel_cli("user_1", " private-token ")
+
+    assert connection["user_id"] == "vercel_1"
+    assert "private-token" not in saved["secret"][2]
+    encrypted = saved["secret"][2]
+
+    async def get_secret(_user_id, _name):
+        return encrypted
+
+    monkeypatch.setattr(auth.auth_store, "get_secret", get_secret)
+    assert await auth.vercel_cli_token("user_1") == "private-token"
+
+
+async def test_vercel_cli_rejects_invalid_token_without_storing(monkeypatch):
+    def responder(_request):
+        return httpx.Response(401, json={"error": {"message": "bad token"}})
+
+    class Client(httpx.AsyncClient):
+        def __init__(self, **kwargs):
+            super().__init__(transport=httpx.MockTransport(responder), **kwargs)
+
+    monkeypatch.setattr(auth.httpx, "AsyncClient", Client)
+
+    with pytest.raises(ValueError, match="Vercel rejected"):
+        await auth.connect_vercel_cli("user_1", "bad")
+
+
 async def test_github_authorization_uses_vercel_user_subject(monkeypatch):
     seen = {}
 

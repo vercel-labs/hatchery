@@ -114,6 +114,90 @@ async def test_github_connection_routes(monkeypatch):
     assert seen == {"authorized": "user_test", "disconnected": "user_test"}
 
 
+async def test_vercel_cli_connection_routes(monkeypatch):
+    seen = {}
+
+    async def connection(user_id):
+        assert user_id == "user_test"
+        return {"username": "ada"}
+
+    async def connect(user_id, token):
+        seen["connected"] = (user_id, token)
+        return {"username": "ada"}
+
+    async def disconnect(user_id):
+        seen["disconnected"] = user_id
+
+    monkeypatch.setattr(server.auth, "vercel_cli_connection", connection)
+    monkeypatch.setattr(server.auth, "connect_vercel_cli", connect)
+    monkeypatch.setattr(server.auth, "disconnect_vercel_cli", disconnect)
+
+    async with client() as c:
+        status = await c.get("/api/connections/vercel-cli")
+        connected = await c.put(
+            "/api/connections/vercel-cli",
+            json={"token": "private"},
+            headers={"origin": "http://test"},
+        )
+        disconnected = await c.delete(
+            "/api/connections/vercel-cli", headers={"origin": "http://test"}
+        )
+
+    assert status.json() == {"connection": {"username": "ada"}}
+    assert connected.json() == {"connection": {"username": "ada"}}
+    assert disconnected.status_code == 204
+    assert seen == {
+        "connected": ("user_test", "private"),
+        "disconnected": "user_test",
+    }
+
+
+async def test_worker_signing_requires_worker_token_and_attached_repo(monkeypatch):
+    record = server.worker.Worker(
+        id="wrk_1",
+        chat_id="chat_1",
+        user_id="user_test",
+        sandbox_name="hatchery-wrk_1",
+        command_topic="topic",
+        title="worker",
+        status="running",
+        spec=server.worker.WorkerSpec(repos=["acme/app"]),
+        daemon_token="secret",
+        created_at="now",
+        updated_at="now",
+    )
+
+    async def get(_worker_id):
+        return record
+
+    async def sign(connector, body):
+        assert connector == "github/hatchery"
+        assert body["repo"] == {"owner": "acme", "name": "app"}
+        return ["signed"]
+
+    monkeypatch.setenv("GITHUB_CONNECTOR", "github/hatchery")
+    monkeypatch.setattr(server.worker, "get", get)
+    monkeypatch.setattr(server.signing, "sign_commits", sign)
+    body = {"repo": {"owner": "acme", "name": "app"}, "commits": []}
+
+    async with client() as c:
+        denied = await c.post("/api/workers/wrk_1/sign-commits", json=body)
+        signed = await c.post(
+            "/api/workers/wrk_1/sign-commits",
+            json=body,
+            headers={"authorization": "Bearer secret"},
+        )
+        wrong_repo = await c.post(
+            "/api/workers/wrk_1/sign-commits",
+            json={"repo": {"owner": "other", "name": "app"}},
+            headers={"authorization": "Bearer secret"},
+        )
+
+    assert denied.status_code == 401
+    assert signed.json() == {"signed_shas": ["signed"]}
+    assert wrong_repo.status_code == 403
+
+
 async def test_spaces_seed_default():
     async with client() as c:
         listed = (await c.get("/api/spaces")).json()

@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import re
+import secrets
 
 import fastapi
 import fastapi.middleware.cors
@@ -37,6 +38,7 @@ import vercel.queue
 from agent import classifier, dispatcher, sandbox, telemetry, topic
 import worker
 from worker import protocol as worker_protocol
+from worker import signing
 from channels import github, slack
 from store import chats, events, spaces, turns
 
@@ -188,7 +190,12 @@ app = fastapi.FastAPI(title="hatchery", lifespan=lifespan)
 @app.middleware("http")
 async def browser_session(request: fastapi.Request, call_next):
     path = request.url.path
-    public = path == "/api/health" or path.startswith("/api/auth/") or path.startswith("/channels/")
+    public = (
+        path == "/api/health"
+        or path.startswith("/api/auth/")
+        or path.startswith("/channels/")
+        or bool(re.fullmatch(r"/api/workers/[^/]+/sign-commits", path))
+    )
     user = await auth.current_user(request) if path.startswith("/api/") and not public else None
     if path.startswith("/api/") and not public and user is None:
         return fastapi.responses.JSONResponse({"detail": "sign in required"}, status_code=401)
@@ -288,6 +295,62 @@ async def disconnect_github(request: fastapi.Request) -> None:
     if user is None:
         raise fastapi.HTTPException(401, "sign in required")
     await auth.disconnect_github(user)
+
+
+class VercelCLIRequest(pydantic.BaseModel):
+    token: str = pydantic.Field(min_length=1, max_length=512)
+
+
+@app.get("/api/connections/vercel-cli")
+async def vercel_cli_connection(request: fastapi.Request) -> dict:
+    user = await auth.current_user(request)
+    if user is None:
+        raise fastapi.HTTPException(401, "sign in required")
+    return {"connection": await auth.vercel_cli_connection(user["id"])}
+
+
+@app.put("/api/connections/vercel-cli")
+async def connect_vercel_cli(
+    request: fastapi.Request, body: VercelCLIRequest
+) -> dict:
+    user = await auth.current_user(request)
+    if user is None:
+        raise fastapi.HTTPException(401, "sign in required")
+    try:
+        connection = await auth.connect_vercel_cli(user["id"], body.token)
+    except ValueError as error:
+        raise fastapi.HTTPException(400, str(error)) from error
+    return {"connection": connection}
+
+
+@app.delete("/api/connections/vercel-cli", status_code=204)
+async def disconnect_vercel_cli(request: fastapi.Request) -> None:
+    user = await auth.current_user(request)
+    if user is None:
+        raise fastapi.HTTPException(401, "sign in required")
+    await auth.disconnect_vercel_cli(user["id"])
+
+
+@app.post("/api/workers/{worker_id}/sign-commits")
+async def sign_worker_commits(
+    worker_id: str, request: fastapi.Request
+) -> dict:
+    record = await worker.get(worker_id)
+    supplied = request.headers.get("authorization", "").removeprefix("Bearer ")
+    if record is None or not supplied or not secrets.compare_digest(
+        supplied, record.daemon_token
+    ):
+        raise fastapi.HTTPException(401, "invalid worker token")
+    body = await request.json()
+    repo = body.get("repo") or {}
+    requested = f"{repo.get('owner', '')}/{repo.get('name', '')}"
+    if requested not in record.spec.repos:
+        raise fastapi.HTTPException(403, "repository is not attached to this worker")
+    try:
+        signed = await signing.sign_commits(os.environ["GITHUB_CONNECTOR"], body)
+    except (ValueError, httpx.HTTPError) as error:
+        raise fastapi.HTTPException(502, str(error)) from error
+    return {"signed_shas": signed}
 
 
 class SpaceWarning(pydantic.BaseModel):
