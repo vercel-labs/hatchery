@@ -28,3 +28,5 @@ Hatchery rewrites that endpoint to the public vgrok origin for the sandbox.
 Deployments use hosted Vercel Queues through deployment OIDC. No local worker or
 in-process task bypass exists. Sandbox and subagent terminals connect through the
 backend WebSocket bridge to the authenticated in-sandbox daemon.
+
+Temporary auth-test sentence: purple umbrellas count seven invisible turnips.
