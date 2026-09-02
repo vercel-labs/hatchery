@@ -75,8 +75,8 @@ async def test_provision_creates_persistent_sandbox_and_checks_daemon(monkeypatc
     async def oidc_token():
         return "oidc-token"
 
-    async def github_credential(user_id, *, repo=None, required=True):
-        calls["github_user"] = (user_id, repo, required)
+    async def github_credential(user_id, *, required=True):
+        calls["github_user"] = (user_id, required)
         return "user-token"
 
     async def git_identity(user_id):
@@ -98,7 +98,7 @@ async def test_provision_creates_persistent_sandbox_and_checks_daemon(monkeypatc
     )
 
     assert provisioned.sandbox_name == "hatchery-wrk_1"
-    assert calls["github_user"] == ("user_1", None, False)
+    assert calls["github_user"] == ("user_1", False)
     github_rule = calls["network_policy"].allow["api.github.com"][0]
     assert dict(github_rule.transform[0].headers) == {
         "Authorization": "Bearer user-token"
@@ -208,18 +208,18 @@ async def test_setup_script_gets_github_placeholder(monkeypatch):
 async def test_github_credential_uses_connected_user(monkeypatch):
     seen = []
 
-    async def token(user_id, *, repo=None):
-        seen.append((user_id, repo))
+    async def token(user_id):
+        seen.append(user_id)
         return "user-token"
 
     monkeypatch.setattr(sandbox.auth, "github_token", token)
 
-    assert await sandbox._github_credential("user_1", repo="acme/app") == "user-token"
-    assert seen == [("user_1", "acme/app")]
+    assert await sandbox._github_credential("user_1") == "user-token"
+    assert seen == ["user_1"]
 
 
 async def test_empty_sandbox_allows_missing_github_connection(monkeypatch):
-    async def token(_user_id, *, repo=None):
+    async def token(_user_id):
         raise sandbox.connect.UserAuthorizationRequiredError(
             httpx.Response(401, request=httpx.Request("GET", "https://connect.vercel.com")),
             "connect",
@@ -514,7 +514,7 @@ async def test_prepare_for_command_resumes_and_repairs_daemon(monkeypatch):
     async def identity(_user_id):
         return None
 
-    async def github_credential(_user_id, *, repo=None, required=True):
+    async def github_credential(_user_id, *, required=True):
         return None
 
     async def vercel_credential(_user_id):
@@ -599,7 +599,7 @@ async def test_snapshot_create_and_restore(monkeypatch):
     async def credentials():
         return None
 
-    async def github_credential(_user_id, *, repo=None, required=True):
+    async def github_credential(_user_id, *, required=True):
         return None
 
     async def vercel_credential(_user_id):

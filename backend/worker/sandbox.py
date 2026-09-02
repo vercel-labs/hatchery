@@ -60,12 +60,12 @@ class Provisioned:
 
 
 async def _github_credential(
-    user_id: str | None, *, repo: str | None = None, required: bool = True
+    user_id: str | None, *, required: bool = True
 ) -> str | None:
     if user_id is None:
         return await git.git_credentials()
     try:
-        return await auth.github_token(user_id, repo=repo)
+        return await auth.github_token(user_id)
     except (
         connect.UserAuthorizationRequiredError,
         connect.NoValidTokenError,
@@ -130,9 +130,7 @@ async def provision(
     user_id: str | None = None,
 ) -> Provisioned:
     name = f"hatchery-{worker_id}"
-    credential = await _github_credential(
-        user_id, repo=spec.repos[0] if spec.repos else None, required=bool(spec.repos)
-    )
+    credential = await _github_credential(user_id, required=bool(spec.repos))
     await _canonicalize_repos(spec, credential)
     vercel_credential = await _vercel_credential(user_id)
     network_policy = await _network_policy(
@@ -212,9 +210,7 @@ async def prepare_for_command(record: models.Worker) -> None:
         span.set_attrs(region=box.region or "")
         await box.update(execution_time_limit=EXECUTION_TIME_LIMIT)
         credential = await _github_credential(
-            record.user_id,
-            repo=record.spec.repos[0] if record.spec.repos else None,
-            required=bool(record.spec.repos),
+            record.user_id, required=bool(record.spec.repos)
         )
         vercel_credential = await _vercel_credential(record.user_id)
         await box.update_network_policy(
@@ -382,11 +378,7 @@ async def snapshot(record: models.Worker, snapshot_id: str | None = None) -> str
     box = await vercel_sandbox.resume_sandbox(name=record.sandbox_name)
     await box.update_network_policy(
         await _network_policy(
-            await _github_credential(
-                record.user_id,
-                repo=record.spec.repos[0] if record.spec.repos else None,
-                required=False,
-            ),
+            await _github_credential(record.user_id, required=False),
             box.region,
             await _vercel_credential(record.user_id),
         )
