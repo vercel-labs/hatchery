@@ -92,11 +92,11 @@ async def test_github_connection_routes(monkeypatch):
     async def token(_user_id, _installation_id=None):
         return "token"
 
-    monkeypatch.setattr(server.auth, "begin_github", begin)
-    monkeypatch.setattr(server.auth, "disconnect_github", disconnect)
-    monkeypatch.setattr(server.auth, "github_token", token)
+    monkeypatch.setattr(server.connections, "begin_github", begin)
+    monkeypatch.setattr(server.connections, "disconnect_github", disconnect)
+    monkeypatch.setattr(server.connections, "github_token", token)
     monkeypatch.setattr(
-        server.auth,
+        server.connections,
         "github_connection",
         lambda user: {"login": "octocat", "id": "42"},
     )
@@ -128,9 +128,9 @@ async def test_vercel_cli_connection_routes(monkeypatch):
     async def disconnect(user_id):
         seen["disconnected"] = user_id
 
-    monkeypatch.setattr(server.auth, "vercel_cli_connection", connection)
-    monkeypatch.setattr(server.auth, "connect_vercel_cli", connect)
-    monkeypatch.setattr(server.auth, "disconnect_vercel_cli", disconnect)
+    monkeypatch.setattr(server.connections, "vercel_cli_connection", connection)
+    monkeypatch.setattr(server.connections, "connect_vercel_cli", connect)
+    monkeypatch.setattr(server.connections, "disconnect_vercel_cli", disconnect)
 
     async with client() as c:
         status = await c.get("/api/connections/vercel-cli")
@@ -170,7 +170,7 @@ async def test_space_warnings_check_main_repo_and_log(monkeypatch, caplog):
         checked.append((user_id, repo))
         return "Install the Hatchery GitHub app on acme."
 
-    monkeypatch.setattr(server.auth, "github_repo_warning", warning)
+    monkeypatch.setattr(server.connections, "github_repo_warning", warning)
 
     with caplog.at_level("WARNING", logger="app"):
         async with client() as c:

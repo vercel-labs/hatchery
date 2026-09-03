@@ -198,7 +198,7 @@ async def test_setup_script_gets_github_placeholder(monkeypatch):
         "wrk_1",
         models.WorkerSpec(setup_script="gh repo clone acme/app app"),
         "secret",
-        user_id="user_1",
+        identity=None,
     )
 
     setup = next(call for call in calls if call[1] == ["-lc", "gh repo clone acme/app app"])
@@ -212,7 +212,7 @@ async def test_github_credential_uses_connected_user(monkeypatch):
         seen.append(user_id)
         return "user-token"
 
-    monkeypatch.setattr(sandbox.auth, "github_token", token)
+    monkeypatch.setattr(sandbox.connections, "github_token", token)
 
     assert await sandbox._github_credential("user_1") == "user-token"
     assert seen == ["user_1"]
@@ -220,12 +220,12 @@ async def test_github_credential_uses_connected_user(monkeypatch):
 
 async def test_empty_sandbox_allows_missing_github_connection(monkeypatch):
     async def token(_user_id):
-        raise sandbox.connect.UserAuthorizationRequiredError(
+        raise sandbox.connections.ConnectionRequired(
             httpx.Response(401, request=httpx.Request("GET", "https://connect.vercel.com")),
             "connect",
         )
 
-    monkeypatch.setattr(sandbox.auth, "github_token", token)
+    monkeypatch.setattr(sandbox.connections, "github_token", token)
 
     assert await sandbox._github_credential("user_1", required=False) is None
 
@@ -234,7 +234,7 @@ async def test_git_identity_uses_connected_github_profile(monkeypatch):
     async def identity(_user_id):
         return {"id": "42", "login": "octocat", "name": "The Octocat"}
 
-    monkeypatch.setattr(sandbox.auth, "github_identity", identity)
+    monkeypatch.setattr(sandbox.connections, "github_identity", identity)
 
     assert await sandbox._git_identity("user_1") == (
         "The Octocat",
@@ -593,7 +593,7 @@ async def test_snapshot_create_and_restore(monkeypatch):
         calls.append("resume")
         return box
 
-    async def configure(found):
+    async def configure(found, identity=None):
         calls.append("git")
 
     async def credentials():

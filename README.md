@@ -9,10 +9,12 @@ subscriber as cloud.
 ## Local development
 
 Hatchery auth uses the same Vercel OAuth flow and Postgres tables locally and in
-deployments. Set `DATABASE_URL`, `VERCEL_APP_CLIENT_ID`, and
-`VERCEL_APP_CLIENT_SECRET`. Register `http://localhost:3000/api/auth/callback`
-on the Vercel app. Set `HATCHERY_APP_ORIGIN=http://localhost:3000` if the
-browser-facing origin cannot be inferred from forwarded headers.
+deployments. Set `DATABASE_URL`, `VERCEL_APP_CLIENT_ID`,
+`VERCEL_APP_CLIENT_SECRET`, and `GITHUB_CONNECTOR`. Register
+`http://localhost:3000/api/auth/callback` on the Vercel app. Set
+`HATCHERY_APP_ORIGIN=http://localhost:3000` if the browser-facing origin cannot
+be inferred from forwarded headers. See `auth.md` for the session, connection,
+credential, and sandbox behavior.
 
 Expose `vercel dev` so cloud sandboxes can reach its Queue broker:
 

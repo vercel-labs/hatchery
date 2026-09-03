@@ -8,11 +8,10 @@ import urllib.parse
 
 import ai.experimental_telemetry
 import httpx
-from vercel import connect
 from vercel import sandbox as vercel_sandbox
 from vercel.oidc import aio as vercel_oidc
 
-import auth
+import connections
 from worker import git, models
 from worker.daemon import main as daemon_main
 
@@ -30,29 +29,6 @@ QUEUE_TOKEN_PLACEHOLDER = "sandbox-queue-policy-placeholder"
 VERCEL_TOKEN_PLACEHOLDER = "sandbox-vercel-policy-placeholder"
 EXECUTION_TIME_LIMIT = 24 * 60 * 60
 
-# The worker adapter exposes the retained behavioral surface while the shared
-# implementation lives in worker.git and is copied into each sandbox.
-configure_git_auth = git.configure_git_auth
-configure_gh = git.configure_gh
-run_gh = git.run_gh
-parse_pr_url = git.parse_pr_url
-is_pr_create = git.is_pr_create
-validate_pr_url = git.validate_pr_url
-find_pr_url = git.find_pr_url
-record_pr = git.record_pr
-git_credentials = git.git_credentials
-parse_git_args = git.parse_git_args
-neutralize_commit_signing = git.neutralize_commit_signing
-needs_signed_push = git.needs_signed_push
-push_with_signing_fallback = git.push_with_signing_fallback
-scrub_git_config_env = git.scrub_git_config_env
-first_unsigned_commit = git.first_unsigned_commit
-sign_request = git.sign_request
-is_signed_by_app = git.is_signed_by_app
-origin_owner_repo = git.origin_owner_repo
-redeliver_command = daemon_main.redeliver_command
-
-
 @dataclasses.dataclass(frozen=True)
 class Provisioned:
     sandbox_name: str
@@ -65,25 +41,21 @@ async def _github_credential(
     if user_id is None:
         return await git.git_credentials()
     try:
-        return await auth.github_token(user_id)
-    except (
-        connect.UserAuthorizationRequiredError,
-        connect.NoValidTokenError,
-        connect.ConnectorInstallationRequiredError,
-    ) as error:
+        return await connections.github_token(user_id)
+    except connections.ConnectionRequired as error:
         if not required:
             return None
         raise RuntimeError("connect GitHub before creating a repository sandbox") from error
 
 
 async def _vercel_credential(user_id: str | None) -> str | None:
-    return await auth.vercel_cli_token(user_id) if user_id else None
+    return await connections.vercel_cli_token(user_id) if user_id else None
 
 
 async def _git_identity(user_id: str | None) -> tuple[str, str] | None:
     if user_id is None:
         return None
-    connection = await auth.github_identity(user_id)
+    connection = await connections.github_identity(user_id)
     if connection is None:
         return None
     login = str(connection.get("login") or "")
@@ -112,6 +84,16 @@ async def _canonicalize_repos(spec: models.WorkerSpec, credential: str | None) -
     spec.repos = canonical
 
 
+async def _credentials(
+    spec: models.WorkerSpec, user_id: str | None, *, required: bool
+) -> tuple[str | None, str | None, tuple[str, str] | None]:
+    github = await _github_credential(user_id, required=required)
+    vercel = await _vercel_credential(user_id)
+    identity = await _git_identity(user_id)
+    await _canonicalize_repos(spec, github)
+    return github, vercel, identity
+
+
 async def _configure_repo_remotes(box, spec: models.WorkerSpec) -> None:
     for repo in spec.repos:
         await box.run_process(
@@ -130,9 +112,9 @@ async def provision(
     user_id: str | None = None,
 ) -> Provisioned:
     name = f"hatchery-{worker_id}"
-    credential = await _github_credential(user_id, required=bool(spec.repos))
-    await _canonicalize_repos(spec, credential)
-    vercel_credential = await _vercel_credential(user_id)
+    credential, vercel_credential, identity = await _credentials(
+        spec, user_id, required=bool(spec.repos)
+    )
     network_policy = await _network_policy(
         credential, os.environ.get("VERCEL_REGION"), vercel_credential
     )
@@ -170,7 +152,7 @@ async def provision(
             worker_id,
             spec,
             daemon_token,
-            user_id=user_id,
+            identity=identity,
             vercel_connected=vercel_credential is not None,
         )
     routes = [models.Route(port=route.port, url=route.url) for route in box.routes]
@@ -188,16 +170,6 @@ async def destroy(name: str) -> None:
     await box.destroy()
 
 
-async def resume(name: str, worker_id: str, spec: models.WorkerSpec, token: str) -> None:
-    box = await vercel_sandbox.resume_sandbox(name=name)
-    await box.update_network_policy(
-        await _network_policy(await git.git_credentials(), box.region, None)
-    )
-    await git.configure(box)
-    routes = [models.Route(port=route.port, url=route.url) for route in box.routes]
-    await repair_daemon(box, worker_id, spec, token, routes)
-
-
 async def prepare_for_command(record: models.Worker) -> None:
     """Acquire a live session, rotate Queue auth, and verify the daemon."""
     async with ai.experimental_telemetry.span("sandbox.prepare") as span:
@@ -209,15 +181,13 @@ async def prepare_for_command(record: models.Worker) -> None:
         box = await vercel_sandbox.resume_sandbox(name=record.sandbox_name)
         span.set_attrs(region=box.region or "")
         await box.update(execution_time_limit=EXECUTION_TIME_LIMIT)
-        credential = await _github_credential(
-            record.user_id, required=bool(record.spec.repos)
+        credential, vercel_credential, identity = await _credentials(
+            record.spec, record.user_id, required=bool(record.spec.repos)
         )
-        vercel_credential = await _vercel_credential(record.user_id)
         await box.update_network_policy(
             await _network_policy(credential, box.region, vercel_credential)
         )
-        await git.configure(box, await _git_identity(record.user_id))
-        await _canonicalize_repos(record.spec, credential)
+        await git.configure(box, identity)
         await _configure_repo_remotes(box, record.spec)
         routes = [models.Route(port=route.port, url=route.url) for route in box.routes]
         async with ai.experimental_telemetry.span("sandbox.daemon.repair") as repair:
@@ -277,7 +247,7 @@ async def _bootstrap(
     spec: models.WorkerSpec,
     token: str,
     *,
-    user_id: str | None = None,
+    identity: tuple[str, str] | None = None,
     vercel_connected: bool = False,
 ):
     await box.fs.mkdir("/opt/hatchery")
@@ -300,7 +270,7 @@ async def _bootstrap(
         check=True,
         capture_output=True,
     )
-    await git.configure(box, await _git_identity(user_id))
+    await git.configure(box, identity)
     for repo in spec.repos[1:]:
         await box.run_process(
             "git",
@@ -376,14 +346,13 @@ async def snapshot(record: models.Worker, snapshot_id: str | None = None) -> str
     await box.stop()
     await box.update(current_snapshot_id=snapshot_id)
     box = await vercel_sandbox.resume_sandbox(name=record.sandbox_name)
-    await box.update_network_policy(
-        await _network_policy(
-            await _github_credential(record.user_id, required=False),
-            box.region,
-            await _vercel_credential(record.user_id),
-        )
+    credential, vercel_credential, identity = await _credentials(
+        record.spec, record.user_id, required=False
     )
-    await git.configure(box)
+    await box.update_network_policy(
+        await _network_policy(credential, box.region, vercel_credential)
+    )
+    await git.configure(box, identity)
     routes = [models.Route(port=route.port, url=route.url) for route in box.routes]
     await repair_daemon(box, record.id, record.spec, record.daemon_token, routes)
     return snapshot_id

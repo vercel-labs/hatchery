@@ -14,7 +14,7 @@ FIXTURES = pathlib.Path(__file__).with_name("testdata")
 
 def _require(subject, name):
     value = getattr(subject, name, None)
-    assert callable(value), f"retained migration contract requires {subject.__name__}.{name}"
+    assert callable(value), f"contract requires {subject.__name__}.{name}"
     return value
 
 

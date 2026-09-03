@@ -89,21 +89,6 @@ async def save_github_connection(user_id: str, connection: dict) -> None:
     await save_connection(user_id, "github", connection)
 
 
-async def save_github_installation(
-    user_id: str, owner: str, installation_id: str
-) -> None:
-    await (await db.pool()).execute(
-        "UPDATE hatchery_users SET data = jsonb_set("
-        "data, '{github}', COALESCE(data->'github', '{}'::jsonb) || "
-        "jsonb_build_object('installations', "
-        "COALESCE(data->'github'->'installations', '{}'::jsonb) || "
-        "jsonb_build_object($2::text, $3::text)), true) WHERE id = $1",
-        user_id,
-        owner.lower(),
-        installation_id,
-    )
-
-
 async def delete_github_connection(user_id: str) -> None:
     await delete_connection(user_id, "github")
 

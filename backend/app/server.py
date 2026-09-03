@@ -30,6 +30,7 @@ import ai.ui.ai_sdk.outbound_stream
 import ai.ui.ai_sdk.ui_events
 import auth
 import channels
+import connections
 import models
 import store
 import vercel.functions
@@ -193,7 +194,8 @@ async def browser_session(request: fastapi.Request, call_next):
         or path.startswith("/api/auth/")
         or path.startswith("/channels/")
     )
-    user = await auth.current_user(request) if path.startswith("/api/") and not public else None
+    user = await auth.current_user(request) if path.startswith("/api/") else None
+    request.state.user = user
     if path.startswith("/api/") and not public and user is None:
         return fastapi.responses.JSONResponse({"detail": "sign in required"}, status_code=401)
     match = re.match(r"^/api/chats/([^/]+)", path)
@@ -236,7 +238,7 @@ async def auth_callback(request: fastapi.Request, code: str = "", state: str = "
 
 @app.get("/api/auth/me")
 async def auth_me(request: fastapi.Request) -> dict:
-    return {"user": await auth.current_user(request)}
+    return {"user": request.state.user}
 
 
 @app.post("/api/auth/logout")
@@ -246,52 +248,36 @@ async def auth_logout(request: fastapi.Request):
 
 @app.get("/api/connections/github")
 async def github_connection(request: fastapi.Request) -> dict:
-    user = await auth.current_user(request)
-    if user is None:
-        raise fastapi.HTTPException(401, "sign in required")
-    connection = auth.github_connection(user)
+    user = request.state.user
+    connection = connections.github_connection(user)
     if connection is None:
         return {"connection": None}
     try:
-        await auth.github_token(user["id"], connection.get("installation_id"))
-    except (
-        auth.connect.UserAuthorizationRequiredError,
-        auth.connect.NoValidTokenError,
-        auth.connect.ConnectorInstallationRequiredError,
-    ):
+        await connections.github_token(user["id"], connection.get("installation_id"))
+    except connections.ConnectionRequired:
         return {"connection": None}
     return {"connection": connection}
 
 
 @app.get("/api/connections/github/authorize")
 async def authorize_github(request: fastapi.Request):
-    user = await auth.current_user(request)
-    if user is None:
-        raise fastapi.HTTPException(401, "sign in required")
-    return await auth.begin_github(request, user)
+    user = request.state.user
+    return await connections.begin_github(request, user)
 
 
 @app.get("/api/connections/github/return")
 async def github_return(request: fastapi.Request):
-    user = await auth.current_user(request)
-    if user is None:
-        raise fastapi.HTTPException(401, "sign in required")
+    user = request.state.user
     try:
-        return await auth.finish_github(user)
-    except (
-        auth.connect.UserAuthorizationRequiredError,
-        auth.connect.NoValidTokenError,
-        auth.connect.ConnectorInstallationRequiredError,
-    ) as error:
+        return await connections.finish_github(user)
+    except connections.ConnectionRequired as error:
         raise fastapi.HTTPException(409, "GitHub authorization was not completed") from error
 
 
 @app.delete("/api/connections/github", status_code=204)
 async def disconnect_github(request: fastapi.Request) -> None:
-    user = await auth.current_user(request)
-    if user is None:
-        raise fastapi.HTTPException(401, "sign in required")
-    await auth.disconnect_github(user)
+    user = request.state.user
+    await connections.disconnect_github(user)
 
 
 class VercelCLIRequest(pydantic.BaseModel):
@@ -300,21 +286,17 @@ class VercelCLIRequest(pydantic.BaseModel):
 
 @app.get("/api/connections/vercel-cli")
 async def vercel_cli_connection(request: fastapi.Request) -> dict:
-    user = await auth.current_user(request)
-    if user is None:
-        raise fastapi.HTTPException(401, "sign in required")
-    return {"connection": await auth.vercel_cli_connection(user["id"])}
+    user = request.state.user
+    return {"connection": await connections.vercel_cli_connection(user["id"])}
 
 
 @app.put("/api/connections/vercel-cli")
 async def connect_vercel_cli(
     request: fastapi.Request, body: VercelCLIRequest
 ) -> dict:
-    user = await auth.current_user(request)
-    if user is None:
-        raise fastapi.HTTPException(401, "sign in required")
+    user = request.state.user
     try:
-        connection = await auth.connect_vercel_cli(user["id"], body.token)
+        connection = await connections.connect_vercel_cli(user["id"], body.token)
     except ValueError as error:
         raise fastapi.HTTPException(400, str(error)) from error
     return {"connection": connection}
@@ -322,10 +304,8 @@ async def connect_vercel_cli(
 
 @app.delete("/api/connections/vercel-cli", status_code=204)
 async def disconnect_vercel_cli(request: fastapi.Request) -> None:
-    user = await auth.current_user(request)
-    if user is None:
-        raise fastapi.HTTPException(401, "sign in required")
-    await auth.disconnect_vercel_cli(user["id"])
+    user = request.state.user
+    await connections.disconnect_vercel_cli(user["id"])
 
 
 class SpaceWarning(pydantic.BaseModel):
@@ -342,21 +322,15 @@ async def list_spaces() -> list[models.Space]:
 
 @app.get("/api/spaces/warnings")
 async def space_warnings(request: fastapi.Request) -> list[SpaceWarning]:
-    user = await auth.current_user(request)
-    if user is None:
-        raise fastapi.HTTPException(401, "sign in required")
+    user = request.state.user
     warnings = []
     for space in await spaces.list_all() or [await spaces.default()]:
         if not space.repos:
             continue
         repo = space.repos[0]
         try:
-            warning = await auth.github_repo_warning(user["id"], repo)
-        except (
-            auth.connect.UserAuthorizationRequiredError,
-            auth.connect.NoValidTokenError,
-            auth.connect.ConnectorInstallationRequiredError,
-        ):
+            warning = await connections.github_repo_warning(user["id"], repo)
+        except connections.ConnectionRequired:
             warning = f"Connect GitHub to let Hatchery make pull requests to {repo}."
         if warning is None:
             continue
@@ -450,7 +424,7 @@ async def update_space_resources(
 
 @app.get("/api/chats")
 async def list_chats(request: fastapi.Request) -> list[models.Chat]:
-    user = await auth.current_user(request)
+    user = request.state.user
     found = []
     if user is not None:
         for chat in await chats.list_all():
@@ -474,7 +448,7 @@ class CreateChatRequest(pydantic.BaseModel):
 
 @app.post("/api/chats")
 async def create_chat(request: CreateChatRequest, http_request: fastapi.Request) -> models.Chat:
-    user = await auth.current_user(http_request)
+    user = http_request.state.user
     found = await spaces.list_all()
     if not found:
         found = [await spaces.default()]
