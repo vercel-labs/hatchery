@@ -1,6 +1,6 @@
 # hatchery
 
-See `AGENTS.md` for layout and development commands.
+See `AGENTS.md` for the repository layout and development commands.
 
 The worker layer always uses Vercel Sandbox and Queues. Local development uses
 Vercel's local Queue broker through the same daemon, topics, protocol, and
