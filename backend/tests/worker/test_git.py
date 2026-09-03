@@ -79,7 +79,7 @@ def test_non_signature_failure_and_recursion_guard_do_not_sign(monkeypatch):
     assert calls == []
 
 
-def test_sign_request_preserves_chain_and_omits_app_author():
+def test_sign_request_preserves_chain_without_local_identity():
     commits = [
         git.Commit("a", "tree", ("base",), "first", "A", "a@example.com"),
         git.Commit("b", "tree2", ("a",), "second", git.GITHUB_BOT_NAME, git.GITHUB_BOT_EMAIL),
@@ -92,12 +92,30 @@ def test_sign_request_preserves_chain_and_omits_app_author():
         branch="hatchery/sign-1",
         env={"GIT_CONFIG_COUNT": "1", "PATH": "x"},
     )
-    assert request["commits"][0]["original_author"]["email"] == "a@example.com"
-    assert "original_author" not in request["commits"][1]
+    assert request["commits"][0] == {
+        "sha": "a", "tree_sha": "tree", "parents": ["base"], "message": "first",
+    }
+    assert request["commits"][1]["message"] == "second"
     assert request["base_oid"] == "a" * 40
     assert request["branch"] == "hatchery/sign-1"
     assert request["env"] == {"PATH": "x"}
     assert git.first_unsigned_commit([git.Commit("a", "t", (), "m", git.GITHUB_BOT_NAME, git.GITHUB_BOT_EMAIL)]) == -1
+
+
+def test_commit_message_attributes_hatchery_once():
+    assert git._commit_message("change") == {
+        "headline": "change",
+        "body": git.HATCHERY_CO_AUTHOR,
+    }
+    assert git._commit_message("change\n\ndetails") == {
+        "headline": "change",
+        "body": f"details\n\n{git.HATCHERY_CO_AUTHOR}",
+    }
+    assert git._commit_message(f"change\n\ndetails\n\n{git.HATCHERY_CO_AUTHOR}") == {
+        "headline": "change",
+        "body": f"details\n\n{git.HATCHERY_CO_AUTHOR}",
+    }
+    assert "a@example.com" not in git._commit_message("change")["body"]
 
 
 def test_commit_chain_uses_local_main_when_remote_tracking_refs_are_absent(tmp_path):
@@ -216,6 +234,10 @@ def test_sign_chain_sends_local_changes_without_unsigned_source_ref(monkeypatch)
     assert url == "https://api.github.com/graphql"
     assert headers["Authorization"] == "Bearer sandbox-network-policy-placeholder"
     assert request["query"] == git.CREATE_COMMIT_MUTATION
+    assert request["variables"]["input"]["message"] == {
+        "headline": "change",
+        "body": git.HATCHERY_CO_AUTHOR,
+    }
     assert request["variables"]["input"]["fileChanges"]["additions"][0]["path"] == "new.txt"
     assert calls[-2:] == [
         ("fetch", "https://github.com/acme/app.git", "c" * 40),

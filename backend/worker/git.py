@@ -15,6 +15,7 @@ import uuid
 
 GITHUB_BOT_NAME = "GitHub"
 GITHUB_BOT_EMAIL = "noreply@github.com"
+HATCHERY_CO_AUTHOR = "Co-Authored-By: hatchery-conn[bot] <320700705+hatchery-conn[bot]@users.noreply.github.com>"
 SIGNING_REJECTION = "must have verified signatures"
 SIGNING_GUARD = "HATCHERY_SIGN_IN_PROGRESS"
 GRAPHQL_URL = "https://api.github.com/graphql"
@@ -341,10 +342,7 @@ def sign_request(
     items = []
     for value in commits:
         commit = value if isinstance(value, Commit) else Commit(**value)
-        item = {"sha": commit.sha, "tree_sha": commit.tree, "parents": list(commit.parents), "message": commit.message}
-        if commit.committer_name and commit.committer_email and not is_signed_by_app(commit):
-            item["original_author"] = {"name": commit.committer_name, "email": commit.committer_email}
-        items.append(item)
+        items.append({"sha": commit.sha, "tree_sha": commit.tree, "parents": list(commit.parents), "message": commit.message})
     request = {
         "repo": {"owner": owner, "name": repo},
         "base_oid": base_oid,
@@ -518,6 +516,14 @@ def _commit_changes(repo_dir: str, env: dict[str, str], parent: str, commit: str
     return {"additions": additions, "deletions": deletions}
 
 
+def _commit_message(message: str) -> dict[str, str]:
+    headline, separator, body = message.partition("\n")
+    body = body.rstrip().lstrip("\n")
+    if HATCHERY_CO_AUTHOR not in body:
+        body = f"{body}\n\n{HATCHERY_CO_AUTHOR}".strip()
+    return {"headline": headline, **({"body": body} if separator or body else {})}
+
+
 def _sign_chain(repo_dir: str, env: dict[str, str]) -> None:
     """Ask GitHub to replay commits onto a temporary, automatically signed branch."""
     base, commits = _commit_chain(repo_dir, env)
@@ -541,14 +547,6 @@ def _sign_chain(repo_dir: str, env: dict[str, str]) -> None:
         signed = []
         expected = base
         for item in request["commits"]:
-            message = str(item.get("message") or "")
-            headline, separator, message_body = message.partition("\n")
-            author = item.get("original_author")
-            if isinstance(author, dict) and author.get("name") and author.get("email"):
-                trailer = f"Co-Authored-By: {author['name']} <{author['email']}>"
-                message_body = message_body.rstrip()
-                if trailer not in message_body:
-                    message_body = f"{message_body}\n\n{trailer}".strip()
             variables = {
                 "input": {
                     "branch": {
@@ -556,10 +554,7 @@ def _sign_chain(repo_dir: str, env: dict[str, str]) -> None:
                         "branchName": branch,
                     },
                     "expectedHeadOid": expected,
-                    "message": {
-                        "headline": headline,
-                        **({"body": message_body} if separator or message_body else {}),
-                    },
+                    "message": _commit_message(str(item.get("message") or "")),
                     "fileChanges": item["file_changes"],
                 }
             }

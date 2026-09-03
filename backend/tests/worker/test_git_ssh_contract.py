@@ -51,7 +51,7 @@ GIT_CONTRACTS = [
     (sandbox, "push_with_signing_fallback", "bare_git_is_harmless"),
     (sandbox, "scrub_git_config_env", "signing_proxy_scrubs_git_config_environment"),
     (sandbox, "first_unsigned_commit", "app_committed_prefix_is_skipped"),
-    (sandbox, "sign_request", "bot_original_author_is_omitted"),
+    (sandbox, "sign_request", "local_commit_identity_is_omitted"),
     (sandbox, "sign_request", "sign_request_carries_base_ref_range_and_env"),
     (sandbox, "is_signed_by_app", "already_app_signed_commit_is_detected"),
     (sandbox, "origin_owner_repo", "origin_owner_and_repo_are_parsed"),
