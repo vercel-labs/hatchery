@@ -23,6 +23,21 @@ SCOPES = "openid email profile"
 log = logging.getLogger("auth")
 
 
+def allowed_email(email: object) -> bool:
+    """Return whether an exact email is allowed for this deployment."""
+    supplied = str(email or "").strip().casefold()
+    configured = {
+        item.strip().casefold()
+        for item in os.environ.get("HATCHERY_ALLOWED_EMAILS", "").split(",")
+        if item.strip()
+    }
+    return bool(supplied and supplied in configured)
+
+
+def allowed_user(user: dict | None) -> bool:
+    return user is not None and allowed_email(user.get("email"))
+
+
 def _client_id() -> str:
     return os.environ["VERCEL_APP_CLIENT_ID"]
 
@@ -130,6 +145,8 @@ async def callback(
         )
     tokens = response.json()
     claims = await verify_id_token(tokens["id_token"], pending["nonce"])
+    if not allowed_email(claims.get("email")):
+        raise fastapi.HTTPException(403, "email is not allowed")
     user = await auth_store.save_user(
         {
             "id": claims["sub"],
@@ -174,7 +191,8 @@ async def verify_id_token(token: str, nonce: str) -> dict:
 
 
 async def session_user(session_id: str) -> dict | None:
-    return await auth_store.session_user(session_id) if session_id else None
+    user = await auth_store.session_user(session_id) if session_id else None
+    return user if allowed_user(user) else None
 
 
 async def current_user(request: fastapi.Request) -> dict | None:

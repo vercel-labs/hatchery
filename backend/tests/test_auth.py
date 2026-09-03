@@ -157,6 +157,37 @@ async def test_callback_logs_nested_token_exchange_error(monkeypatch, caplog):
     assert "error=invalid_grant description=Code expired" in caplog.text
 
 
+async def test_callback_rejects_email_outside_allowlist(monkeypatch):
+    async def consume(_state):
+        return {"nonce": "nonce", "verifier": "verifier", "redirect_uri": "http://localhost/callback"}
+
+    async def verify(_token, _nonce):
+        return {"sub": "user_1", "email": "outsider@example.com"}
+
+    def responder(_request):
+        return httpx.Response(200, json={"id_token": "id"})
+
+    class Client(httpx.AsyncClient):
+        def __init__(self, **kwargs):
+            super().__init__(transport=httpx.MockTransport(responder), **kwargs)
+
+    monkeypatch.setattr(auth.auth_store, "consume_oauth_state", consume)
+    monkeypatch.setattr(auth, "verify_id_token", verify)
+    monkeypatch.setattr(auth.httpx, "AsyncClient", Client)
+
+    with pytest.raises(fastapi.HTTPException) as raised:
+        await auth.callback(request(), "code", "state")
+
+    assert raised.value.status_code == 403
+    assert raised.value.detail == "email is not allowed"
+
+
+def test_allowed_user_rechecks_current_deployment_allowlist():
+    assert auth.allowed_user({"id": "user_1", "email": " TEST@VERCEL.COM "}) is True
+    assert auth.allowed_user({"id": "user_2", "email": "removed@vercel.com"}) is False
+    assert auth.allowed_user(None) is False
+
+
 async def test_callback_creates_session_without_storing_provider_tokens(monkeypatch):
     seen = {}
 
@@ -165,7 +196,7 @@ async def test_callback_creates_session_without_storing_provider_tokens(monkeypa
 
     async def verify(_token, nonce):
         assert nonce == "nonce"
-        return {"sub": "user_1", "email": "ada@example.com", "name": "Ada"}
+        return {"sub": "user_1", "email": "test@vercel.com", "name": "Ada"}
 
     async def save_user(user):
         seen["user"] = user

@@ -80,8 +80,14 @@ class _StoreHub:
                     str(inbound.state.get("team_id", "")),
                     str(inbound.state.get("user_id", "")),
                 )
-                if user_id is None:
-                    span.set_attrs(ignored="unconnected_slack_user")
+            elif channel == "github":
+                user_id = await connections.auth_store.github_user(
+                    str(inbound.state.get("sender_id", ""))
+                )
+            if channel in {"slack", "github"}:
+                user = await connections.auth_store.get_user(user_id) if user_id else None
+                if not auth.allowed_user(user):
+                    span.set_attrs(ignored=f"unconnected_or_disallowed_{channel}_user")
                     return
             found = await spaces.list_all() or [await spaces.default()]
             title = inbound.title or inbound.text.strip().splitlines()[0][:80]
