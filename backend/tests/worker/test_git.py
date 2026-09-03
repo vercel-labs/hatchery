@@ -100,6 +100,27 @@ def test_sign_request_preserves_chain_and_omits_app_author():
     assert git.first_unsigned_commit([git.Commit("a", "t", (), "m", git.GITHUB_BOT_NAME, git.GITHUB_BOT_EMAIL)]) == -1
 
 
+def test_commit_chain_uses_local_main_when_remote_tracking_refs_are_absent(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "a@example.com"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "commit.gpgsign", "false"], check=True)
+    (repo / "README.md").write_text("base\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "base"], check=True)
+    base = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    subprocess.run(["git", "-C", str(repo), "switch", "-qc", "feature"], check=True)
+    (repo / "README.md").write_text("base\nchange\n")
+    subprocess.run(["git", "-C", str(repo), "commit", "-qam", "change"], check=True)
+
+    found_base, commits = git._commit_chain(str(repo), dict(__import__("os").environ))
+
+    assert found_base == base
+    assert [commit.message.strip() for commit in commits] == ["change"]
+
+
 def test_commit_changes_are_read_locally_without_uploading_unsigned_commit(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -164,12 +185,18 @@ def test_sign_chain_sends_local_changes_without_unsigned_source_ref(monkeypatch)
             return None
 
         def read(self):
-            return json.dumps({"signed_shas": ["c" * 40]}).encode()
+            return json.dumps({
+                "data": {
+                    "createCommitOnBranch": {
+                        "commit": {"oid": "c" * 40, "signature": {"isValid": True}}
+                    }
+                }
+            }).encode()
 
     requests = []
 
     def urlopen(request, timeout):
-        requests.append((json.loads(request.data), timeout))
+        requests.append((json.loads(request.data), timeout, request.full_url, request.headers))
         return Response()
 
     monkeypatch.setattr(git, "_git", run_git)
@@ -184,7 +211,12 @@ def test_sign_chain_sends_local_changes_without_unsigned_source_ref(monkeypatch)
         next(arg for arg in calls[0] if arg.startswith("a" * 40 + ":refs/heads/hatchery/sign-")),
     )
     assert not any("source-" in arg for call in calls for arg in call)
-    assert requests[0][0]["commits"][0]["file_changes"]["additions"][0]["path"] == "new.txt"
+    request, timeout, url, headers = requests[0]
+    assert timeout == 60
+    assert url == "https://api.github.com/graphql"
+    assert headers["Authorization"] == "Bearer sandbox-network-policy-placeholder"
+    assert request["query"] == git.CREATE_COMMIT_MUTATION
+    assert request["variables"]["input"]["fileChanges"]["additions"][0]["path"] == "new.txt"
     assert calls[-2:] == [
         ("fetch", "https://github.com/acme/app.git", "c" * 40),
         ("reset", "--hard", "c" * 40),
@@ -199,14 +231,13 @@ def test_origin_parser_accepts_https_and_ssh():
 def test_agent_environment_scrubs_control_plane_secrets():
     env = main.agent_environment({
         "PATH": "/usr/bin", "HATCHERY_DAEMON_TOKEN": "secret",
-        "HATCHERY_SIGN_URL": "https://backend.example/sign", "VERCEL_QUEUE_TOKEN": "queue",
+        "VERCEL_QUEUE_TOKEN": "queue",
         "GH_TOKEN": "github", "AI_GATEWAY_API_KEY": "gateway-key", "SAFE": "yes",
     })
     assert env["SAFE"] == "yes"
     assert env["AI_GATEWAY_API_KEY"] == "gateway-key"
     assert env["PATH"].startswith("/opt/hatchery/bin:")
     assert "HATCHERY_DAEMON_TOKEN" not in env
-    assert "HATCHERY_SIGN_URL" not in env
     assert "VERCEL_QUEUE_TOKEN" not in env
     assert env["GH_TOKEN"] == "sandbox-network-policy-placeholder"
     assert env["GH_TOKEN"] != "github"

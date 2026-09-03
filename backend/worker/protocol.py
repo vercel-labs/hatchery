@@ -9,12 +9,9 @@ import pydantic
 VERSION = 1
 EVENT_TOPIC = "hatchery-worker-events-v1"
 
-CommandType = typing.Literal[
-    "task.launch", "task.input", "task.cancel", "sign.completed", "sign.failed"
-]
+CommandType = typing.Literal["task.launch", "task.input", "task.cancel"]
 EventType = typing.Literal[
     "daemon.ready",
-    "sign.requested",
     "task.started",
     "task.output",
     "task.transcript",

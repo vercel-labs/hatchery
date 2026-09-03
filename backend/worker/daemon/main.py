@@ -9,7 +9,6 @@ import collections
 import datetime
 import fcntl
 import hashlib
-import hmac
 import http
 import http.server
 import ipaddress
@@ -50,7 +49,6 @@ def agent_environment(env: dict[str, str] | None = None) -> dict[str, str]:
     source = dict(env or os.environ)
     private = {
         "HATCHERY_DAEMON_TOKEN",
-        "HATCHERY_SIGN_URL",
         "HATCHERY_WORKER_ID",
         "VERCEL_OIDC_TOKEN",
         "VERCEL_QUEUE_TOKEN",
@@ -100,8 +98,6 @@ class Runtime:
         self.fx_home = pathlib.Path(os.environ.get("FX_HOME", pathlib.Path.home() / ".fx"))
         self.instructions = os.environ.get("HATCHERY_AGENT_INSTRUCTIONS", "")
         self.loop: asyncio.AbstractEventLoop | None = None
-        self.sign_requests: dict[str, tuple[threading.Event, dict]] = {}
-        self.sign_requests_lock = threading.Lock()
 
     async def handle(self, raw: dict) -> None:
         """Accept one command only after its process handoff is complete.
@@ -114,14 +110,6 @@ class Runtime:
         if raw.get("worker_id") != self.worker_id:
             return
         kind = raw.get("type")
-        if kind in ("sign.completed", "sign.failed"):
-            request_id = str((raw.get("payload") or {}).get("request_id") or "")
-            with self.sign_requests_lock:
-                pending = self.sign_requests.get(request_id)
-                if pending is not None:
-                    pending[1].update(raw.get("payload") or {})
-                    pending[0].set()
-            return
         if not task_id:
             return
         sequence = int(raw.get("sequence", -1))
@@ -653,43 +641,6 @@ class Runtime:
                 "payload": payload,
             }
         )
-
-    def request_signing(self, request: dict, timeout: float = 300) -> list[str]:
-        if self.loop is None:
-            raise RuntimeError("commit signing is not configured")
-        request_id = f"sign_{uuid.uuid4().hex}"
-        ready = threading.Event()
-        result: dict = {}
-        with self.sign_requests_lock:
-            self.sign_requests[request_id] = (ready, result)
-        try:
-            serialized = json.dumps(request, sort_keys=True, separators=(",", ":"))
-            signature = hmac.new(
-                os.environ.get("HATCHERY_DAEMON_TOKEN", "").encode(),
-                f"{request_id}:{serialized}".encode(),
-                hashlib.sha256,
-            ).hexdigest()
-            future = asyncio.run_coroutine_threadsafe(
-                self._emit(
-                    "",
-                    "sign.requested",
-                    {
-                        "request_id": request_id,
-                        "signature": signature,
-                        "request": request,
-                    },
-                ),
-                self.loop,
-            )
-            future.result(timeout=timeout)
-            if not ready.wait(timeout):
-                raise TimeoutError("commit signing timed out")
-            if error := result.get("error"):
-                raise RuntimeError(str(error))
-            return [str(sha) for sha in result.get("signed_shas") or []]
-        finally:
-            with self.sign_requests_lock:
-                self.sign_requests.pop(request_id, None)
 
     def _save_state(self) -> None:
         if self.state_path is None:
@@ -1236,53 +1187,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         loopback = self.client_address[0] in ("127.0.0.1", "::1")
-        if self.path in ("/pr-created", "/sign-commits"):
+        if self.path == "/pr-created":
             if not loopback:
                 self.send_error(403)
                 return
             body = self._json()
-            if self.path == "/pr-created":
-                url = str(body.get("url") or "")
-                if not re.fullmatch(r"https://github\.com/[^/\s]+/[^/\s]+/pull/\d+", url):
-                    self.send_error(400)
-                    return
-                runtime = self.runtime
-                task_id = str(body.get("task_id") or "")
-                if body.get("workspace") != self.workspace:
-                    self.send_error(403)
-                    return
-                if runtime is not None and task_id:
-                    asyncio.run_coroutine_threadsafe(
-                        runtime._emit(task_id, "task.output", {"pull_request": body}),
-                        runtime.loop,
-                    )
-                self._send_json({"ok": True})
+            url = str(body.get("url") or "")
+            if not re.fullmatch(r"https://github\.com/[^/\s]+/[^/\s]+/pull/\d+", url):
+                self.send_error(400)
                 return
-            if self.runtime is None or self.runtime.loop is None:
-                self.send_error(503, "commit signing is not configured")
+            runtime = self.runtime
+            task_id = str(body.get("task_id") or "")
+            if body.get("workspace") != self.workspace:
+                self.send_error(403)
                 return
-            repo = body.get("repo") or {}
-            owner = str(repo.get("owner") or "")
-            name = str(repo.get("name") or "")
-            requested = [str(item.get("sha") or "") for item in body.get("commits") or []]
-            try:
-                origin = subprocess.run(
-                    ["git", "-C", self.workspace, "remote", "get-url", "origin"],
-                    text=True, capture_output=True, check=True,
-                ).stdout.strip()
-                match = re.search(r"github\.com[/:]([^/]+)/([^/#]+?)(?:\.git)?$", origin)
-                if match is None or (owner, name) != match.groups() or not requested:
-                    raise ValueError("sign request does not match the workspace repository")
-                for sha in requested:
-                    subprocess.run(
-                        ["git", "-C", self.workspace, "cat-file", "-e", f"{sha}^{{commit}}"],
-                        capture_output=True, check=True,
-                    )
-                signed = self.runtime.request_signing(body)
-            except Exception as error:
-                self.send_error(502, str(error))
-                return
-            self._send_json({"signed_shas": signed})
+            if runtime is not None and task_id:
+                asyncio.run_coroutine_threadsafe(
+                    runtime._emit(task_id, "task.output", {"pull_request": body}),
+                    runtime.loop,
+                )
+            self._send_json({"ok": True})
             return
         if not self._authorized():
             return

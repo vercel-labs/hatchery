@@ -17,6 +17,14 @@ GITHUB_BOT_NAME = "GitHub"
 GITHUB_BOT_EMAIL = "noreply@github.com"
 SIGNING_REJECTION = "must have verified signatures"
 SIGNING_GUARD = "HATCHERY_SIGN_IN_PROGRESS"
+GRAPHQL_URL = "https://api.github.com/graphql"
+CREATE_COMMIT_MUTATION = """
+mutation CreateCommit($input: CreateCommitOnBranchInput!) {
+  createCommitOnBranch(input: $input) {
+    commit { oid signature { isValid } }
+  }
+}
+"""
 GIT_CONFIG_ENV = (
     "GIT_CONFIG_GLOBAL",
     "GIT_CONFIG_SYSTEM",
@@ -431,11 +439,16 @@ def _git(repo_dir: str, env: dict[str, str], *args: str) -> str:
 
 
 def _commit_chain(repo_dir: str, env: dict[str, str]) -> tuple[str, list[Commit]]:
-    try:
-        upstream = _git(repo_dir, env, "rev-parse", "@{upstream}").strip()
-        base = _git(repo_dir, env, "merge-base", upstream, "HEAD").strip()
-    except RuntimeError:
-        base = _git(repo_dir, env, "merge-base", "origin/main", "HEAD").strip()
+    candidates = ["@{upstream}", "refs/remotes/origin/HEAD", "refs/remotes/origin/main", "refs/heads/main"]
+    base = ""
+    for candidate in candidates:
+        try:
+            base = _git(repo_dir, env, "merge-base", candidate, "HEAD").strip()
+            break
+        except RuntimeError:
+            continue
+    if not base:
+        raise RuntimeError("could not find the base branch for commit signing")
     separator = "\x1f"
     record = "\x1e"
     output = _git(
@@ -525,13 +538,52 @@ def _sign_chain(repo_dir: str, env: dict[str, str]) -> None:
                 repo_dir, env, parent, str(item["sha"])
             )
             parent = str(item["sha"])
-        url = os.environ.get("HATCHERY_SIGN_URL", "http://127.0.0.1:8787/sign-commits")
-        body = json.dumps(request).encode()
-        with urllib.request.urlopen(urllib.request.Request(url, data=body, headers={"content-type": "application/json"}), timeout=300) as response:
-            result = json.load(response)
-        signed = result.get("signed_shas") or result.get("signedShas") or []
-        if len(signed) != len(commits):
-            raise RuntimeError("signing service returned an incomplete commit chain")
+        signed = []
+        expected = base
+        for item in request["commits"]:
+            message = str(item.get("message") or "")
+            headline, separator, message_body = message.partition("\n")
+            author = item.get("original_author")
+            if isinstance(author, dict) and author.get("name") and author.get("email"):
+                trailer = f"Co-Authored-By: {author['name']} <{author['email']}>"
+                message_body = message_body.rstrip()
+                if trailer not in message_body:
+                    message_body = f"{message_body}\n\n{trailer}".strip()
+            variables = {
+                "input": {
+                    "branch": {
+                        "repositoryNameWithOwner": f"{owner}/{repo}",
+                        "branchName": branch,
+                    },
+                    "expectedHeadOid": expected,
+                    "message": {
+                        "headline": headline,
+                        **({"body": message_body} if separator or message_body else {}),
+                    },
+                    "fileChanges": item["file_changes"],
+                }
+            }
+            body = json.dumps({"query": CREATE_COMMIT_MUTATION, "variables": variables}).encode()
+            api_request = urllib.request.Request(
+                GRAPHQL_URL,
+                data=body,
+                headers={
+                    "authorization": "Bearer sandbox-network-policy-placeholder",
+                    "accept": "application/vnd.github+json",
+                    "content-type": "application/json",
+                    "x-github-api-version": "2026-03-10",
+                },
+            )
+            with urllib.request.urlopen(api_request, timeout=60) as response:
+                result = json.load(response)
+            errors = result.get("errors") if isinstance(result, dict) else None
+            if errors:
+                raise RuntimeError(f"GitHub signed commit failed: {str(errors)[:500]}")
+            created = result["data"]["createCommitOnBranch"]["commit"]
+            if not (created.get("signature") or {}).get("isValid"):
+                raise RuntimeError("GitHub created a commit without a valid signature")
+            expected = str(created["oid"])
+            signed.append(expected)
         _git(repo_dir, env, "fetch", remote, signed[-1])
         _git(repo_dir, env, "reset", "--hard", signed[-1])
     finally:

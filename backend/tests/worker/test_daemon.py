@@ -35,34 +35,6 @@ def test_health_is_authenticated(monkeypatch):
         server.server_close()
 
 
-async def test_runtime_round_trips_commit_signing_over_queue(tmp_path):
-    emitted = []
-
-    async def publish(event):
-        emitted.append(event)
-
-    runtime = main.Runtime("wrk_1", str(tmp_path), publish)
-    runtime.loop = asyncio.get_running_loop()
-    result = asyncio.create_task(asyncio.to_thread(
-        runtime.request_signing,
-        {"repo": {"owner": "acme", "name": "app"}},
-        1,
-    ))
-    while not emitted:
-        await asyncio.sleep(0)
-    request_id = emitted[0]["payload"]["request_id"]
-    await runtime.handle({
-        "worker_id": "wrk_1",
-        "task_id": None,
-        "sequence": 0,
-        "type": "sign.completed",
-        "payload": {"request_id": request_id, "signed_shas": ["signed"]},
-    })
-
-    assert await result == ["signed"]
-    assert emitted[0]["type"] == "sign.requested"
-
-
 async def test_runtime_runs_interactive_fx_and_reuses_it_for_follow_up(monkeypatch, tmp_path):
     emitted = []
     commands = []
