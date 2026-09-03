@@ -7,7 +7,6 @@ import {
   ArchiveIcon,
   BookMarkedIcon,
   CheckIcon,
-  ChevronDownIcon,
   ChevronsUpDownIcon,
   FolderGitIcon,
   GitBranchIcon,
@@ -93,6 +92,7 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   Sidebar,
   SidebarContent,
+  SidebarFooter,
   SidebarGroup,
   SidebarGroupAction,
   SidebarGroupContent,
@@ -158,6 +158,7 @@ function ChatSidebarItem({
       <SidebarMenuButton
         className="relative pl-3"
         isActive={selected}
+        aria-current={selected ? "page" : undefined}
         render={<Link href={`/chats/${encodeURIComponent(chat.id)}`} />}
         tooltip={chat.topic ?? chat.title}
       >
@@ -210,7 +211,7 @@ export function AppShell() {
   const [vercelSheetOpen, setVercelSheetOpen] = useState(false);
   const [vercelError, setVercelError] = useState("");
   const [savingVercel, setSavingVercel] = useState(false);
-  const [archiveOpen, setArchiveOpen] = useState(false);
+  const [archiveOpen, setArchiveOpen] = useState<boolean | null>(null);
   // set by space clicks only; chat clicks leave the order alone
   const [sortSpaceId, setSortSpaceId] = useState<string | null>(null);
 
@@ -326,7 +327,7 @@ export function AppShell() {
   const archivedChats = chats
     ?.filter((chat) => chat.archived_at !== null)
     .sort((a, b) => (b.archived_at ?? "").localeCompare(a.archived_at ?? "")) ?? [];
-  const archiveExpanded = archiveOpen || Boolean(selectedChat?.archived_at);
+  const archiveView = archiveOpen ?? Boolean(selectedChat?.archived_at);
 
   const createSpace = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -532,123 +533,20 @@ export function AppShell() {
         <SidebarSeparator />
 
         <SidebarContent>
-          <SidebarGroup>
-            <SidebarGroupLabel>Spaces</SidebarGroupLabel>
-            <SidebarGroupAction
-              title="New space"
-              aria-label="New space"
-              onClick={() => setAddingSpace(true)}
-            >
-              <PlusIcon />
-            </SidebarGroupAction>
-            <SidebarGroupContent>
-              {addingSpace && (
-                <form className="flex gap-1 px-2 pb-1" onSubmit={createSpace}>
-                  <Input
-                    autoFocus
-                    value={spaceName}
-                    onChange={(event) => setSpaceName(event.target.value)}
-                    placeholder="Space name"
-                    aria-label="Space name"
-                    className="h-7"
-                  />
-                  <Button type="submit" size="icon-xs" disabled={!spaceName.trim()}>
-                    <CheckIcon />
-                    <span className="sr-only">Add space</span>
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon-xs"
-                    onClick={() => {
-                      setAddingSpace(false);
-                      setSpaceName("");
-                    }}
-                  >
-                    <XIcon />
-                    <span className="sr-only">Cancel</span>
-                  </Button>
-                </form>
-              )}
-              <SidebarMenu>
-                {spaces === null
-                  ? Array.from({ length: failed ? 0 : 2 }).map((_, i) => (
-                      <SidebarMenuItem key={i}>
-                        <SidebarMenuSkeleton />
-                      </SidebarMenuItem>
-                    ))
-                  : spaces.map((space) => (
-                      <SidebarMenuItem key={space.id}>
-                        <SidebarMenuButton
-                          isActive={selectedSpace?.id === space.id}
-                          onClick={() => setSortSpaceId(space.id)}
-                          render={
-                            <Link href={`/spaces/${encodeURIComponent(space.id)}`} />
-                          }
-                          tooltip={space.name}
-                        >
-                          <Dot color={space.color} />
-                          <span className="truncate">{space.name}</span>
-                        </SidebarMenuButton>
-                        <SidebarMenuAction
-                          showOnHover
-                          aria-label={`Remove ${space.name}`}
-                          title={`Remove ${space.name}`}
-                          onClick={() => deleteSpace(space)}
-                        >
-                          <Trash2Icon />
-                        </SidebarMenuAction>
-                      </SidebarMenuItem>
-                    ))}
-              </SidebarMenu>
-            </SidebarGroupContent>
-          </SidebarGroup>
-
-          <SidebarGroup>
-            <SidebarGroupLabel>Chats</SidebarGroupLabel>
-            <SidebarGroupAction title="New chat" onClick={createChat}>
-              <PlusIcon />
-            </SidebarGroupAction>
-            <SidebarGroupContent>
-              <SidebarMenu>
-                {sortedChats === null
-                  ? Array.from({ length: failed ? 0 : 4 }).map((_, i) => (
-                      <SidebarMenuItem key={i}>
-                        <SidebarMenuSkeleton />
-                      </SidebarMenuItem>
-                    ))
-                  : sortedChats.map((chat) => (
-                      <ChatSidebarItem
-                        key={chat.id}
-                        chat={chat}
-                        selected={selectedChat?.id === chat.id}
-                        onArchiveChange={(item, archived) =>
-                          void setChatArchived(item, archived)
-                        }
-                      />
-                    ))}
-              </SidebarMenu>
-            </SidebarGroupContent>
-          </SidebarGroup>
-
-          {archivedChats.length > 0 && (
-            <SidebarGroup className="mt-auto border-t border-sidebar-border">
-              <button
-                type="button"
-                className="flex h-8 items-center gap-2 rounded-md px-2 text-xs font-medium text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-                aria-expanded={archiveExpanded}
-                onClick={() => setArchiveOpen((open) => !open)}
+          {archiveView ? (
+            <SidebarGroup aria-label="Archived chats">
+              <SidebarGroupLabel>Archive</SidebarGroupLabel>
+              <SidebarGroupAction
+                title="Close archive"
+                aria-label="Close archive"
+                onClick={() => setArchiveOpen(false)}
               >
-                <ChevronDownIcon
-                  className={archiveExpanded ? "size-4" : "size-4 -rotate-90"}
-                />
-                <span>Archive</span>
-                <span className="ml-auto tabular-nums">{archivedChats.length}</span>
-              </button>
-              {archiveExpanded && (
-                <SidebarGroupContent>
-                  <SidebarMenu>
-                    {archivedChats.map((chat) => (
+                <XIcon />
+              </SidebarGroupAction>
+              <SidebarGroupContent>
+                <SidebarMenu>
+                  {archivedChats.length > 0 ? (
+                    archivedChats.map((chat) => (
                       <ChatSidebarItem
                         key={chat.id}
                         chat={chat}
@@ -657,13 +555,137 @@ export function AppShell() {
                           void setChatArchived(item, archived)
                         }
                       />
-                    ))}
+                    ))
+                  ) : (
+                    <li className="px-2 py-4 text-sm text-muted-foreground">
+                      No archived chats
+                    </li>
+                  )}
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </SidebarGroup>
+          ) : (
+            <>
+              <SidebarGroup>
+                <SidebarGroupLabel>Spaces</SidebarGroupLabel>
+                <SidebarGroupAction
+                  title="New space"
+                  aria-label="New space"
+                  onClick={() => setAddingSpace(true)}
+                >
+                  <PlusIcon />
+                </SidebarGroupAction>
+                <SidebarGroupContent>
+                  {addingSpace && (
+                    <form className="flex gap-1 px-2 pb-1" onSubmit={createSpace}>
+                      <Input
+                        autoFocus
+                        value={spaceName}
+                        onChange={(event) => setSpaceName(event.target.value)}
+                        placeholder="Space name"
+                        aria-label="Space name"
+                        className="h-7"
+                      />
+                      <Button type="submit" size="icon-xs" disabled={!spaceName.trim()}>
+                        <CheckIcon />
+                        <span className="sr-only">Add space</span>
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-xs"
+                        onClick={() => {
+                          setAddingSpace(false);
+                          setSpaceName("");
+                        }}
+                      >
+                        <XIcon />
+                        <span className="sr-only">Cancel</span>
+                      </Button>
+                    </form>
+                  )}
+                  <SidebarMenu>
+                    {spaces === null
+                      ? Array.from({ length: failed ? 0 : 2 }).map((_, i) => (
+                          <SidebarMenuItem key={i}>
+                            <SidebarMenuSkeleton />
+                          </SidebarMenuItem>
+                        ))
+                      : spaces.map((space) => (
+                          <SidebarMenuItem key={space.id}>
+                            <SidebarMenuButton
+                              isActive={selectedSpace?.id === space.id}
+                              onClick={() => setSortSpaceId(space.id)}
+                              render={
+                                <Link href={`/spaces/${encodeURIComponent(space.id)}`} />
+                              }
+                              tooltip={space.name}
+                            >
+                              <Dot color={space.color} />
+                              <span className="truncate">{space.name}</span>
+                            </SidebarMenuButton>
+                            <SidebarMenuAction
+                              showOnHover
+                              aria-label={`Remove ${space.name}`}
+                              title={`Remove ${space.name}`}
+                              onClick={() => deleteSpace(space)}
+                            >
+                              <Trash2Icon />
+                            </SidebarMenuAction>
+                          </SidebarMenuItem>
+                        ))}
                   </SidebarMenu>
                 </SidebarGroupContent>
-              )}
-            </SidebarGroup>
+              </SidebarGroup>
+
+              <SidebarGroup>
+                <SidebarGroupLabel>Chats</SidebarGroupLabel>
+                <SidebarGroupAction title="New chat" onClick={createChat}>
+                  <PlusIcon />
+                </SidebarGroupAction>
+                <SidebarGroupContent>
+                  <SidebarMenu>
+                    {sortedChats === null
+                      ? Array.from({ length: failed ? 0 : 4 }).map((_, i) => (
+                          <SidebarMenuItem key={i}>
+                            <SidebarMenuSkeleton />
+                          </SidebarMenuItem>
+                        ))
+                      : sortedChats.map((chat) => (
+                          <ChatSidebarItem
+                            key={chat.id}
+                            chat={chat}
+                            selected={selectedChat?.id === chat.id}
+                            onArchiveChange={(item, archived) =>
+                              void setChatArchived(item, archived)
+                            }
+                          />
+                        ))}
+                  </SidebarMenu>
+                </SidebarGroupContent>
+              </SidebarGroup>
+            </>
           )}
         </SidebarContent>
+        {!archiveView && (
+          <SidebarFooter className="border-t border-sidebar-border">
+            <SidebarMenu>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  aria-label={`Open archive, ${archivedChats.length} chats`}
+                  onClick={() => setArchiveOpen(true)}
+                  tooltip="Archive"
+                >
+                  <ArchiveIcon />
+                  <span>Archive</span>
+                  {archivedChats.length > 0 && (
+                    <span className="ml-auto tabular-nums">{archivedChats.length}</span>
+                  )}
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            </SidebarMenu>
+          </SidebarFooter>
+        )}
       </Sidebar>
 
       <Sheet open={vercelSheetOpen} onOpenChange={setVercelSheetOpen}>
