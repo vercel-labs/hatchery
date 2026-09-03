@@ -33,6 +33,7 @@ export type SandboxWorkspace = {
   sandbox_name: string;
   title: string;
   status: string;
+  live: boolean;
   created_at: string;
   spec: { repos: string[] };
   routes: Array<{ port: number; url: string }>;
@@ -259,11 +260,17 @@ export function TerminalPane({
   const [selectedTabId, setSelectedTabId] = useState(tabs(latest).at(-1)?.id ?? "");
   const [creating, setCreating] = useState(false);
   const [deletingId, setDeletingId] = useState("");
+  const [authorizedSandboxIds, setAuthorizedSandboxIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const activeSandbox =
     sandboxes.find((box) => box.id === selectedSandboxId) ?? latest;
   const activeTabs = tabs(activeSandbox);
   const activeTab =
     activeTabs.find((tab) => tab.id === selectedTabId) ?? activeTabs.at(-1);
+  const sandboxAuthorized =
+    !!activeSandbox &&
+    (activeSandbox.live || authorizedSandboxIds.has(activeSandbox.id));
   const context = activeSandbox
     ? JSON.stringify(
         {
@@ -308,6 +315,12 @@ export function TerminalPane({
     } finally {
       setCreating(false);
     }
+  };
+
+  const loadSandbox = () => {
+    if (!activeSandbox) return;
+    setAuthorizedSandboxIds((current) => new Set(current).add(activeSandbox.id));
+    if (!activeTab) void createTerminal();
   };
 
   const deleteTab = async (tab: TerminalTab) => {
@@ -423,14 +436,22 @@ export function TerminalPane({
           size="icon-xs"
           className="shrink-0"
           aria-label="New bash terminal"
-          disabled={creating || activeSandbox?.status !== "running"}
+          disabled={
+            creating || activeSandbox?.status !== "running" || !sandboxAuthorized
+          }
           onClick={createTerminal}
         >
           <PlusIcon />
         </Button>
       </div>
-      {activeTab ? (
+      {activeTab && sandboxAuthorized ? (
         <TaskTerminal key={activeTab.id} chatId={chatId} tab={activeTab} />
+      ) : activeSandbox && !sandboxAuthorized ? (
+        <div className="flex min-h-0 flex-1 items-center justify-center">
+          <Button variant="outline" onClick={loadSandbox}>
+            Load sandbox
+          </Button>
+        </div>
       ) : (
         <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-muted-foreground">
           {activeSandbox?.status === "failed" ? "Sandbox failed" : "Sandbox ready"}

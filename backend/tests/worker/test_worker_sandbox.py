@@ -142,6 +142,38 @@ async def test_provision_creates_persistent_sandbox_and_checks_daemon(monkeypatc
     )
 
 
+async def test_is_live_passively_checks_running_status(monkeypatch):
+    calls = []
+
+    async def get_sandbox(*, name):
+        calls.append(name)
+        return types.SimpleNamespace(status=sandbox.vercel_sandbox.SandboxStatus.RUNNING)
+
+    async def resume_sandbox(**_options):
+        raise AssertionError("liveness check must not resume the sandbox")
+
+    monkeypatch.setattr(sandbox.vercel_sandbox, "get_sandbox", get_sandbox)
+    monkeypatch.setattr(sandbox.vercel_sandbox, "resume_sandbox", resume_sandbox)
+
+    assert await sandbox.is_live("hatchery-wrk_1") is True
+    assert calls == ["hatchery-wrk_1"]
+
+
+async def test_is_live_is_false_for_stopped_sandbox_and_lookup_error(monkeypatch):
+    async def stopped(*, name):
+        assert name == "hatchery-wrk_1"
+        return types.SimpleNamespace(status=sandbox.vercel_sandbox.SandboxStatus.STOPPED)
+
+    monkeypatch.setattr(sandbox.vercel_sandbox, "get_sandbox", stopped)
+    assert await sandbox.is_live("hatchery-wrk_1") is False
+
+    async def failed(*, name):
+        raise RuntimeError(f"cannot find {name}")
+
+    monkeypatch.setattr(sandbox.vercel_sandbox, "get_sandbox", failed)
+    assert await sandbox.is_live("hatchery-wrk_1") is False
+
+
 async def test_vercel_token_is_injected_only_for_matching_bearer(monkeypatch):
     async def oidc_token():
         return "oidc-token"

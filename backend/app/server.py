@@ -745,9 +745,14 @@ async def chat_sandboxes(chat_id: str) -> list[dict]:
         raise fastapi.HTTPException(404, "unknown chat")
     tasks = await worker.store.list_tasks(chat_id)
     terminals = await worker.list_terminals(chat_id)
+    sandboxes = await sandbox.list_all(chat_id)
+    liveness = await asyncio.gather(
+        *(worker.sandbox.is_live(item.sandbox_name) for item in sandboxes)
+    )
     result = []
-    for item in await sandbox.list_all(chat_id):
+    for item, live in zip(sandboxes, liveness, strict=True):
         data = item.model_dump(exclude={"daemon_token"})
+        data["live"] = live
         data["subagents"] = [
             {
                 **task.model_dump(),
