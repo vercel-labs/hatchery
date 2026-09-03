@@ -1,6 +1,6 @@
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { PlusIcon } from "lucide-react";
 
 import { ChatMessage } from "@/components/chat-message";
@@ -70,12 +70,22 @@ export function ChatView({
     resume: true,
   });
 
+  const attachedGeneration = useRef(streamGeneration);
+
   useEffect(() => {
     onMessagesChange?.(messages);
   }, [messages, onMessagesChange]);
 
+  useEffect(() => () => {
+    void stop();
+  }, [stop]);
+
   useEffect(() => {
-    if (streamGeneration > 0 && status === "ready") {
+    if (
+      streamGeneration > attachedGeneration.current &&
+      status === "ready"
+    ) {
+      attachedGeneration.current = streamGeneration;
       void resumeStream();
     }
   }, [resumeStream, status, streamGeneration]);

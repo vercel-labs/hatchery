@@ -1134,9 +1134,13 @@ function LiveChat({
       if (event.type === "messages.changed") {
         setMessageRevision((revision) => revision + 1);
       }
-      if (event.type === "stream.available") {
+      if (
+        event.type === "stream.available" &&
+        typeof event.generation === "number"
+      ) {
+        const announcedGeneration = event.generation + 1;
         setStreamGeneration((generation) =>
-          Math.max(generation, (event.generation ?? generation) + 1),
+          Math.max(generation, announcedGeneration),
         );
       }
     };
