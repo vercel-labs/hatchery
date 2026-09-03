@@ -1463,23 +1463,83 @@ def test_worker_event_subscriber_is_serialized():
     assert subscription.max_concurrency == 1
 
 
-async def test_task_tty_rejects_pending_subagent(monkeypatch):
+async def test_task_tty_bridges_pending_subagent_with_daemon_session(monkeypatch):
     task = server.worker.Task(
         id="task_1", chat_id="chat_1", worker_id="wrk_1", title="fix",
         prompt="fix it", model="openai/test",
         created_at="2026-08-31T00:00:00+00:00",
         updated_at="2026-08-31T00:00:00+00:00",
     )
+    record = type("Worker", (), {"id": "wrk_1"})()
+    daemon_sessions = {"task_1"}
+    bridged = []
 
     async def get_task(chat_id, task_id):
+        assert (chat_id, task_id) == ("chat_1", "task_1")
         return task
 
+    async def get_worker(worker_id):
+        assert worker_id == "wrk_1"
+        return record
+
+    async def bridge(ws, found, session_id):
+        assert found is record
+        assert session_id in daemon_sessions
+        bridged.append((ws, session_id))
+
     monkeypatch.setattr(server.worker, "get_task", get_task)
+    monkeypatch.setattr(server.worker, "get", get_worker)
+    monkeypatch.setattr(server, "_bridge_tty", bridge)
     ws = FakeWebSocket()
 
     await server.task_tty(ws, "chat_1", "task_1")
 
-    assert ws.closed == (4409, "subagent is waiting for the sandbox queue")
+    assert bridged == [(ws, "task_1")]
+    assert ws.closed is None
+
+
+async def test_task_tty_bridges_running_and_pending_subagents_to_their_sessions(
+    monkeypatch,
+):
+    tasks = {
+        "task_1": server.worker.Task(
+            id="task_1", chat_id="chat_1", worker_id="wrk_1", title="first",
+            prompt="first task", model="openai/test", status="running",
+            created_at="2026-08-31T00:00:00+00:00",
+            updated_at="2026-08-31T00:00:01+00:00",
+        ),
+        "task_2": server.worker.Task(
+            id="task_2", chat_id="chat_1", worker_id="wrk_1", title="second",
+            prompt="second task", model="openai/test",
+            created_at="2026-08-31T00:00:02+00:00",
+            updated_at="2026-08-31T00:00:02+00:00",
+        ),
+    }
+    record = type("Worker", (), {"id": "wrk_1"})()
+    daemon_sessions = set(tasks)
+    bridged = []
+
+    async def get_task(chat_id, task_id):
+        assert chat_id == "chat_1"
+        return tasks.get(task_id)
+
+    async def get_worker(worker_id):
+        assert worker_id == "wrk_1"
+        return record
+
+    async def bridge(ws, found, session_id):
+        assert found is record
+        assert session_id in daemon_sessions
+        bridged.append(session_id)
+
+    monkeypatch.setattr(server.worker, "get_task", get_task)
+    monkeypatch.setattr(server.worker, "get", get_worker)
+    monkeypatch.setattr(server, "_bridge_tty", bridge)
+
+    await server.task_tty(FakeWebSocket(), "chat_1", "task_1")
+    await server.task_tty(FakeWebSocket(), "chat_1", "task_2")
+
+    assert bridged == ["task_1", "task_2"]
 
 
 class FakeWebSocket:

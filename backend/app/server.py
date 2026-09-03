@@ -1010,10 +1010,6 @@ async def task_tty(ws: fastapi.WebSocket, chat_id: str, subagent_id: str) -> Non
         await ws.accept()
         await ws.close(code=4404, reason="unknown subagent")
         return
-    if task.status == "pending":
-        await ws.accept()
-        await ws.close(code=4409, reason="subagent is waiting for the sandbox queue")
-        return
     record = await worker.get(task.worker_id)
     if record is None:
         await ws.accept()
