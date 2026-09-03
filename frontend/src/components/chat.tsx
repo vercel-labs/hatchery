@@ -28,12 +28,14 @@ export function ChatView({
   chatId,
   initialMessages,
   messageRevision,
+  streamGeneration,
   onMessagesChange,
   onCreateSandbox,
 }: {
   chatId: string;
   initialMessages: ChatUIMessage[];
   messageRevision: number;
+  streamGeneration: number;
   onMessagesChange?: (messages: ChatUIMessage[]) => void;
   onCreateSandbox: () => void;
 }) {
@@ -45,20 +47,38 @@ export function ChatView({
         prepareSendMessagesRequest: ({ id, messages }) => {
           return { body: { chat_id: id, messages } };
         },
+        prepareReconnectToStreamRequest: ({ id }) => ({
+          api: `${apiBase()}/api/chat/${id}/stream`,
+          credentials: "include",
+        }),
       }),
     [],
   );
 
-  const { messages, setMessages, sendMessage, status, stop, error } =
-    useChat<ChatUIMessage>({
-      id: chatId,
-      transport,
-      messages: initialMessages,
-    });
+  const {
+    messages,
+    setMessages,
+    sendMessage,
+    resumeStream,
+    status,
+    stop,
+    error,
+  } = useChat<ChatUIMessage>({
+    id: chatId,
+    transport,
+    messages: initialMessages,
+    resume: true,
+  });
 
   useEffect(() => {
     onMessagesChange?.(messages);
   }, [messages, onMessagesChange]);
+
+  useEffect(() => {
+    if (streamGeneration > 0 && status === "ready") {
+      void resumeStream();
+    }
+  }, [resumeStream, status, streamGeneration]);
 
   useEffect(() => {
     if (

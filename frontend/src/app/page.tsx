@@ -1092,6 +1092,7 @@ function LiveChat({
   >(null);
   const [sandboxes, setSandboxes] = useState<SandboxWorkspace[]>([]);
   const [messageRevision, setMessageRevision] = useState(0);
+  const [streamGeneration, setStreamGeneration] = useState(0);
   const [showTerminal, setShowTerminal] = useState(false);
   const [showSandboxForm, setShowSandboxForm] = useState(false);
   const [preferredSandboxId, setPreferredSandboxId] = useState<string>();
@@ -1120,7 +1121,10 @@ function LiveChat({
       { withCredentials: true },
     );
     source.onmessage = (message) => {
-      const event = JSON.parse(message.data) as { type?: string };
+      const event = JSON.parse(message.data) as {
+        type?: string;
+        generation?: number;
+      };
       if (event.type === "chat.changed" || event.type === "task.changed") {
         onChatChanged();
       }
@@ -1129,6 +1133,11 @@ function LiveChat({
       }
       if (event.type === "messages.changed") {
         setMessageRevision((revision) => revision + 1);
+      }
+      if (event.type === "stream.available") {
+        setStreamGeneration((generation) =>
+          Math.max(generation, (event.generation ?? generation) + 1),
+        );
       }
     };
     return () => source.close();
@@ -1168,6 +1177,7 @@ function LiveChat({
             chatId={chat.id}
             initialMessages={initialMessages}
             messageRevision={messageRevision}
+            streamGeneration={streamGeneration}
             onMessagesChange={onMessagesChange}
             onCreateSandbox={() => setShowSandboxForm(true)}
           />

@@ -20,7 +20,8 @@ workflow = vercel.workflow.Workflows(
 
 class TurnInput(pydantic.BaseModel):
     chat_id: str
-    origin: typing.Literal["channel", "worker"]
+    turn_id: str = "turn_unknown"
+    origin: typing.Literal["ui", "channel", "worker"]
     task_id: str | None = None
 
 
@@ -70,10 +71,23 @@ async def llm_step(
     writer: vercel.workflow.WorkflowWritable,
 ) -> ai.messages.Message:
     """Stream one retryable model step and return its complete message."""
+    from agent import stream
+
+    metadata = vercel.workflow.get_step_metadata()
+    if metadata.attempt > 1:
+        await writer.write(
+            stream.dump_event(
+                stream.LifecycleEvent(
+                    type="reload.requested",
+                    turn_id=current_agent.get().turn_id,
+                    chat_id=current_agent.get().chat_id,
+                )
+            )
+        )
     async with ai.stream(context=context) as model_stream:
         async for event in model_stream:
             if not event.replay:
-                await writer.write(event.model_dump(mode="json"))
+                await writer.write(stream.dump_event(event))
     if model_stream.message is None:
         raise RuntimeError("model step returned no message")
     from agent import telemetry
@@ -239,9 +253,11 @@ class DurableDispatcher(ai.Agent):
         self,
         chat_id: str,
         writer: vercel.workflow.WorkflowWritable,
+        turn_id: str | None = None,
     ) -> None:
         super().__init__(tools=TOOLS)
         self.chat_id = chat_id
+        self.turn_id = turn_id or "turn_unknown"
         self.writer = writer
 
     async def loop(
@@ -266,7 +282,70 @@ async def write_stream_event(
     writer: vercel.workflow.WorkflowWritable, event: ai.events.AgentEvent
 ) -> None:
     """Write an agent event to this workflow's reconnectable stream."""
-    await writer.write(event.model_dump(mode="json"))
+    from agent import stream
+
+    await writer.write(stream.dump_event(event))
+
+
+@workflow.step
+async def write_lifecycle_event(
+    writer: vercel.workflow.WorkflowWritable, event: dict[str, typing.Any]
+) -> None:
+    await writer.write(event)
+
+
+@workflow.step
+async def register_turn(turn: TurnInput, run_id: str) -> int:
+    """Idempotently register and announce a run from either side of startup."""
+    from store import events, turns
+
+    async with turns.run(turn.chat_id):
+        records = await events.read(turn.chat_id, "turns")
+        existing = next(
+            (
+                index
+                for index, data in records
+                if data.get("type") == "turn.started"
+                and data.get("turn_id") == turn.turn_id
+                and data.get("run_id") == run_id
+            ),
+            None,
+        )
+        generation = existing
+        if generation is None:
+            generation = await events.append(
+                turn.chat_id,
+                "turns",
+                {
+                    "type": "turn.started",
+                    "turn_id": turn.turn_id,
+                    "run_id": run_id,
+                    "origin": turn.origin,
+                    "task_id": turn.task_id,
+                },
+            )
+        announced = any(
+            data.get("type") == "stream.available"
+            and data.get("turn_id") == turn.turn_id
+            for _, data in await events.read(turn.chat_id, "ui")
+        )
+        if not announced:
+            await events.append(
+                turn.chat_id,
+                "ui",
+                {
+                    "type": "stream.available",
+                    "turn_id": turn.turn_id,
+                    "run_id": run_id,
+                    "generation": generation,
+                },
+            )
+        return generation
+
+
+@workflow.step
+async def close_stream(writer: vercel.workflow.WorkflowWritable) -> None:
+    await writer.close()
 
 
 @workflow.step
@@ -347,15 +426,30 @@ async def deliver_replies(turn: TurnInput, replies: list[str]) -> None:
 @ai.messages.use_random(vercel.workflow.random)
 @ai.experimental_telemetry.use_time(vercel.workflow.time_ns)
 async def run_turn(turn: TurnInput) -> None:
-    """Run, commit, and deliver one durable unattended dispatcher turn."""
+    """Run, commit, and deliver one durable dispatcher turn."""
+    from agent import stream
+    from store import events, turns
+
+    writer = vercel.workflow.get_writable()
+    run_id = vercel.workflow.get_workflow_metadata().run_id
+    await register_turn(turn, run_id)
+    await write_lifecycle_event(
+        writer,
+        stream.dump_event(
+            stream.LifecycleEvent(
+                type="turn.started",
+                turn_id=turn.turn_id,
+                chat_id=turn.chat_id,
+            )
+        ),
+    )
     await emit_turn_event(turn.chat_id, "turn.started")
     try:
         prepared = await prepare_turn(turn)
         if prepared.cached_reply:
             replies = [prepared.cached_reply]
         else:
-            writer = vercel.workflow.get_writable()
-            agent = DurableDispatcher(turn.chat_id, writer)
+            agent = DurableDispatcher(turn.chat_id, writer, turn.turn_id)
             collector = ai.experimental_telemetry.DictSink()
             token = current_agent.set(agent)
             try:
@@ -372,17 +466,64 @@ async def run_turn(turn: TurnInput) -> None:
                 await ship_spans(collector.finished_spans)
             replies = await commit_messages(turn.chat_id, added)
         await deliver_replies(turn, replies)
+        await turns.finish(turn.chat_id, turn.turn_id, run_id, "completed")
+        await write_lifecycle_event(
+            writer,
+            stream.dump_event(
+                stream.LifecycleEvent(
+                    type="turn.completed",
+                    turn_id=turn.turn_id,
+                    chat_id=turn.chat_id,
+                )
+            ),
+        )
+        await events.append(turn.chat_id, "ui", {"type": "messages.changed"})
     except Exception as error:
+        await turns.finish(turn.chat_id, turn.turn_id, run_id, "failed", str(error))
+        await write_lifecycle_event(
+            writer,
+            stream.dump_event(
+                stream.LifecycleEvent(
+                    type="turn.failed",
+                    turn_id=turn.turn_id,
+                    chat_id=turn.chat_id,
+                    error=str(error),
+                )
+            ),
+        )
         await emit_turn_event(turn.chat_id, "turn.failed", str(error))
         raise
+    finally:
+        await close_stream(writer)
 
 
 async def start_turn(
-    chat_id: str, origin: typing.Literal["channel", "worker"], task_id: str | None = None
-) -> str:
-    """Start one durable dispatcher workflow and return its run id."""
-    run = await vercel.workflow.start(
-        run_turn,
-        TurnInput(chat_id=chat_id, origin=origin, task_id=task_id),
-    )
-    return run.run_id
+    chat_id: str,
+    origin: typing.Literal["ui", "channel", "worker"],
+    task_id: str | None = None,
+) -> "turns.ActiveTurn":
+    """Claim, start, register, and announce one durable dispatcher turn."""
+    import uuid
+    from store import turns
+
+    async with turns.run(chat_id):
+        if await turns.active(chat_id) is not None:
+            raise turns.BusyError(f"chat {chat_id} already has an active turn")
+        turn_id = f"turn_{uuid.uuid4().hex}"
+        run = await vercel.workflow.start(
+            run_turn,
+            TurnInput(
+                chat_id=chat_id,
+                turn_id=turn_id,
+                origin=origin,
+                task_id=task_id,
+            ),
+        )
+        payload = TurnInput(
+            chat_id=chat_id,
+            turn_id=turn_id,
+            origin=origin,
+            task_id=task_id,
+        )
+        generation = await register_turn.func(payload, run.run_id)
+        return turns.ActiveTurn(turn_id, run.run_id, origin, task_id, generation)

@@ -116,7 +116,7 @@ async def test_deliver_replies_finishes_worker_completion(monkeypatch):
     assert (await chats.get(chat.id)).status == "done"
 
 
-async def test_start_turn_passes_pydantic_input(monkeypatch):
+async def test_start_turn_registers_before_announcing(monkeypatch):
     seen = {}
 
     class Run:
@@ -129,10 +129,32 @@ async def test_start_turn_passes_pydantic_input(monkeypatch):
 
     monkeypatch.setattr(durable.vercel.workflow, "start", start)
 
-    assert await durable.start_turn("chat_1", "worker", "task_1") == "run_1"
-    assert seen == {
-        "workflow": durable.run_turn,
-        "payload": durable.TurnInput(
-            chat_id="chat_1", origin="worker", task_id="task_1"
-        ),
+    turn = await durable.start_turn("chat_1", "worker", "task_1")
+
+    assert turn.run_id == "run_1"
+    assert turn.turn_id.startswith("turn_")
+    assert seen["workflow"] is durable.run_turn
+    assert seen["payload"] == durable.TurnInput(
+        chat_id="chat_1",
+        turn_id=turn.turn_id,
+        origin="worker",
+        task_id="task_1",
+    )
+    assert await events.read("chat_1", "turns") == [
+        (
+            0,
+            {
+                "type": "turn.started",
+                "turn_id": turn.turn_id,
+                "run_id": "run_1",
+                "origin": "worker",
+                "task_id": "task_1",
+            },
+        )
+    ]
+    assert (await events.read("chat_1", "ui"))[-1][1] == {
+        "type": "stream.available",
+        "turn_id": turn.turn_id,
+        "run_id": "run_1",
+        "generation": 0,
     }

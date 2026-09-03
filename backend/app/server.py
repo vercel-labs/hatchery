@@ -35,7 +35,7 @@ import models
 import store
 import vercel.functions
 import vercel.queue
-from agent import classifier, dispatcher, durable, sandbox, telemetry, topic
+from agent import classifier, dispatcher, durable, sandbox, stream as agent_stream, telemetry, topic
 import worker
 from worker import protocol as worker_protocol
 from channels import github, slack
@@ -221,7 +221,9 @@ async def browser_session(request: fastapi.Request, call_next):
     request.state.user = user
     if path.startswith("/api/") and not public and user is None:
         return fastapi.responses.JSONResponse({"detail": "sign in required"}, status_code=401)
-    match = re.match(r"^/api/chats/([^/]+)", path)
+    match = re.match(r"^/api/chats/([^/]+)", path) or re.match(
+        r"^/api/chat/([^/]+)/stream$", path
+    )
     if match is not None and user is not None:
         chat = await chats.get(match.group(1))
         if chat is not None and chat.user_id is None and chat.trigger == "ui":
@@ -597,32 +599,27 @@ class ChatRequest(pydantic.BaseModel):
 
 @app.post("/api/chat")
 async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
-    """One dispatcher turn, streamed as an AI SDK UI message stream.
-
-    The store is the history: incoming messages the stream doesn't have yet
-    (normally just the new user message — ids survive the UI roundtrip) are
-    appended before the run, the run's new messages after it.
-    """
+    """Persist the user input, then attach to its durable workflow stream."""
     incoming, _ = ai.ui.ai_sdk.to_messages(request.messages)
-
-    async def stream():
-        async with turns.run(request.chat_id), ai.experimental_telemetry.span(
-            "hatchery.turn"
-        ) as span:
-            span.set_attrs({"chat.id": request.chat_id}, origin="ui")
+    try:
+        async with turns.run(request.chat_id):
+            if await turns.active(request.chat_id) is not None:
+                raise turns.BusyError(
+                    f"chat {request.chat_id} already has an active turn"
+                )
             stored = await _transcript(request.chat_id)
-            span.set_attrs(stored_message_count=len(stored))
             known = {message.id for message in stored}
             received = []
             for message in incoming:
-                # The browser sends its whole UI transcript. Assistant/tool messages are
-                # server-owned and their IDs may change in the UI round-trip, so accepting
-                # them here duplicates tool results and corrupts the next model history.
                 if message.role == "user" and message.id not in known:
-                    await events.append(request.chat_id, "messages", message.model_dump(mode="json"))
+                    await events.append(
+                        request.chat_id,
+                        "messages",
+                        message.model_dump(mode="json"),
+                    )
                     stored.append(message)
+                    known.add(message.id)
                     received.append(message)
-            span.set_attrs(received_message_count=len(received))
             for message in received:
                 await _emit(
                     request.chat_id,
@@ -634,71 +631,46 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                 )
 
             current = await chats.get(request.chat_id)
-            if received and current is not None and current.topic is None:
-                first = next((message for message in stored if message.role == "user"), None)
-                if first is not None:
-                    _spawn(_name_chat(request.chat_id, first.text))
             if current is None:
                 raise fastapi.HTTPException(404, "unknown chat")
+            if received and current.topic is None:
+                first = next(
+                    (message for message in stored if message.role == "user"), None
+                )
+                if first is not None:
+                    _spawn(_name_chat(request.chat_id, first.text))
             if current.space_id is None:
-                first = next((message for message in stored if message.role == "user"), None)
+                first = next(
+                    (message for message in stored if message.role == "user"), None
+                )
                 if first is None:
                     raise fastapi.HTTPException(409, "chat has no first prompt")
-                yield ai.ui.ai_sdk.outbound_stream.format_sse(
-                    ai.ui.ai_sdk.ui_events.UIDataEvent(
-                        data_type="space-assignment",
-                        data={"state": "assigning"},
-                    )
-                )
-                span.set_attrs(classification_required=True)
-                selected = await _classify_chat(
+                await _classify_chat(
                     request.chat_id,
                     first.text,
                     {"origin": "ui", "author": "current user"},
                     await spaces.list_all() or [await spaces.default()],
                 )
-                yield ai.ui.ai_sdk.outbound_stream.format_sse(
-                    ai.ui.ai_sdk.ui_events.UIDataEvent(
-                        data_type="space-assignment",
-                        data={
-                            "state": "assigned",
-                            "space_id": selected.id,
-                            "space_name": selected.name,
-                        },
-                    )
-                )
-            space = await _space_for_chat(request.chat_id)
-            span.set_attrs({"space.id": space.id})
-            history = [ai.system_message(dispatcher.system_prompt(space)), *stored]
-            agent = dispatcher.agent_for({"id": request.chat_id})
-            await _emit(request.chat_id, channels.event(channels.protocol.TURN_STARTED))
-            try:
-                async with agent.run(dispatcher.model(), history) as result:
-                    async for chunk in ai.ui.ai_sdk.to_sse(result):
-                        yield chunk
-                    added = result.messages[len(history) :]
-                    for message in added:
-                        await events.append(
-                            request.chat_id, "messages", message.model_dump(mode="json")
-                        )
-                replies = [
-                    message.text
-                    for message in added
-                    if message.role == "assistant" and message.text
-                ]
-                for index, reply in enumerate(replies):
-                    await _deliver(request.chat_id, reply, final=index == len(replies) - 1)
-            except Exception as error:
-                await _emit(
-                    request.chat_id,
-                    channels.event(channels.protocol.TURN_FAILED, error=str(error)),
-                )
-                raise
-            finally:
-                telemetry.flush()
-
+            turn = await durable.start_turn(request.chat_id, "ui")
+    except turns.BusyError as error:
+        raise fastapi.HTTPException(409, str(error)) from error
     return fastapi.responses.StreamingResponse(
-        stream(), headers=ai.ui.ai_sdk.UI_MESSAGE_STREAM_HEADERS
+        agent_stream.to_sse(turn.run_id, turn.turn_id),
+        headers=ai.ui.ai_sdk.UI_MESSAGE_STREAM_HEADERS,
+    )
+
+
+@app.get("/api/chat/{chat_id}/stream")
+async def resume_chat_stream(chat_id: str):
+    """Replay and tail the active durable turn, or return 204 while idle."""
+    if await chats.get(chat_id) is None:
+        raise fastapi.HTTPException(404, "unknown chat")
+    turn = await turns.active(chat_id)
+    if turn is None:
+        return fastapi.Response(status_code=204)
+    return fastapi.responses.StreamingResponse(
+        agent_stream.to_sse(turn.run_id, turn.turn_id),
+        headers=ai.ui.ai_sdk.UI_MESSAGE_STREAM_HEADERS,
     )
 
 
@@ -1217,10 +1189,10 @@ async def complete_worker_task(task: worker.Task) -> None:
             run = vercel.workflow.Run(current.completion_run_id)
             if await run.status() in ("pending", "running", "completed"):
                 return
-        run_id = await durable.start_turn(current.chat_id, "worker", current.id)
+        turn = await durable.start_turn(current.chat_id, "worker", current.id)
 
         def record_run(latest: worker.Task) -> worker.Task:
-            latest.completion_run_id = run_id
+            latest.completion_run_id = turn.run_id
             return latest
 
         await worker.store.mutate_task(current.id, record_run)
