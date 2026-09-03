@@ -211,7 +211,7 @@ export function AppShell() {
   const [vercelSheetOpen, setVercelSheetOpen] = useState(false);
   const [vercelError, setVercelError] = useState("");
   const [savingVercel, setSavingVercel] = useState(false);
-  const [archiveOpen, setArchiveOpen] = useState<boolean | null>(null);
+  const [archiveOpen, setArchiveOpen] = useState(false);
   // set by space clicks only; chat clicks leave the order alone
   const [sortSpaceId, setSortSpaceId] = useState<string | null>(null);
 
@@ -327,7 +327,6 @@ export function AppShell() {
   const archivedChats = chats
     ?.filter((chat) => chat.archived_at !== null)
     .sort((a, b) => (b.archived_at ?? "").localeCompare(a.archived_at ?? "")) ?? [];
-  const archiveView = archiveOpen ?? Boolean(selectedChat?.archived_at);
 
   const createSpace = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -397,7 +396,6 @@ export function AppShell() {
     setChats((current) =>
       current?.map((item) => (item.id === updated.id ? updated : item)) ?? null,
     );
-    if (archived) setArchiveOpen(true);
   };
 
   const assignChatSpace = async (chat: Chat, spaceId: string) => {
@@ -533,7 +531,7 @@ export function AppShell() {
         <SidebarSeparator />
 
         <SidebarContent>
-          {archiveView ? (
+          {archiveOpen ? (
             <SidebarGroup aria-label="Archived chats">
               <SidebarGroupLabel>Archive</SidebarGroupLabel>
               <SidebarGroupAction
@@ -667,7 +665,7 @@ export function AppShell() {
             </>
           )}
         </SidebarContent>
-        {!archiveView && (
+        {!archiveOpen && (
           <SidebarFooter className="border-t border-sidebar-border">
             <SidebarMenu>
               <SidebarMenuItem>
