@@ -15,32 +15,63 @@ async def test_durable_tools_keep_effects_non_retriable():
     assert durable.deliver_replies.max_retries == 0
 
 
-async def test_custom_loop_uses_durable_model_step(monkeypatch):
+async def test_custom_loop_uses_context_and_workflow_stream(monkeypatch):
     calls = []
 
-    async def model_step(model_data, messages_data, tools_data):
-        calls.append((model_data, messages_data, tools_data))
-        return ai.assistant_message("done").model_dump(mode="json")
+    async def model_step(context, writer):
+        calls.append((context, writer))
+        return ai.assistant_message("done")
+
+    class Writer:
+        async def write(self, value):
+            pass
 
     monkeypatch.setattr(durable, "llm_step", model_step)
-    agent = durable.DurableDispatcher()
+    writer = Writer()
+    agent = durable.DurableDispatcher("chat_1", writer)
     history = [ai.user_message("help")]
-    async with agent.run(ai.get_model("openai/test"), history) as result:
-        async for _ in result:
-            pass
+    token = durable.current_agent.set(agent)
+    try:
+        async with agent.run(ai.get_model("openai/test"), history) as result:
+            async for _ in result:
+                pass
+    finally:
+        durable.current_agent.reset(token)
 
     assert result.messages[-1].text == "done"
     assert len(calls) == 1
-    assert calls[0][1][0]["role"] == "user"
-    assert calls[0][2] == []
+    assert calls[0][0].messages[0].role == "user"
+    assert calls[0][1] is writer
+
+
+async def test_tools_read_trusted_chat_id_from_current_agent(monkeypatch):
+    calls = []
+
+    async def step(chat_id):
+        calls.append(chat_id)
+        return []
+
+    class Writer:
+        async def write(self, value):
+            pass
+
+    monkeypatch.setattr(durable, "list_sandboxes_step", step)
+    agent = durable.DurableDispatcher("chat_1", Writer())
+    token = durable.current_agent.set(agent)
+    try:
+        assert await durable.list_sandboxes.fn() == []
+    finally:
+        durable.current_agent.reset(token)
+
+    assert calls == ["chat_1"]
+    assert durable.list_sandboxes.tool.spec.params["properties"] == {}
 
 
 async def test_commit_messages_is_idempotent():
     message = ai.assistant_message("done")
-    payload = [message.model_dump(mode="json")]
 
-    assert await durable.commit_messages.func("chat_1", payload) == ["done"]
-    assert await durable.commit_messages.func("chat_1", payload) == ["done"]
+    assert await durable.commit_messages.func("chat_1", [message]) == ["done"]
+    assert await durable.commit_messages.func("chat_1", [message]) == ["done"]
 
     stored = await events.read("chat_1", "messages")
     assert len(stored) == 1
@@ -72,9 +103,7 @@ async def test_deliver_replies_finishes_worker_completion(monkeypatch):
     from app import server
 
     monkeypatch.setattr(server, "_deliver", deliver)
-    turn = durable.TurnInput(
-        chat_id=chat.id, origin="worker", task_id=task.id
-    ).model_dump(mode="json")
+    turn = durable.TurnInput(chat_id=chat.id, origin="worker", task_id=task.id)
     await durable.deliver_replies.func(turn, ["working", "done"])
 
     assert delivered == [
@@ -87,7 +116,7 @@ async def test_deliver_replies_finishes_worker_completion(monkeypatch):
     assert (await chats.get(chat.id)).status == "done"
 
 
-async def test_start_turn_uses_plain_serializable_input(monkeypatch):
+async def test_start_turn_passes_pydantic_input(monkeypatch):
     seen = {}
 
     class Run:
@@ -103,9 +132,7 @@ async def test_start_turn_uses_plain_serializable_input(monkeypatch):
     assert await durable.start_turn("chat_1", "worker", "task_1") == "run_1"
     assert seen == {
         "workflow": durable.run_turn,
-        "payload": {
-            "chat_id": "chat_1",
-            "origin": "worker",
-            "task_id": "task_1",
-        },
+        "payload": durable.TurnInput(
+            chat_id="chat_1", origin="worker", task_id="task_1"
+        ),
     }

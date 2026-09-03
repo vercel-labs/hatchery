@@ -1,6 +1,7 @@
 """Durable dispatcher turns for unattended channel and worker wakeups."""
 
 import collections.abc
+import contextvars
 import typing
 
 import ai
@@ -29,13 +30,12 @@ class PreparedTurn(pydantic.BaseModel):
 
 
 @workflow.step
-async def prepare_turn(turn_data: dict[str, typing.Any]) -> dict[str, typing.Any]:
+async def prepare_turn(turn: TurnInput) -> PreparedTurn:
     """Load canonical history and recover a committed worker reply if present."""
     from app import server
     from agent import dispatcher
     import worker
 
-    turn = TurnInput.model_validate(turn_data)
     stored = await server._transcript(turn.chat_id)
     cached_reply = None
     if turn.task_id is not None:
@@ -61,28 +61,25 @@ async def prepare_turn(turn_data: dict[str, typing.Any]) -> dict[str, typing.Any
     return PreparedTurn(
         history=[ai.system_message(dispatcher.system_prompt(space)), *stored],
         cached_reply=cached_reply,
-    ).model_dump(mode="json")
+    )
 
 
 @workflow.step
 async def llm_step(
-    model_data: dict[str, object],
-    messages_data: list[dict[str, object]],
-    tools_data: list[dict[str, object]],
-) -> dict[str, object]:
-    """Run one retryable model step and return one complete message."""
-    model = ai.Model.model_validate(model_data)
-    messages = [ai.messages.Message.model_validate(item) for item in messages_data]
-    tools = [ai.Tool.model_validate(item) for item in tools_data]
-    async with ai.stream(model, messages, tools=tools) as model_stream:
-        async for _ in model_stream:
-            pass
+    context: ai.Context,
+    writer: vercel.workflow.WorkflowWritable,
+) -> ai.messages.Message:
+    """Stream one retryable model step and return its complete message."""
+    async with ai.stream(context=context) as model_stream:
+        async for event in model_stream:
+            if not event.replay:
+                await writer.write(event.model_dump(mode="json"))
     if model_stream.message is None:
         raise RuntimeError("model step returned no message")
     from agent import telemetry
 
     telemetry.flush()
-    return model_stream.message.model_dump(mode="json")
+    return model_stream.message
 
 
 @workflow.step(max_retries=0)
@@ -159,93 +156,127 @@ async def check_subagent_step(
     return await worker.task_status(chat_id, subagent_id, after, limit)
 
 
-def agent_for(chat_id: str) -> ai.Agent:
-    """Build workflow-backed tools scoped to one chat."""
+current_agent: contextvars.ContextVar["DurableDispatcher"] = contextvars.ContextVar(
+    "current_agent"
+)
 
-    @ai.tool
-    async def create_sandbox(
-        repos: list[str] | None = None,
-        setup_script: str | None = None,
-        ports: list[int] | None = None,
-        branch: str | None = None,
-        git_sha: str | None = None,
-        title: str = "sandbox",
-    ) -> dict[str, typing.Any]:
-        """Create a persistent coding sandbox for this chat."""
-        return await create_sandbox_step(
-            chat_id, list(repos or []), setup_script, list(ports or []), branch, git_sha, title
-        )
 
-    @ai.tool
-    async def list_sandboxes() -> list[dict[str, typing.Any]]:
-        """List this chat's reusable coding sandboxes."""
-        return await list_sandboxes_step(chat_id)
-
-    @ai.tool
-    async def create_subagent(
-        sandbox_id: str,
-        task: str,
-        model: str = "openai/gpt-5.6-sol",
-    ) -> dict[str, typing.Any]:
-        """Start an fx subagent in a sandbox."""
-        return await create_subagent_step(chat_id, sandbox_id, task, model)
-
-    @ai.tool
-    async def message_subagent(
-        message: str,
-        subagent_id: str | None = None,
-    ) -> dict[str, typing.Any]:
-        """Send a revision, follow-up, or answer to an existing subagent."""
-        return await message_subagent_step(chat_id, message, subagent_id)
-
-    @ai.tool
-    async def check_subagent(
-        subagent_id: str | None = None,
-        after: int | None = None,
-        limit: int = 20,
-    ) -> dict[str, typing.Any]:
-        """Read durable subagent state and recent events."""
-        return await check_subagent_step(chat_id, subagent_id, after, limit)
-
-    return DurableDispatcher(
-        tools=[create_sandbox, list_sandboxes, create_subagent, message_subagent, check_subagent]
+@ai.tool
+async def create_sandbox(
+    repos: list[str] | None = None,
+    setup_script: str | None = None,
+    ports: list[int] | None = None,
+    branch: str | None = None,
+    git_sha: str | None = None,
+    title: str = "sandbox",
+) -> dict[str, typing.Any]:
+    """Create a persistent coding sandbox for this chat."""
+    return await create_sandbox_step(
+        current_agent.get().chat_id,
+        list(repos or []),
+        setup_script,
+        list(ports or []),
+        branch,
+        git_sha,
+        title,
     )
 
 
+@ai.tool
+async def list_sandboxes() -> list[dict[str, typing.Any]]:
+    """List this chat's reusable coding sandboxes."""
+    return await list_sandboxes_step(current_agent.get().chat_id)
+
+
+@ai.tool
+async def create_subagent(
+    sandbox_id: str,
+    task: str,
+    model: str = MODEL_ID,
+) -> dict[str, typing.Any]:
+    """Start an fx subagent in a sandbox."""
+    return await create_subagent_step(
+        current_agent.get().chat_id, sandbox_id, task, model
+    )
+
+
+@ai.tool
+async def message_subagent(
+    message: str,
+    subagent_id: str | None = None,
+) -> dict[str, typing.Any]:
+    """Send a revision, follow-up, or answer to an existing subagent."""
+    return await message_subagent_step(
+        current_agent.get().chat_id, message, subagent_id
+    )
+
+
+@ai.tool
+async def check_subagent(
+    subagent_id: str | None = None,
+    after: int | None = None,
+    limit: int = 20,
+) -> dict[str, typing.Any]:
+    """Read durable subagent state and recent events."""
+    return await check_subagent_step(
+        current_agent.get().chat_id, subagent_id, after, limit
+    )
+
+
+TOOLS = [
+    create_sandbox,
+    list_sandboxes,
+    create_subagent,
+    message_subagent,
+    check_subagent,
+]
+
+
 class DurableDispatcher(ai.Agent):
-    """Agent loop with model calls and tool effects isolated as workflow steps."""
+    """Agent loop with streamed model steps and durable tool execution."""
+
+    def __init__(
+        self,
+        chat_id: str,
+        writer: vercel.workflow.WorkflowWritable,
+    ) -> None:
+        super().__init__(tools=TOOLS)
+        self.chat_id = chat_id
+        self.writer = writer
 
     async def loop(
         self, context: ai.Context
     ) -> collections.abc.AsyncGenerator[ai.events.AgentEvent]:
-        tools_data = [tool.model_dump(mode="json") for tool in context.tools]
         while context.keep_running():
-            result = await llm_step(
-                context.model.model_dump(mode="json"),
-                [message.model_dump(mode="json") for message in context.messages],
-                tools_data,
-            )
-            assistant_message = ai.messages.Message.model_validate(result)
+            assistant_message = await llm_step(context, self.writer)
             context.add(assistant_message)
             yield ai.events.StreamEnd(message=assistant_message)
 
             async with ai.ToolRunner() as runner:
-                for tool_call in assistant_message.tool_calls:
-                    runner.schedule(context.resolve(tool_call))
+                for tool_call in context.resolve(assistant_message.tool_calls):
+                    runner.schedule(tool_call)
                 async for event in runner.events():
+                    await write_stream_event(self.writer, event)
                     yield event
                 context.add(runner.get_tool_message())
 
 
 @workflow.step
+async def write_stream_event(
+    writer: vercel.workflow.WorkflowWritable, event: ai.events.AgentEvent
+) -> None:
+    """Write an agent event to this workflow's reconnectable stream."""
+    await writer.write(event.model_dump(mode="json"))
+
+
+@workflow.step
 async def commit_messages(
-    chat_id: str, messages_data: list[dict[str, object]]
+    chat_id: str, messages: list[ai.messages.Message]
 ) -> list[str]:
     """Idempotently append completed workflow messages to the canonical transcript."""
     from app import server
     from store import events
 
-    messages = [ai.messages.Message.model_validate(item) for item in messages_data]
     known = {message.id for message in await server._transcript(chat_id)}
     for message in messages:
         if message.id not in known:
@@ -256,6 +287,12 @@ async def commit_messages(
         for message in messages
         if message.role == "assistant" and message.text
     ] or ["subagent completion recorded"]
+
+
+@workflow.step
+async def ship_spans(spans: list[ai.experimental_telemetry.Span]) -> None:
+    """Ship telemetry collected in the replayable workflow body."""
+    await ai.experimental_telemetry.push_all(spans)
 
 
 @workflow.step(max_retries=0)
@@ -269,13 +306,12 @@ async def emit_turn_event(chat_id: str, event_type: str, error: str | None = Non
 
 
 @workflow.step(max_retries=0)
-async def deliver_replies(turn_data: dict[str, typing.Any], replies: list[str]) -> None:
+async def deliver_replies(turn: TurnInput, replies: list[str]) -> None:
     """Mirror replies to bound channels and finish worker completion bookkeeping."""
     from app import server
     from store import chats, events
     import worker
 
-    turn = TurnInput.model_validate(turn_data)
     for index, reply in enumerate(replies):
         failures = await server._deliver(
             turn.chat_id, reply, final=index == len(replies) - 1
@@ -310,25 +346,32 @@ async def deliver_replies(turn_data: dict[str, typing.Any], replies: list[str]) 
 @workflow.workflow
 @ai.messages.use_random(vercel.workflow.random)
 @ai.experimental_telemetry.use_time(vercel.workflow.time_ns)
-async def run_turn(turn_data: dict[str, typing.Any]) -> None:
+async def run_turn(turn: TurnInput) -> None:
     """Run, commit, and deliver one durable unattended dispatcher turn."""
-    turn = TurnInput.model_validate(turn_data)
     await emit_turn_event(turn.chat_id, "turn.started")
     try:
-        prepared = PreparedTurn.model_validate(await prepare_turn(turn_data))
+        prepared = await prepare_turn(turn)
         if prepared.cached_reply:
             replies = [prepared.cached_reply]
         else:
-            agent = agent_for(turn.chat_id)
-            async with agent.run(ai.get_model(MODEL_ID), prepared.history) as result:
-                async for _ in result:
-                    pass
-                added = result.messages[len(prepared.history) :]
-            replies = await commit_messages(
-                turn.chat_id,
-                [message.model_dump(mode="json") for message in added],
-            )
-        await deliver_replies(turn_data, replies)
+            writer = vercel.workflow.get_writable()
+            agent = DurableDispatcher(turn.chat_id, writer)
+            collector = ai.experimental_telemetry.DictSink()
+            token = current_agent.set(agent)
+            try:
+                async with (
+                    ai.experimental_telemetry.use_sink(collector),
+                    agent.run(ai.get_model(MODEL_ID), prepared.history) as result,
+                ):
+                    async for _ in result:
+                        pass
+                    added = result.messages[len(prepared.history) :]
+            finally:
+                current_agent.reset(token)
+            if collector.finished_spans:
+                await ship_spans(collector.finished_spans)
+            replies = await commit_messages(turn.chat_id, added)
+        await deliver_replies(turn, replies)
     except Exception as error:
         await emit_turn_event(turn.chat_id, "turn.failed", str(error))
         raise
@@ -340,6 +383,6 @@ async def start_turn(
     """Start one durable dispatcher workflow and return its run id."""
     run = await vercel.workflow.start(
         run_turn,
-        TurnInput(chat_id=chat_id, origin=origin, task_id=task_id).model_dump(mode="json"),
+        TurnInput(chat_id=chat_id, origin=origin, task_id=task_id),
     )
     return run.run_id
