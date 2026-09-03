@@ -512,11 +512,23 @@ async def test_hub_lands_inbound_in_one_chat(monkeypatch):
     hub = server.bot.hub
     await hub.dispatch(
         "slack",
-        channels.Inbound(token="C1:1.0", text="from slack", state={"channel_id": "C1"}, title="a thread"),
+        channels.Inbound(
+            token="C1:1.0",
+            text="from slack",
+            state={"channel_id": "C1", "team_id": "T1", "user_id": "U1"},
+            title="a thread",
+        ),
     )
-    await hub.dispatch("slack", channels.Inbound(token="C1:1.0", text="again", state={}))
+    await hub.dispatch(
+        "slack",
+        channels.Inbound(
+            token="C1:1.0",
+            text="again",
+            state={"team_id": "T1", "user_id": "U1"},
+        ),
+    )
     [chat] = await chats.list_all()
-    assert chat.trigger == "slack:C1:1.0"
+    assert chat.trigger == "slack:T1:C1:1.0"
     assert chat.title == "a thread"
     stored = await events.read(chat.id, "messages")
     assert len(stored) == 2
@@ -528,6 +540,75 @@ async def test_hub_lands_inbound_in_one_chat(monkeypatch):
         (chat.id, channels.protocol.TURN_STARTED),
         (chat.id, "reply"),
     ]
+
+
+async def test_slack_threads_are_scoped_by_workspace(monkeypatch):
+    async def classify(prompt, metadata, candidates):
+        return candidates[0]
+
+    async def slack_user(team_id, _slack_user_id):
+        return f"user_{team_id}"
+
+    runs = []
+
+    async def run(chat_id):
+        runs.append(chat_id)
+
+    monkeypatch.setattr(server.connections.auth_store, "slack_user", slack_user)
+    monkeypatch.setattr(server.classifier, "classify", classify)
+    monkeypatch.setattr(server, "_run_inbound_turn", run)
+    for team_id in ("T1", "T2"):
+        await server.bot.hub.dispatch(
+            "slack",
+            channels.Inbound(
+                token="C1:1.0",
+                text=f"from {team_id}",
+                state={"team_id": team_id, "user_id": "U1"},
+            ),
+        )
+
+    found = await chats.list_all()
+    assert {chat.trigger for chat in found} == {
+        "slack:T1:C1:1.0",
+        "slack:T2:C1:1.0",
+    }
+    assert {chat.user_id for chat in found} == {"user_T1", "user_T2"}
+    assert len(runs) == 2
+
+
+async def test_slack_legacy_binding_rejects_different_participant(monkeypatch):
+    legacy, _ = await chats.claim(
+        "slack:C1:1.0",
+        "slack",
+        None,
+        "legacy",
+        {"team_id": "T1", "user_id": "U1"},
+    )
+
+    async def slack_user(_team_id, _slack_user_id):
+        return "user_2"
+
+    runs = []
+
+    async def run(chat_id):
+        runs.append(chat_id)
+
+    monkeypatch.setattr(server.connections.auth_store, "slack_user", slack_user)
+    monkeypatch.setattr(server, "_run_inbound_turn", run)
+    await server.bot.hub.dispatch(
+        "slack",
+        channels.Inbound(
+            token="C1:1.0",
+            text="takeover",
+            state={"team_id": "T1", "user_id": "U2"},
+        ),
+    )
+
+    assert (await chats.get(legacy.id)).user_id is None
+    assert await events.read(legacy.id, "messages") == []
+    assert runs == []
+    [binding] = await chats.bindings(legacy.id)
+    assert binding.token == "slack:C1:1.0"
 
 
 async def test_slack_hub_ignores_unconnected_sender(monkeypatch):
@@ -602,12 +683,22 @@ async def test_hub_can_store_without_invoking_then_wake_without_persisting(monke
     hub = server.bot.hub
     await hub.dispatch(
         "slack",
-        channels.Inbound(token="C1:1.0", text="context", state={}, invoke=False),
+        channels.Inbound(
+            token="C1:1.0",
+            text="context",
+            state={"team_id": "T1", "user_id": "U1"},
+            invoke=False,
+        ),
     )
     [chat] = await chats.list_all()
     await hub.dispatch(
         "slack",
-        channels.Inbound(token="C1:1.0", text="context", state={}, persist=False),
+        channels.Inbound(
+            token="C1:1.0",
+            text="context",
+            state={"team_id": "T1", "user_id": "U1"},
+            persist=False,
+        ),
     )
 
     stored = await events.read(chat.id, "messages")

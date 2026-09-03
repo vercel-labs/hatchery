@@ -1,4 +1,4 @@
-import contextlib
+import copy
 
 import asyncpg
 import pytest
@@ -11,7 +11,7 @@ class Connection:
         self.pool = pool
 
     def transaction(self):
-        return contextlib.nullcontext()
+        return Transaction(self.pool)
 
     async def execute(self, query, *args):
         if query.startswith("DELETE FROM hatchery_slack_identities"):
@@ -38,6 +38,20 @@ class Connection:
         elif "data = data - 'slack'" in query:
             self.pool.connections.pop(args[0], None)
         return "OK"
+
+
+class Transaction:
+    def __init__(self, pool):
+        self.pool = pool
+
+    async def __aenter__(self):
+        self.identities = copy.deepcopy(self.pool.identities)
+        self.connections = copy.deepcopy(self.pool.connections)
+
+    async def __aexit__(self, error_type, *_args):
+        if error_type is not None:
+            self.pool.identities = self.identities
+            self.pool.connections = self.connections
 
 
 class Acquire:
@@ -80,14 +94,19 @@ async def test_slack_identity_is_workspace_scoped_unique_and_removed(monkeypatch
     assert await auth.slack_user("", "U1") is None
     assert "xox" not in pool.connections["hatchery_1"]
 
+    await auth.save_slack_connection(
+        "hatchery_2", {"team_id": "T2", "user_id": "U2", "team": "Other"}
+    )
     with pytest.raises(auth.SlackIdentityConflict):
         await auth.save_slack_connection("hatchery_2", connection)
+    assert await auth.slack_user("T2", "U2") == "hatchery_2"
+    assert await auth.slack_user("T1", "U1") == "hatchery_1"
 
-    replacement = {"team_id": "T2", "user_id": "U2", "team": "Other"}
+    replacement = {"team_id": "T3", "user_id": "U3", "team": "Third"}
     await auth.save_slack_connection("hatchery_1", replacement)
     assert await auth.slack_user("T1", "U1") is None
-    assert await auth.slack_user("T2", "U2") == "hatchery_1"
+    assert await auth.slack_user("T3", "U3") == "hatchery_1"
 
     await auth.delete_slack_connection("hatchery_1")
-    assert await auth.slack_user("T2", "U2") is None
+    assert await auth.slack_user("T3", "U3") is None
     assert "hatchery_1" not in pool.connections

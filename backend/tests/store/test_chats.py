@@ -44,24 +44,88 @@ async def test_claim_sets_owner_and_rejects_owner_state_takeover():
     assert binding.state == {"user_id": "U1"}
 
 
-async def test_connected_owner_claims_legacy_unowned_binding():
+async def test_matching_connected_owner_claims_and_migrates_legacy_binding():
     legacy, _ = await chats.claim(
-        "slack:C1:100.1", "slack", None, "legacy", {"user_id": "U1"}
-    )
-
-    claimed, created = await chats.claim(
         "slack:C1:100.1",
         "slack",
         None,
+        "legacy",
+        {"team_id": "T1", "user_id": "U1"},
+    )
+
+    claimed, created = await chats.claim(
+        "slack:T1:C1:100.1",
+        "slack",
+        None,
         "connected",
-        {"user_id": "U1"},
+        {"team_id": "T1", "user_id": "U1"},
         user_id="hatchery_1",
+        legacy_token="slack:C1:100.1",
     )
 
     assert created is False
     assert claimed.id == legacy.id
     assert claimed.user_id == "hatchery_1"
     assert (await chats.get(legacy.id)).user_id == "hatchery_1"
+    [binding] = await chats.bindings(legacy.id)
+    assert binding.token == "slack:T1:C1:100.1"
+
+
+async def test_different_identity_cannot_claim_or_migrate_legacy_binding():
+    legacy, _ = await chats.claim(
+        "slack:C1:100.1",
+        "slack",
+        None,
+        "legacy",
+        {"team_id": "T1", "user_id": "U1"},
+    )
+
+    rejected, created = await chats.claim(
+        "slack:T1:C1:100.1",
+        "slack",
+        None,
+        "takeover",
+        {"team_id": "T1", "user_id": "U2"},
+        user_id="hatchery_2",
+        legacy_token="slack:C1:100.1",
+    )
+
+    assert created is False
+    assert rejected.id == legacy.id
+    assert rejected.user_id is None
+    [binding] = await chats.bindings(legacy.id)
+    assert binding.token == "slack:C1:100.1"
+    assert binding.state == {"team_id": "T1", "user_id": "U1"}
+
+
+async def test_other_workspace_ignores_legacy_collision_and_creates_scoped_binding():
+    legacy, _ = await chats.claim(
+        "slack:C1:100.1",
+        "slack",
+        None,
+        "legacy",
+        {"team_id": "T1", "user_id": "U1"},
+    )
+
+    scoped, created = await chats.claim(
+        "slack:T2:C1:100.1",
+        "slack",
+        None,
+        "other workspace",
+        {"team_id": "T2", "user_id": "U2"},
+        user_id="hatchery_2",
+        legacy_token="slack:C1:100.1",
+    )
+
+    assert created is True
+    assert scoped.id != legacy.id
+    assert scoped.user_id == "hatchery_2"
+    assert {binding.token for binding in await chats.bindings(legacy.id)} == {
+        "slack:C1:100.1"
+    }
+    assert {binding.token for binding in await chats.bindings(scoped.id)} == {
+        "slack:T2:C1:100.1"
+    }
 
 
 async def test_claim_separates_tokens():

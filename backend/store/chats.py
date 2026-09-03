@@ -220,6 +220,7 @@ async def claim(
     title: str,
     state: dict,
     user_id: str | None = None,
+    legacy_token: str | None = None,
 ) -> tuple[models.Chat, bool]:
     """Atomically map a channel token to its owning chat.
 
@@ -241,7 +242,52 @@ async def claim(
 
         pool = await db.pool()
         async with pool.acquire() as conn, conn.transaction():
-            row = await conn.fetchrow(
+            owner = await conn.fetchrow(
+                "SELECT c.data, b.state FROM hatchery_chats c "
+                "JOIN hatchery_bindings b ON b.chat_id = c.id WHERE b.token = $1 FOR UPDATE",
+                token,
+            )
+            binding_token = token
+            if owner is None and legacy_token is not None:
+                owner = await conn.fetchrow(
+                    "SELECT c.data, b.state FROM hatchery_chats c "
+                    "JOIN hatchery_bindings b ON b.chat_id = c.id WHERE b.token = $1 FOR UPDATE",
+                    legacy_token,
+                )
+                binding_token = legacy_token
+            if owner is not None:
+                saved_state = (
+                    json.loads(owner["state"])
+                    if isinstance(owner["state"], str)
+                    else dict(owner["state"])
+                )
+                if binding_token != token and saved_state.get("team_id") != state.get("team_id"):
+                    owner = None
+            if owner is not None:
+                chat = _chat(owner["data"])
+                identity_matches = _binding_identity_matches(saved_state, state)
+                if user_id is not None and chat.user_id is None and identity_matches:
+                    claimed = await conn.fetchrow(
+                        "UPDATE hatchery_chats SET data = jsonb_set(data, '{user_id}', to_jsonb($2::text)) "
+                        "WHERE id = $1 RETURNING data",
+                        chat.id,
+                        user_id,
+                    )
+                    chat = _chat(claimed["data"])
+                if user_id is None or chat.user_id == user_id:
+                    await conn.execute(
+                        "UPDATE hatchery_bindings SET state = state || $2::jsonb WHERE token = $1",
+                        binding_token,
+                        json.dumps(state),
+                    )
+                    if binding_token != token:
+                        await conn.execute(
+                            "UPDATE hatchery_bindings SET token = $2 WHERE token = $1",
+                            binding_token,
+                            token,
+                        )
+                return chat, False
+            inserted = await conn.fetchrow(
                 "INSERT INTO hatchery_bindings (token, chat_id, channel, state) "
                 "VALUES ($1, $2, $3, $4::jsonb) ON CONFLICT (token) DO NOTHING RETURNING chat_id",
                 token,
@@ -249,7 +295,7 @@ async def claim(
                 channel,
                 json.dumps(state),
             )
-            if row is not None:
+            if inserted is not None:
                 await conn.execute(
                     "INSERT INTO hatchery_chats (id, space_id, data) VALUES ($1, $2, $3::jsonb)",
                     candidate.id,
@@ -258,19 +304,11 @@ async def claim(
                 )
                 return candidate, True
             owner = await conn.fetchrow(
-                "SELECT c.data FROM hatchery_chats c "
+                "SELECT c.data, b.state FROM hatchery_chats c "
                 "JOIN hatchery_bindings b ON b.chat_id = c.id WHERE b.token = $1 FOR UPDATE",
                 token,
             )
             chat = _chat(owner["data"])
-            if user_id is not None and chat.user_id is None:
-                owner = await conn.fetchrow(
-                    "UPDATE hatchery_chats SET data = jsonb_set(data, '{user_id}', to_jsonb($2::text)) "
-                    "WHERE id = $1 RETURNING data",
-                    chat.id,
-                    user_id,
-                )
-                chat = _chat(owner["data"])
             if user_id is None or chat.user_id == user_id:
                 await conn.execute(
                     "UPDATE hatchery_bindings SET state = state || $2::jsonb WHERE token = $1",
@@ -281,21 +319,45 @@ async def claim(
 
     with _lock:
         bindings_ = _read_bindings()
+        binding_token = token
         existing = bindings_.get(token)
+        if existing is None and legacy_token is not None:
+            binding_token = legacy_token
+            existing = bindings_.get(legacy_token)
+        if (
+            existing is not None
+            and binding_token != token
+            and existing.get("state", {}).get("team_id") != state.get("team_id")
+        ):
+            existing = None
         if existing is not None:
             owner = _read_chat(existing["chat_id"])
             if owner is not None:
-                if user_id is not None and owner.user_id is None:
+                identity_matches = _binding_identity_matches(existing.get("state", {}), state)
+                if user_id is not None and owner.user_id is None and identity_matches:
                     owner.user_id = user_id
                     _write_chat(owner)
                 if user_id is None or owner.user_id == user_id:
                     existing["state"] = {**existing.get("state", {}), **state}
+                    if binding_token != token:
+                        bindings_.pop(binding_token)
+                        bindings_[token] = existing
                     _write_bindings(bindings_)
                 return owner, False
         bindings_[token] = {"chat_id": candidate.id, "channel": channel, "state": dict(state)}
         _write_bindings(bindings_)
         _write_chat(candidate)
         return candidate, True
+
+
+def _binding_identity_matches(saved: dict, inbound: dict) -> bool:
+    """Only a Slack identity that created a legacy binding may claim its chat."""
+    return bool(
+        saved.get("team_id")
+        and saved.get("user_id")
+        and saved.get("team_id") == inbound.get("team_id")
+        and saved.get("user_id") == inbound.get("user_id")
+    )
 
 
 async def bindings(chat_id: str) -> list[Binding]:

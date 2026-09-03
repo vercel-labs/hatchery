@@ -85,13 +85,19 @@ class _StoreHub:
                     return
             found = await spaces.list_all() or [await spaces.default()]
             title = inbound.title or inbound.text.strip().splitlines()[0][:80]
+            token = f"{channel}:{inbound.token}"
+            legacy_token = None
+            if channel == "slack":
+                token = f"slack:{inbound.state['team_id']}:{inbound.token}"
+                legacy_token = f"slack:{inbound.token}"
             chat, created = await chats.claim(
-                f"{channel}:{inbound.token}",
+                token,
                 channel,
                 None,
                 title,
                 inbound.state,
                 user_id=user_id,
+                legacy_token=legacy_token,
             )
             if user_id is not None and chat.user_id != user_id:
                 span.set_attrs(ignored="owned_by_another_user", **{"chat.id": chat.id})
