@@ -488,25 +488,22 @@ def test_dedupe_tool_history_repairs_old_ui_duplicates():
 
 
 async def test_hub_lands_inbound_in_one_chat(monkeypatch):
-    async def turn(chat_id, record):
-        return ["reply"]
-
     async def classify(prompt, metadata, candidates):
         return candidates[0]
 
     delivered = []
+    started = []
 
-    async def deliver(chat_id, message, *, final=True):
-        delivered.append((chat_id, message))
-        return []
+    async def start_turn(chat_id, origin, task_id=None):
+        started.append((chat_id, origin, task_id))
+        return f"run_{len(started)}"
 
     async def emit(chat_id, event):
         delivered.append((chat_id, event.type))
         return []
 
-    monkeypatch.setattr(server, "_run_dispatcher_turn", turn)
+    monkeypatch.setattr(server.durable, "start_turn", start_turn)
     monkeypatch.setattr(server.classifier, "classify", classify)
-    monkeypatch.setattr(server, "_deliver", deliver)
     monkeypatch.setattr(server, "_emit", emit)
 
     hub = server.bot.hub
@@ -535,10 +532,10 @@ async def test_hub_lands_inbound_in_one_chat(monkeypatch):
     assert delivered == [
         (chat.id, channels.protocol.SPACE_ASSIGNING),
         (chat.id, channels.protocol.SPACE_ASSIGNED),
-        (chat.id, channels.protocol.TURN_STARTED),
-        (chat.id, "reply"),
-        (chat.id, channels.protocol.TURN_STARTED),
-        (chat.id, "reply"),
+    ]
+    assert started == [
+        (chat.id, "channel", None),
+        (chat.id, "channel", None),
     ]
 
 
@@ -765,42 +762,26 @@ async def test_ambiguous_repo_classifies_then_runs_original_request(monkeypatch)
     assert runs == [chat.id]
 
 
-async def test_inbound_turn_delivers_every_assistant_message(monkeypatch):
-    delivered = []
+async def test_inbound_turn_starts_durable_workflow(monkeypatch):
+    started = []
 
-    async def turn(chat_id, record):
-        return ["I will inspect that.", "Done."]
+    async def start_turn(chat_id, origin, task_id=None):
+        started.append((chat_id, origin, task_id))
+        return "run_1"
 
-    async def deliver(chat_id, message, *, final=True):
-        delivered.append((message, final))
-        return []
-
-    monkeypatch.setattr(server, "_run_dispatcher_turn", turn)
-    monkeypatch.setattr(server, "_deliver", deliver)
+    monkeypatch.setattr(server.durable, "start_turn", start_turn)
     await server._run_inbound_turn("chat_x")
 
-    assert delivered == [("I will inspect that.", False), ("Done.", True)]
+    assert started == [("chat_x", "channel", None)]
 
 
-async def test_inbound_turn_delivers_failure(monkeypatch):
-    delivered = []
+async def test_inbound_turn_surfaces_workflow_start_failure(monkeypatch):
+    async def start_turn(chat_id, origin, task_id=None):
+        raise RuntimeError("workflow unavailable")
 
-    async def turn(chat_id, record):
-        raise RuntimeError("gateway unavailable")
-
-    async def emit(chat_id, event):
-        delivered.append(event)
-        return []
-
-    monkeypatch.setattr(server, "_run_dispatcher_turn", turn)
-    monkeypatch.setattr(server, "_emit", emit)
-    await server._run_inbound_turn("chat_x")
-
-    assert [event.type for event in delivered] == [
-        channels.protocol.TURN_STARTED,
-        channels.protocol.TURN_FAILED,
-    ]
-    assert delivered[-1].data == {"error": "gateway unavailable"}
+    monkeypatch.setattr(server.durable, "start_turn", start_turn)
+    with pytest.raises(RuntimeError, match="workflow unavailable"):
+        await server._run_inbound_turn("chat_x")
 
 
 async def test_hub_dedupe_is_durable():
@@ -809,18 +790,17 @@ async def test_hub_dedupe_is_durable():
     assert await hub.dedupe("slack:ev1") is False
 
 
-async def test_slack_webhook_runs_dispatcher_and_replies_in_thread(monkeypatch):
+async def test_slack_webhook_starts_durable_dispatcher_turn(monkeypatch):
     slack_channel = server.bot.channels["slack"]
     delivered = []
-    seen = {}
+    started = []
 
     async def verify(headers):
         return None
 
-    async def turn(chat_id, record):
-        seen["chat_id"] = chat_id
-        seen["record"] = record
-        return ["I can help with that."]
+    async def start_turn(chat_id, origin, task_id=None):
+        started.append((chat_id, origin, task_id))
+        return "run_1"
 
     async def classify(prompt, metadata, candidates):
         return candidates[0]
@@ -829,7 +809,7 @@ async def test_slack_webhook_runs_dispatcher_and_replies_in_thread(monkeypatch):
         delivered.append((event, state))
 
     monkeypatch.setattr(server.slack.connect, "verify_connect_webhook", verify)
-    monkeypatch.setattr(server, "_run_dispatcher_turn", turn)
+    monkeypatch.setattr(server.durable, "start_turn", start_turn)
     monkeypatch.setattr(server.classifier, "classify", classify)
     monkeypatch.setattr(slack_channel, "on_event", on_event)
 
@@ -853,16 +833,56 @@ async def test_slack_webhook_runs_dispatcher_and_replies_in_thread(monkeypatch):
 
     assert response.status_code == 200
     [chat] = await chats.list_all()
-    assert seen == {"chat_id": chat.id, "record": {"id": chat.id}}
+    assert started == [(chat.id, "channel", None)]
     assert [event.type for event, _ in delivered] == [
         channels.protocol.SPACE_ASSIGNING,
         channels.protocol.SPACE_ASSIGNED,
-        channels.protocol.TURN_STARTED,
-        channels.protocol.MESSAGE_COMPLETED,
     ]
-    assert delivered[-1][0].data == {"message": "I can help with that."}
-    assert delivered[-1][1]["channel_id"] == "C1"
-    assert delivered[-1][1]["thread_ts"] == "100.1"
+
+
+async def test_resume_chat_stream_is_idle_without_active_turn():
+    space = await server.spaces.default()
+    chat = await chats.create(space.id, "idle")
+
+    async with client() as c:
+        response = await c.get(f"/api/chat/{chat.id}/stream")
+
+    assert response.status_code == 204
+
+
+async def test_resume_chat_stream_uses_registered_run(monkeypatch):
+    space = await server.spaces.default()
+    chat = await chats.create(space.id, "active")
+    await events.append(
+        chat.id,
+        "turns",
+        {
+            "type": "turn.started",
+            "turn_id": "turn_1",
+            "run_id": "run_1",
+            "origin": "worker",
+            "task_id": "task_1",
+        },
+    )
+    seen = []
+
+    class Run:
+        async def status(self):
+            return "running"
+
+    monkeypatch.setattr(server.vercel.workflow, "Run", lambda _run_id: Run())
+
+    async def to_sse(run_id, turn_id):
+        seen.append((run_id, turn_id))
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(server.agent_stream, "to_sse", to_sse)
+    async with client() as c:
+        response = await c.get(f"/api/chat/{chat.id}/stream")
+
+    assert response.status_code == 200
+    assert response.text == "data: [DONE]\n\n"
+    assert seen == [("run_1", "turn_1")]
 
 
 async def test_first_ui_prompt_classifies_before_dispatcher(monkeypatch):
@@ -875,6 +895,14 @@ async def test_first_ui_prompt_classifies_before_dispatcher(monkeypatch):
     async def classify(prompt, metadata, candidates):
         seen["classification"] = (prompt, metadata, [space.id for space in candidates])
         return docs
+
+    async def start_turn(chat_id, origin, task_id=None):
+        seen["started"] = (chat_id, origin, task_id)
+        return server.turns.ActiveTurn("turn_1", "run_1", origin, task_id, 0)
+
+    async def durable_sse(run_id, turn_id):
+        seen["stream"] = (run_id, turn_id)
+        yield 'data: {"type":"finish"}\n\n'
 
     class FakeRun:
         def __init__(self, history):
@@ -902,6 +930,8 @@ async def test_first_ui_prompt_classifies_before_dispatcher(monkeypatch):
     flush = mock.Mock()
     monkeypatch.setattr(server.dispatcher, "agent_for", agent_for)
     monkeypatch.setattr(server.ai.ui.ai_sdk, "to_sse", fake_sse)
+    monkeypatch.setattr(server.durable, "start_turn", start_turn)
+    monkeypatch.setattr(server.agent_stream, "to_sse", durable_sse)
     monkeypatch.setattr(server.telemetry, "flush", flush)
     ui = ai.ui.ai_sdk.to_ui_messages([ai.user_message("fix the docs")])
     async with client() as c:
@@ -920,12 +950,9 @@ async def test_first_ui_prompt_classifies_before_dispatcher(monkeypatch):
         [docs.id],
     )
     assert (await chats.get(chat.id)).space_id == docs.id
-    assert '"state": "assigning"' in response.text
-    assert '"state": "assigned"' in response.text
-    assert response.text.index('"state": "assigned"') < response.text.index('"type":"finish"')
-    assert seen["history"][0].role == "system"
-    assert seen["history"][1].text == "fix the docs"
-    flush.assert_called_once_with()
+    assert seen["started"] == (chat.id, "ui", None)
+    assert seen["stream"] == ("run_1", "turn_1")
+    assert response.text == 'data: {"type":"finish"}\n\n'
 
 
 async def test_ui_turn_is_mirrored_to_bound_channel(monkeypatch):
@@ -966,6 +993,15 @@ async def test_ui_turn_is_mirrored_to_bound_channel(monkeypatch):
         server.dispatcher, "agent_for", lambda record: FakeAgent()
     )
     monkeypatch.setattr(server.ai.ui.ai_sdk, "to_sse", fake_sse)
+
+    async def start_turn(chat_id, origin, task_id=None):
+        return server.turns.ActiveTurn("turn_1", "run_1", origin, task_id, 0)
+
+    async def durable_sse(_run_id, _turn_id):
+        yield 'data: {"type":"finish"}\n\n'
+
+    monkeypatch.setattr(server.durable, "start_turn", start_turn)
+    monkeypatch.setattr(server.agent_stream, "to_sse", durable_sse)
     try:
         space = await server.spaces.default()
         chat, _ = await chats.claim("fake:thread", "fake", space.id, "thread", {"thread": "1"})
@@ -982,19 +1018,18 @@ async def test_ui_turn_is_mirrored_to_bound_channel(monkeypatch):
         assert response.status_code == 200
         assert [event.type for event, _ in channel.delivered] == [
             channels.protocol.MESSAGE_RECEIVED,
-            channels.protocol.TURN_STARTED,
-            channels.protocol.MESSAGE_COMPLETED,
-            channels.protocol.MESSAGE_COMPLETED,
         ]
-        assert channel.delivered[0][0].data == {"message": "continue in UI", "origin": "ui"}
-        assert channel.delivered[2][0].data == {"message": "I will handle that.", "final": False}
-        assert channel.delivered[-1][0].data == {"message": "answer from AI"}
-        assert all(state == {"thread": "1"} for _, state in channel.delivered)
-        stored = [ai.messages.Message.model_validate(data) for _, data in await events.read(chat.id, "messages")]
+        assert channel.delivered[0][0].data == {
+            "message": "continue in UI",
+            "origin": "ui",
+        }
+        assert channel.delivered[0][1] == {"thread": "1"}
+        stored = [
+            ai.messages.Message.model_validate(data)
+            for _, data in await events.read(chat.id, "messages")
+        ]
         assert [(message.role, message.text) for message in stored] == [
             ("user", "continue in UI"),
-            ("assistant", "I will handle that."),
-            ("assistant", "answer from AI"),
         ]
     finally:
         if previous is None:
@@ -1125,24 +1160,18 @@ async def test_worker_completion_wakes_dispatcher_with_hidden_persisted_result(m
         updated_at="2026-08-28T00:00:00+00:00",
     )
     await server.worker.store.save_task(task)
-    delivered = []
-    turns = []
+    started = []
 
-    async def turn(chat_id, record, wake=None):
-        turns.append([message for message in await server._transcript(chat_id)])
-        await events.append(
-            chat_id,
-            "messages",
-            ai.assistant_message("The subagent fixed and tested it.").model_dump(mode="json"),
-        )
-        return ["The subagent fixed and tested it."]
+    async def start_turn(chat_id, origin, task_id=None):
+        started.append((chat_id, origin, task_id))
+        return server.turns.ActiveTurn("turn_1", "run_1", origin, task_id, 0)
 
-    async def deliver(chat_id, message, *, final=True):
-        delivered.append((chat_id, message))
-        return []
+    class Run:
+        async def status(self):
+            return "running"
 
-    monkeypatch.setattr(server, "_run_dispatcher_turn", turn)
-    monkeypatch.setattr(server, "_deliver", deliver)
+    monkeypatch.setattr(server.vercel.workflow, "Run", lambda run_id: Run())
+    monkeypatch.setattr(server.durable, "start_turn", start_turn)
     await server.complete_worker_task(task)
     await server.complete_worker_task(task)
 
@@ -1152,58 +1181,47 @@ async def test_worker_completion_wakes_dispatcher_with_hidden_persisted_result(m
             "user",
             '<subagent_result>\n{"subagent_id":"task_1","status":"complete","result":{"summary":"fixed and tested"}}\n</subagent_result>',
         ),
-        ("assistant", "The subagent fixed and tested it."),
     ]
     assert stored[0].provider_metadata == {
         "hatchery": {"kind": "subagent_result", "subagent_id": "task_1"}
     }
-    assert len(turns) == 1
-    assert turns[0][-1].id == "subagent_result_task_1_3"
-    assert delivered == [(chat.id, "The subagent fixed and tested it.")]
-    assert (await server.worker.get_task(chat.id, task.id)).completion_delivered is True
-    assert (await chats.get(chat.id)).status == "done"
+    assert started == [(chat.id, "worker", task.id)]
+    current = await server.worker.get_task(chat.id, task.id)
+    assert current.completion_run_id == "run_1"
+    assert current.completion_delivered is False
 
     async with client() as c:
         visible = (await c.get(f"/api/chats/{chat.id}/messages")).json()
-    assert [message["role"] for message in visible] == ["assistant"]
+    assert visible == []
 
 
-async def test_worker_completion_retries_delivery_without_rerunning_dispatcher(monkeypatch):
+async def test_worker_completion_does_not_restart_active_workflow(monkeypatch):
     space = await server.spaces.default()
     chat = await chats.create(space.id, "task")
     task = server.worker.Task(
         id="task_1", chat_id=chat.id, worker_id="wrk_1", title="fix",
         prompt="fix it", model="openai/test", status="complete", event_sequence=2,
+        completion_sequence=2, completion_run_id="run_1",
         result={"summary": "done"}, created_at="2026-08-28T00:00:00+00:00",
         updated_at="2026-08-28T00:00:00+00:00",
     )
     await server.worker.store.save_task(task)
-    turn_calls = 0
-    delivery_calls = 0
+    starts = []
 
-    async def turn(chat_id, record, wake=None):
-        nonlocal turn_calls
-        turn_calls += 1
-        await events.append(
-            chat_id, "messages", ai.assistant_message("done").model_dump(mode="json")
-        )
-        return ["done"]
+    class Run:
+        async def status(self):
+            return "running"
 
-    async def deliver(chat_id, message, *, final=True):
-        nonlocal delivery_calls
-        delivery_calls += 1
-        return ["temporary"] if delivery_calls == 1 else []
+    async def start_turn(*args):
+        starts.append(args)
+        return "run_2"
 
-    monkeypatch.setattr(server, "_run_dispatcher_turn", turn)
-    monkeypatch.setattr(server, "_deliver", deliver)
-    await server.complete_worker_task(task)
+    monkeypatch.setattr(server.vercel.workflow, "Run", lambda run_id: Run())
+    monkeypatch.setattr(server.durable, "start_turn", start_turn)
     await server.complete_worker_task(task)
 
-    stored = await events.read(chat.id, "messages")
-    assert len(stored) == 2
-    assert turn_calls == 1
-    assert delivery_calls == 2
-    assert (await server.worker.get_task(chat.id, task.id)).completion_delivered is True
+    assert starts == []
+    assert (await server.worker.get_task(chat.id, task.id)).completion_run_id == "run_1"
 
 
 async def test_task_readiness_reports_queue_state(monkeypatch):

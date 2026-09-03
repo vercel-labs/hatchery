@@ -116,6 +116,7 @@ class Task(pydantic.BaseModel):
     result: dict[str, typing.Any] | None = None
     telemetry_span: dict[str, typing.Any] | None = None
     completion_sequence: int | None = None
+    completion_run_id: str | None = None
     completion_message: str | None = None
     completion_delivered: bool = False
     created_at: str

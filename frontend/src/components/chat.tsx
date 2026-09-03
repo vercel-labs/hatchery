@@ -1,6 +1,6 @@
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { PlusIcon } from "lucide-react";
 
 import { ChatMessage } from "@/components/chat-message";
@@ -28,12 +28,14 @@ export function ChatView({
   chatId,
   initialMessages,
   messageRevision,
+  streamGeneration,
   onMessagesChange,
   onCreateSandbox,
 }: {
   chatId: string;
   initialMessages: ChatUIMessage[];
   messageRevision: number;
+  streamGeneration: number;
   onMessagesChange?: (messages: ChatUIMessage[]) => void;
   onCreateSandbox: () => void;
 }) {
@@ -45,20 +47,48 @@ export function ChatView({
         prepareSendMessagesRequest: ({ id, messages }) => {
           return { body: { chat_id: id, messages } };
         },
+        prepareReconnectToStreamRequest: ({ id }) => ({
+          api: `${apiBase()}/api/chat/${id}/stream`,
+          credentials: "include",
+        }),
       }),
     [],
   );
 
-  const { messages, setMessages, sendMessage, status, stop, error } =
-    useChat<ChatUIMessage>({
-      id: chatId,
-      transport,
-      messages: initialMessages,
-    });
+  const {
+    messages,
+    setMessages,
+    sendMessage,
+    resumeStream,
+    status,
+    stop,
+    error,
+  } = useChat<ChatUIMessage>({
+    id: chatId,
+    transport,
+    messages: initialMessages,
+    resume: true,
+  });
+
+  const attachedGeneration = useRef(streamGeneration);
 
   useEffect(() => {
     onMessagesChange?.(messages);
   }, [messages, onMessagesChange]);
+
+  useEffect(() => () => {
+    void stop();
+  }, [stop]);
+
+  useEffect(() => {
+    if (
+      streamGeneration > attachedGeneration.current &&
+      status === "ready"
+    ) {
+      attachedGeneration.current = streamGeneration;
+      void resumeStream();
+    }
+  }, [resumeStream, status, streamGeneration]);
 
   useEffect(() => {
     if (

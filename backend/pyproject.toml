@@ -2,7 +2,7 @@
 name = "hatchery"
 version = "0.1.0"
 description = "a software factory: an agent reachable from slack, github, and its own ui."
-requires-python = ">=3.12"
+requires-python = ">=3.14,<3.15"
 dependencies = [
     "ai[otel,vercel]",
     "asyncpg>=0.31.0",
@@ -31,8 +31,23 @@ entrypoint = "app.server:app"
 [[tool.vercel.subscribers]]
 entrypoint = "app.server:worker_event"
 
+[[tool.vercel.workflows]]
+entrypoint = "agent.durable:workflow"
+
 [tool.uv]
 package = false
+
+[tool.uv.sources]
+ai = { git = "https://github.com/vercel-labs/ai-python", branch = "main" }
+vercel = { git = "https://github.com/vercel/vercel-py", branch = "main", subdirectory = "src/vercel" }
+vercel-cache = { git = "https://github.com/vercel/vercel-py", branch = "main", subdirectory = "src/vercel-cache" }
+vercel-headers = { git = "https://github.com/vercel/vercel-py", branch = "main", subdirectory = "src/vercel-headers" }
+vercel-internal-core = { git = "https://github.com/vercel/vercel-py", branch = "main", subdirectory = "src/vercel-internal-core" }
+vercel-internal-telemetry = { git = "https://github.com/vercel/vercel-py", branch = "main", subdirectory = "src/vercel-internal-telemetry" }
+vercel-oidc = { git = "https://github.com/vercel/vercel-py", branch = "main", subdirectory = "src/vercel-oidc" }
+vercel-queue = { git = "https://github.com/vercel/vercel-py", branch = "main", subdirectory = "src/vercel-queue" }
+vercel-sandbox = { git = "https://github.com/vercel/vercel-py", branch = "main", subdirectory = "src/vercel-sandbox" }
+vercel-workflow = { git = "https://github.com/vercel/vercel-py", branch = "main", subdirectory = "src/vercel-workflow" }
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
