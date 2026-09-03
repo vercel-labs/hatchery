@@ -88,6 +88,28 @@ async def test_tools_read_trusted_chat_id_from_current_agent(monkeypatch):
     assert durable.list_sandboxes.tool.spec.params["properties"] == {}
 
 
+async def test_create_sandbox_tool_forwards_size(monkeypatch):
+    calls = []
+
+    async def step(*args):
+        calls.append(args)
+        return {"id": "wrk_1"}
+
+    class Writer:
+        async def write(self, value):
+            pass
+
+    monkeypatch.setattr(durable, "create_sandbox_step", step)
+    agent = durable.DurableDispatcher("chat_1", Writer())
+    token = durable.current_agent.set(agent)
+    try:
+        assert await durable.create_sandbox.fn(size="big") == {"id": "wrk_1"}
+    finally:
+        durable.current_agent.reset(token)
+
+    assert calls[0][-1] == "big"
+
+
 async def test_commit_messages_is_idempotent():
     message = ai.assistant_message("done")
 

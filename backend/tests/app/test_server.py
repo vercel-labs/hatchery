@@ -1141,10 +1141,18 @@ async def test_sandbox_routes_use_chat_scoped_control_plane(monkeypatch):
                 "ports": [], "branch": None, "git_sha": None,
             },
         )
+        invalid_size = await c.post(
+            f"/api/chats/{chat.id}/sandboxes",
+            json={
+                "title": "sandbox", "repos": [], "setup_script": None,
+                "ports": [], "branch": None, "git_sha": None, "size": "medium",
+            },
+        )
         old = await c.get(f"/api/chats/{chat.id}/devboxes")
 
     assert listed.status_code == 200
     assert created.status_code == 200
+    assert invalid_size.status_code == 422
     assert listed.json()[0]["id"] == "wrk_1"
     assert listed.json()[0]["status"] == "running"
     assert listed.json()[0]["live"] is True
@@ -1154,6 +1162,7 @@ async def test_sandbox_routes_use_chat_scoped_control_plane(monkeypatch):
     assert seen["listed"] == chat.id
     assert seen["liveness"] == "hatchery-wrk_1"
     assert seen["created"][0] == chat.id
+    assert seen["created"][1].size == "small"
     assert old.status_code == 404
 
 

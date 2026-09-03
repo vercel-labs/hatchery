@@ -60,10 +60,14 @@ async def create(
     await store.save(record)
     try:
         async with ai.experimental_telemetry.span("sandbox.provision") as span:
+            vcpus, memory = spec.resolved_resources()
             span.set_attrs(
                 {"chat.id": chat_id, "worker.id": record.id},
                 repo_count=len(spec.repos),
                 port_count=len(spec.ports),
+                sandbox_size=spec.size or "legacy",
+                sandbox_vcpus=vcpus,
+                sandbox_memory_mb=memory,
             )
             if record.user_id is None:
                 provisioned = await sandbox.provision(record.id, spec, record.daemon_token)

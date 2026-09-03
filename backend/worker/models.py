@@ -5,6 +5,13 @@ import typing
 import pydantic
 
 
+SandboxSize = typing.Literal["small", "big"]
+SANDBOX_RESOURCES: dict[SandboxSize, tuple[int, int]] = {
+    "small": (2, 4096),
+    "big": (4, 8192),
+}
+
+
 class WorkerSpec(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra="forbid")
 
@@ -14,6 +21,7 @@ class WorkerSpec(pydantic.BaseModel):
     ports: list[int] = []
     branch: str | None = None
     git_sha: str | None = None
+    size: SandboxSize | None = "small"
     vcpus: int | None = None
     memory: int | None = None
 
@@ -38,14 +46,33 @@ class WorkerSpec(pydantic.BaseModel):
             raise ValueError("ports must contain up to four values between 1 and 65535")
         return ports
 
+    @pydantic.model_validator(mode="before")
+    @classmethod
+    def preserve_legacy_resources(cls, data):
+        if isinstance(data, dict) and "size" not in data:
+            if data.get("vcpus") is not None or data.get("memory") is not None:
+                return {**data, "size": None}
+        return data
+
     @pydantic.model_validator(mode="after")
     def normalize(self):
         if (self.branch or self.git_sha) and not self.repos:
             raise ValueError("branch and git_sha require a main repo")
+        if self.size is not None and (self.vcpus is not None or self.memory is not None):
+            raise ValueError("size cannot be combined with legacy vcpus or memory")
+        if self.vcpus is not None and self.vcpus < 1:
+            raise ValueError("legacy vcpus must be positive")
+        if self.memory is not None and self.memory < 1:
+            raise ValueError("legacy memory must be positive")
         self.setup_script = self.setup_script.strip() if self.setup_script else None
         self.branch = self.branch.strip() if self.branch else None
         self.git_sha = self.git_sha.strip() if self.git_sha else None
         return self
+
+    def resolved_resources(self) -> tuple[int | None, int | None]:
+        if self.size is not None:
+            return SANDBOX_RESOURCES[self.size]
+        return self.vcpus, self.memory
 
 
 class Route(pydantic.BaseModel):

@@ -127,9 +127,8 @@ async def provision(
             username="x-access-token" if credential else None,
             password=credential,
         )
-    resources = None
-    if spec.vcpus is not None or spec.memory is not None:
-        resources = vercel_sandbox.SandboxResources(vcpus=spec.vcpus, memory=spec.memory)
+    vcpus, memory = spec.resolved_resources()
+    resources = vercel_sandbox.SandboxResources(vcpus=vcpus, memory=memory)
     box, created = await vercel_sandbox.get_or_create_sandbox(
         name=name,
         source=source,
@@ -139,7 +138,10 @@ async def provision(
         execution_time_limit=EXECUTION_TIME_LIMIT,
         network_policy=network_policy,
         env={"AI_GATEWAY_API_KEY": AI_GATEWAY_PLACEHOLDER},
-        tags={"hatchery-worker": worker_id},
+        tags={
+            "hatchery-worker": worker_id,
+            "hatchery-size": spec.size or "legacy",
+        },
     )
     await box.update(execution_time_limit=EXECUTION_TIME_LIMIT)
     await box.update_network_policy(
@@ -186,6 +188,9 @@ async def prepare_for_command(record: models.Worker) -> None:
             {"chat.id": record.chat_id, "worker.id": record.id},
             sandbox_name=record.sandbox_name,
             worker_state=record.status,
+            sandbox_size=record.spec.size or "legacy",
+            sandbox_vcpus=record.spec.resolved_resources()[0],
+            sandbox_memory_mb=record.spec.resolved_resources()[1],
         )
         box = await vercel_sandbox.resume_sandbox(name=record.sandbox_name)
         span.set_attrs(region=box.region or "")
