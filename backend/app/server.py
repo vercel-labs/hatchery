@@ -35,7 +35,7 @@ import models
 import store
 import vercel.functions
 import vercel.queue
-from agent import classifier, dispatcher, sandbox, telemetry, topic
+from agent import classifier, dispatcher, durable, sandbox, telemetry, topic
 import worker
 from worker import protocol as worker_protocol
 from channels import github, slack
@@ -1213,56 +1213,17 @@ async def complete_worker_task(task: worker.Task) -> None:
             current.completion_message = None
             await worker.store.save_task(current)
 
-        message = current.completion_message
-        if not message:
-            transcript = await _transcript(current.chat_id)
-            result_index = next(
-                (
-                    index
-                    for index, item in enumerate(transcript)
-                    if item.id
-                    == f"subagent_result_{current.id}_{current.completion_sequence}"
-                ),
-                -1,
-            )
-            message = next(
-                (
-                    item.text
-                    for item in reversed(transcript[result_index + 1 :])
-                    if item.role == "assistant" and item.text
-                ),
-                "",
-            )
-        if not message:
-            messages = await _run_dispatcher_turn(current.chat_id, {"id": current.chat_id})
-            for intermediate in messages[:-1]:
-                if await _deliver(current.chat_id, intermediate, final=False):
-                    return
-            message = messages[-1]
-        if current.completion_message != message:
-            current = await worker.get_task(current.chat_id, current.id) or current
-            current.completion_message = message
-            await worker.store.save_task(current)
+        if current.completion_run_id is not None:
+            run = vercel.workflow.Run(current.completion_run_id)
+            if await run.status() in ("pending", "running", "completed"):
+                return
+        run_id = await durable.start_turn(current.chat_id, "worker", current.id)
 
-        failures = await _deliver(current.chat_id, message)
-        if failures:
-            return
-        current.completion_delivered = True
-        await worker.store.save_task(current)
-        if current.status in ("complete", "errored"):
-            siblings = await worker.store.list_tasks(current.chat_id)
-            if not any(
-                sibling.id != current.id
-                and sibling.status in ("pending", "running", "attention")
-                for sibling in siblings
-            ):
-                await chats.finish(
-                    current.chat_id,
-                    "failed" if current.status == "errored" else "done",
-                    message,
-                )
-        await events.append(current.chat_id, "ui", {"type": "messages.changed"})
-        await events.append(current.chat_id, "ui", {"type": "chat.changed"})
+        def record_run(latest: worker.Task) -> worker.Task:
+            latest.completion_run_id = run_id
+            return latest
+
+        await worker.store.mutate_task(current.id, record_run)
 
 
 async def _emit(chat_id: str, event: channels.Event) -> list[str]:
@@ -1295,21 +1256,9 @@ async def _deliver(chat_id: str, message: str, *, final: bool = True) -> list[st
 
 
 async def _run_inbound_turn(chat_id: str) -> None:
-    async with turns.run(chat_id), ai.experimental_telemetry.span(
-        "hatchery.turn"
-    ) as span:
-        span.set_attrs({"chat.id": chat_id}, origin="channel")
-        await _emit(chat_id, channels.event(channels.protocol.TURN_STARTED))
-        try:
-            messages = await _run_dispatcher_turn(chat_id, {"id": chat_id})
-            for index, message in enumerate(messages):
-                await _deliver(chat_id, message, final=index == len(messages) - 1)
-        except Exception as error:
-            log.exception("inbound dispatcher turn failed: %s", chat_id)
-            await _emit(
-                chat_id,
-                channels.event(channels.protocol.TURN_FAILED, error=str(error)),
-            )
+    """Start one durable dispatcher turn after the channel has been acknowledged."""
+    async with turns.run(chat_id):
+        await durable.start_turn(chat_id, "channel")
 
 
 async def _run_dispatcher_turn(

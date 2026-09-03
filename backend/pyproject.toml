@@ -31,6 +31,9 @@ entrypoint = "app.server:app"
 [[tool.vercel.subscribers]]
 entrypoint = "app.server:worker_event"
 
+[[tool.vercel.workflows]]
+entrypoint = "agent.durable:workflow"
+
 [tool.uv]
 package = false
 
