@@ -148,6 +148,33 @@ async def claim_user(chat_id: str, user_id: str) -> models.Chat | None:
         return chat
 
 
+async def set_archived(chat_id: str, archived: bool) -> models.Chat | None:
+    current = await get(chat_id)
+    if current is None or (current.archived_at is not None) == archived:
+        return current
+    archived_at = _now() if archived else None
+    if store.use_postgres():
+        from store import db
+
+        row = await (await db.pool()).fetchrow(
+            "UPDATE hatchery_chats SET data = data || "
+            "jsonb_build_object('archived_at', $2::text) "
+            "WHERE id = $1 RETURNING data",
+            chat_id,
+            archived_at,
+        )
+        return _chat(row["data"]) if row is not None else None
+    with _lock:
+        chat = _read_chat(chat_id)
+        if chat is None:
+            return None
+        if (chat.archived_at is not None) == archived:
+            return chat
+        chat.archived_at = archived_at
+        _write_chat(chat)
+        return chat
+
+
 async def assign_space(chat_id: str, space_id: str) -> models.Chat | None:
     if store.use_postgres():
         from store import db
