@@ -51,6 +51,8 @@ class Inbound:
     state: dict  # channel state derived from this event
     title: str = ""  # chat title if this message opens a new chat
     repo: str | None = None  # "owner/repo" for project routing, github only
+    persist: bool = True  # false when waking a chat after a separate sync
+    invoke: bool = True  # persist every message; only some messages wake the agent
 
 
 @dataclasses.dataclass
