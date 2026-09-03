@@ -278,33 +278,30 @@ async def test_slack_authorization_uses_vercel_user_subject(monkeypatch):
     assert seen["return_url"] == "http://localhost:3000/api/connections/slack/return"
 
 
-async def test_slack_return_uses_auth_test_and_saves_no_token(monkeypatch):
+async def test_slack_return_uses_connect_identity_and_saves_no_token(monkeypatch):
     saved = {}
 
     async def token(_connector, **kwargs):
         assert kwargs["subject"] == connections.connect.ConnectUserTokenSubject(id="user_1")
-        return type("Token", (), {"token": "xoxp-private"})()
+        return type(
+            "Token",
+            (),
+            {
+                "token": "xoxp-private",
+                "tenant_id": "T1",
+                "external_subject": "U1",
+                "metadata": {"team_name": "Acme", "user_name": "ada"},
+                "name": None,
+                "token_id": "stk_1",
+            },
+        )()
 
     async def save(user_id, connection):
         saved.update(user_id=user_id, connection=connection)
 
-    def responder(http_request):
-        assert http_request.url.path == "/api/auth.test"
-        assert http_request.headers["authorization"] == "Bearer xoxp-private"
-        return httpx.Response(
-            200,
-            json={
-                "ok": True,
-                "team_id": "T1",
-                "team": "Acme",
-                "user_id": "U1",
-                "user": "ada",
-            },
-        )
-
-    class Client(httpx.AsyncClient):
-        def __init__(self, **kwargs):
-            super().__init__(transport=httpx.MockTransport(responder), **kwargs)
+    class Client:
+        def __init__(self, **_kwargs):
+            raise AssertionError("auth.test should not be called when Connect returns identity")
 
     monkeypatch.setenv("SLACK_CONNECTOR", "slack/hatchery")
     monkeypatch.setattr(connections.connect, "get_token_response", token)
@@ -327,7 +324,18 @@ async def test_slack_return_uses_auth_test_and_saves_no_token(monkeypatch):
 
 async def test_slack_return_rejects_identity_linked_to_another_user(monkeypatch):
     async def token(_connector, **_kwargs):
-        return type("Token", (), {"token": "xoxp-private"})()
+        return type(
+            "Token",
+            (),
+            {
+                "token": "xoxp-private",
+                "tenant_id": None,
+                "external_subject": None,
+                "metadata": None,
+                "name": None,
+                "token_id": "stk_1",
+            },
+        )()
 
     async def save(_user_id, _connection):
         raise connections.auth_store.SlackIdentityConflict("already linked")

@@ -131,18 +131,32 @@ async def finish_slack(user: dict) -> fastapi.responses.RedirectResponse:
         )
     except _CONNECT_ERRORS as error:
         raise ConnectionRequired("Slack authorization was not completed") from error
-    async with httpx.AsyncClient(base_url=SLACK_API, timeout=30) as http:
-        response = await http.post(
-            "/auth.test", headers={"authorization": f"Bearer {token.token}"}
-        )
-    profile = response.json()
-    if response.status_code >= 300 or not profile.get("ok"):
-        raise fastapi.HTTPException(502, "Slack identity lookup failed")
+    profile = token.metadata or {}
+    team_id = token.tenant_id or profile.get("team_id")
+    slack_user_id = token.external_subject or profile.get("user_id")
+    if not team_id or not slack_user_id:
+        async with httpx.AsyncClient(base_url=SLACK_API, timeout=30) as http:
+            response = await http.post(
+                "/auth.test", headers={"authorization": f"Bearer {token.token}"}
+            )
+        profile = response.json()
+        if response.status_code >= 300 or not profile.get("ok"):
+            log.error(
+                "Slack identity lookup failed",
+                extra={
+                    "user_id": user["id"],
+                    "slack_error": profile.get("error"),
+                    "token_id": token.token_id,
+                },
+            )
+            raise fastapi.HTTPException(502, "Slack identity lookup failed")
+        team_id = profile.get("team_id")
+        slack_user_id = profile.get("user_id")
     connection = {
-        "team_id": str(profile["team_id"]),
-        "team": profile.get("team"),
-        "user_id": str(profile["user_id"]),
-        "user": profile.get("user"),
+        "team_id": str(team_id),
+        "team": profile.get("team") or profile.get("team_name"),
+        "user_id": str(slack_user_id),
+        "user": profile.get("user") or profile.get("user_name") or token.name,
         "connected_at": datetime.datetime.now(datetime.UTC).isoformat(),
     }
     try:
