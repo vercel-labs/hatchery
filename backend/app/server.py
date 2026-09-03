@@ -74,6 +74,15 @@ class _StoreHub:
     async def dispatch(self, channel: str, inbound: channels.Inbound) -> None:
         async with ai.experimental_telemetry.span("channel.dispatch") as span:
             span.set_attrs(channel=channel)
+            user_id = None
+            if channel == "slack":
+                user_id = await connections.auth_store.slack_user(
+                    str(inbound.state.get("team_id", "")),
+                    str(inbound.state.get("user_id", "")),
+                )
+                if user_id is None:
+                    span.set_attrs(ignored="unconnected_slack_user")
+                    return
             found = await spaces.list_all() or [await spaces.default()]
             title = inbound.title or inbound.text.strip().splitlines()[0][:80]
             chat, created = await chats.claim(
@@ -82,7 +91,11 @@ class _StoreHub:
                 None,
                 title,
                 inbound.state,
+                user_id=user_id,
             )
+            if user_id is not None and chat.user_id != user_id:
+                span.set_attrs(ignored="owned_by_another_user", **{"chat.id": chat.id})
+                return
             span.set_attrs(
                 {"chat.id": chat.id, "space.id": chat.space_id or ""},
                 created=created,
@@ -204,7 +217,9 @@ async def browser_session(request: fastapi.Request, call_next):
         return fastapi.responses.JSONResponse({"detail": "sign in required"}, status_code=401)
     match = re.match(r"^/api/chats/([^/]+)", path)
     if match is not None and user is not None:
-        chat = await chats.claim_user(match.group(1), user["id"])
+        chat = await chats.get(match.group(1))
+        if chat is not None and chat.user_id is None and chat.trigger == "ui":
+            chat = await chats.claim_user(chat.id, user["id"])
         if chat is not None and chat.user_id != user["id"]:
             return fastapi.responses.JSONResponse({"detail": "unknown chat"}, status_code=404)
     if path.startswith("/api/") and request.method not in {"GET", "HEAD", "OPTIONS"} and not auth.valid_origin(request):
@@ -282,6 +297,37 @@ async def github_return(request: fastapi.Request):
 async def disconnect_github(request: fastapi.Request) -> None:
     user = request.state.user
     await connections.disconnect_github(user)
+
+
+@app.get("/api/connections/slack")
+async def slack_connection(request: fastapi.Request) -> dict:
+    user = request.state.user
+    connection = connections.slack_connection(user)
+    if connection is None:
+        return {"connection": None}
+    try:
+        await connections.slack_token(user["id"])
+    except connections.ConnectionRequired:
+        return {"connection": None}
+    return {"connection": connection}
+
+
+@app.get("/api/connections/slack/authorize")
+async def authorize_slack(request: fastapi.Request):
+    return await connections.begin_slack(request, request.state.user)
+
+
+@app.get("/api/connections/slack/return")
+async def slack_return(request: fastapi.Request):
+    try:
+        return await connections.finish_slack(request.state.user)
+    except connections.ConnectionRequired as error:
+        raise fastapi.HTTPException(409, "Slack authorization was not completed") from error
+
+
+@app.delete("/api/connections/slack", status_code=204)
+async def disconnect_slack(request: fastapi.Request) -> None:
+    await connections.disconnect_slack(request.state.user)
 
 
 class VercelCLIRequest(pydantic.BaseModel):
@@ -432,7 +478,7 @@ async def list_chats(request: fastapi.Request) -> list[models.Chat]:
     found = []
     if user is not None:
         for chat in await chats.list_all():
-            if chat.user_id is None:
+            if chat.user_id is None and chat.trigger == "ui":
                 chat = await chats.claim_user(chat.id, user["id"]) or chat
             if chat.user_id == user["id"]:
                 found.append(chat)

@@ -13,6 +13,7 @@ import auth
 from store import auth as auth_store
 
 GITHUB_API = "https://api.github.com"
+SLACK_API = "https://slack.com/api"
 VERCEL_API = "https://api.vercel.com"
 VERCEL_SECRET = "vercel_cli"
 
@@ -100,6 +101,74 @@ async def disconnect_github(user: dict) -> None:
     except Exception:
         log.exception("GitHub token revocation failed", extra={"user_id": user["id"]})
     await auth_store.delete_github_connection(user["id"])
+
+
+def _slack_connector() -> str:
+    return os.environ["SLACK_CONNECTOR"]
+
+
+def slack_connection(user: dict) -> dict | None:
+    saved = user.get("slack")
+    return saved if isinstance(saved, dict) else None
+
+
+async def begin_slack(request: fastapi.Request, user: dict) -> fastapi.responses.RedirectResponse:
+    try:
+        authorization = await connect.start_authorization(
+            _slack_connector(),
+            subject=_github_subject(user),
+            return_url=f"{auth.request_origin(request)}/api/connections/slack/return",
+        )
+    except _CONNECT_ERRORS as error:
+        raise ConnectionRequired("Slack authorization is required") from error
+    return fastapi.responses.RedirectResponse(authorization.url)
+
+
+async def finish_slack(user: dict) -> fastapi.responses.RedirectResponse:
+    try:
+        token = await connect.get_token_response(
+            _slack_connector(), subject=_github_subject(user)
+        )
+    except _CONNECT_ERRORS as error:
+        raise ConnectionRequired("Slack authorization was not completed") from error
+    async with httpx.AsyncClient(base_url=SLACK_API, timeout=30) as http:
+        response = await http.post(
+            "/auth.test", headers={"authorization": f"Bearer {token.token}"}
+        )
+    profile = response.json()
+    if response.status_code >= 300 or not profile.get("ok"):
+        raise fastapi.HTTPException(502, "Slack identity lookup failed")
+    connection = {
+        "team_id": str(profile["team_id"]),
+        "team": profile.get("team"),
+        "user_id": str(profile["user_id"]),
+        "user": profile.get("user"),
+        "connected_at": datetime.datetime.now(datetime.UTC).isoformat(),
+    }
+    try:
+        await auth_store.save_slack_connection(user["id"], connection)
+    except auth_store.SlackIdentityConflict as error:
+        raise fastapi.HTTPException(409, "Slack account is already connected") from error
+    return fastapi.responses.RedirectResponse("/")
+
+
+async def slack_token(user_id: str) -> str:
+    try:
+        return await connect.get_token(
+            _slack_connector(), subject=connect.ConnectUserTokenSubject(id=user_id)
+        )
+    except _CONNECT_ERRORS as error:
+        raise ConnectionRequired("connect Slack before using Slack") from error
+
+
+async def disconnect_slack(user: dict) -> None:
+    try:
+        await connect.revoke_token(_slack_connector(), subject=_github_subject(user))
+    except _CONNECT_ERRORS:
+        pass
+    except Exception:
+        log.exception("Slack token revocation failed", extra={"user_id": user["id"]})
+    await auth_store.delete_slack_connection(user["id"])
 
 
 async def github_identity(user_id: str) -> dict | None:

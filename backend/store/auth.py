@@ -5,6 +5,8 @@ import hashlib
 import json
 import secrets
 
+import asyncpg
+
 from store import db
 
 _SCHEMA = """\
@@ -32,6 +34,14 @@ CREATE TABLE IF NOT EXISTS hatchery_user_secrets (
     value      TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (user_id, name)
+);
+CREATE TABLE IF NOT EXISTS hatchery_slack_identities (
+    team_id    TEXT NOT NULL,
+    slack_user_id TEXT NOT NULL,
+    user_id    TEXT NOT NULL REFERENCES hatchery_users(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT hatchery_slack_identity PRIMARY KEY (team_id, slack_user_id),
+    CONSTRAINT hatchery_slack_user UNIQUE (user_id)
 );
 """
 
@@ -91,6 +101,65 @@ async def save_github_connection(user_id: str, connection: dict) -> None:
 
 async def delete_github_connection(user_id: str) -> None:
     await delete_connection(user_id, "github")
+
+
+class SlackIdentityConflict(RuntimeError):
+    """A Slack account is already linked to another Hatchery user."""
+
+
+async def save_slack_connection(user_id: str, connection: dict) -> None:
+    """Atomically replace one user's Slack metadata and reverse identity mapping."""
+    pool = await db.pool()
+    try:
+        async with pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                "DELETE FROM hatchery_slack_identities WHERE user_id = $1", user_id
+            )
+            await conn.execute(
+                "INSERT INTO hatchery_slack_identities (team_id, slack_user_id, user_id) "
+                "VALUES ($1, $2, $3)",
+                connection["team_id"],
+                connection["user_id"],
+                user_id,
+            )
+            result = await conn.execute(
+                "UPDATE hatchery_users SET data = jsonb_set(data, '{slack}', $2::jsonb) "
+                "WHERE id = $1",
+                user_id,
+                json.dumps(connection),
+            )
+            if result != "UPDATE 1":
+                raise RuntimeError("unknown Hatchery user")
+    except asyncpg.UniqueViolationError as error:
+        if error.constraint_name not in {
+            "hatchery_slack_identity",
+            "hatchery_slack_user",
+        }:
+            raise
+        raise SlackIdentityConflict("Slack account is already connected") from error
+
+
+async def slack_user(team_id: str, slack_user_id: str) -> str | None:
+    if not team_id or not slack_user_id:
+        return None
+    row = await (await db.pool()).fetchrow(
+        "SELECT user_id FROM hatchery_slack_identities "
+        "WHERE team_id = $1 AND slack_user_id = $2",
+        team_id,
+        slack_user_id,
+    )
+    return str(row["user_id"]) if row is not None else None
+
+
+async def delete_slack_connection(user_id: str) -> None:
+    pool = await db.pool()
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute(
+            "DELETE FROM hatchery_slack_identities WHERE user_id = $1", user_id
+        )
+        await conn.execute(
+            "UPDATE hatchery_users SET data = data - 'slack' WHERE id = $1", user_id
+        )
 
 
 async def save_secret(user_id: str, name: str, value: str) -> None:

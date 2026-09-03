@@ -19,6 +19,51 @@ async def test_claim_creates_then_reuses():
     assert binding.state == {"channel_id": "C1", "user_id": "U2"}  # merged
 
 
+async def test_claim_sets_owner_and_rejects_owner_state_takeover():
+    first, created = await chats.claim(
+        "slack:C1:100.1",
+        "slack",
+        None,
+        "hello",
+        {"user_id": "U1"},
+        user_id="hatchery_1",
+    )
+    second, reused = await chats.claim(
+        "slack:C1:100.1",
+        "slack",
+        None,
+        "takeover",
+        {"user_id": "U2"},
+        user_id="hatchery_2",
+    )
+
+    assert created is True and reused is False
+    assert first.id == second.id
+    assert second.user_id == "hatchery_1"
+    [binding] = await chats.bindings(first.id)
+    assert binding.state == {"user_id": "U1"}
+
+
+async def test_connected_owner_claims_legacy_unowned_binding():
+    legacy, _ = await chats.claim(
+        "slack:C1:100.1", "slack", None, "legacy", {"user_id": "U1"}
+    )
+
+    claimed, created = await chats.claim(
+        "slack:C1:100.1",
+        "slack",
+        None,
+        "connected",
+        {"user_id": "U1"},
+        user_id="hatchery_1",
+    )
+
+    assert created is False
+    assert claimed.id == legacy.id
+    assert claimed.user_id == "hatchery_1"
+    assert (await chats.get(legacy.id)).user_id == "hatchery_1"
+
+
 async def test_claim_separates_tokens():
     space = await spaces.default()
     a, _ = await chats.claim("slack:C1:100.1", "slack", space.id, "t", {})

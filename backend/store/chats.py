@@ -219,6 +219,7 @@ async def claim(
     space_id: str | None,
     title: str,
     state: dict,
+    user_id: str | None = None,
 ) -> tuple[models.Chat, bool]:
     """Atomically map a channel token to its owning chat.
 
@@ -229,6 +230,7 @@ async def claim(
     """
     candidate = models.Chat(
         id=f"chat_{uuid.uuid4().hex[:12]}",
+        user_id=user_id,
         space_id=space_id,
         title=title,
         trigger=token,
@@ -255,26 +257,40 @@ async def claim(
                     candidate.model_dump_json(),
                 )
                 return candidate, True
-            await conn.execute(
-                "UPDATE hatchery_bindings SET state = state || $2::jsonb WHERE token = $1",
-                token,
-                json.dumps(state),
-            )
             owner = await conn.fetchrow(
                 "SELECT c.data FROM hatchery_chats c "
-                "JOIN hatchery_bindings b ON b.chat_id = c.id WHERE b.token = $1",
+                "JOIN hatchery_bindings b ON b.chat_id = c.id WHERE b.token = $1 FOR UPDATE",
                 token,
             )
-            return _chat(owner["data"]), False
+            chat = _chat(owner["data"])
+            if user_id is not None and chat.user_id is None:
+                owner = await conn.fetchrow(
+                    "UPDATE hatchery_chats SET data = jsonb_set(data, '{user_id}', to_jsonb($2::text)) "
+                    "WHERE id = $1 RETURNING data",
+                    chat.id,
+                    user_id,
+                )
+                chat = _chat(owner["data"])
+            if user_id is None or chat.user_id == user_id:
+                await conn.execute(
+                    "UPDATE hatchery_bindings SET state = state || $2::jsonb WHERE token = $1",
+                    token,
+                    json.dumps(state),
+                )
+            return chat, False
 
     with _lock:
         bindings_ = _read_bindings()
         existing = bindings_.get(token)
         if existing is not None:
-            existing["state"] = {**existing.get("state", {}), **state}
-            _write_bindings(bindings_)
             owner = _read_chat(existing["chat_id"])
             if owner is not None:
+                if user_id is not None and owner.user_id is None:
+                    owner.user_id = user_id
+                    _write_chat(owner)
+                if user_id is None or owner.user_id == user_id:
+                    existing["state"] = {**existing.get("state", {}), **state}
+                    _write_bindings(bindings_)
                 return owner, False
         bindings_[token] = {"chat_id": candidate.id, "channel": channel, "state": dict(state)}
         _write_bindings(bindings_)

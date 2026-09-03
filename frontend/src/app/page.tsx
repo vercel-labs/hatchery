@@ -12,6 +12,7 @@ import {
   LogOutIcon,
   PencilIcon,
   PlusIcon,
+  MessageSquareIcon,
   TerminalIcon,
   TriangleIcon,
   Trash2Icon,
@@ -164,6 +165,14 @@ export default function Home() {
     }
   };
 
+  const disconnectSlack = async () => {
+    if (!window.confirm("Disconnect Slack? New Slack messages will be ignored.")) return;
+    const response = await apiFetch("/api/connections/slack", { method: "DELETE" });
+    if (response.ok) {
+      setUser((current) => current ? { ...current, slack: undefined } : current);
+    }
+  };
+
   const saveVercelCLI = async (event: React.FormEvent) => {
     event.preventDefault();
     setSavingVercel(true);
@@ -202,19 +211,25 @@ export default function Home() {
         setUser(null);
         return;
       }
-      const [s, c, github, vercel, warnings] = await Promise.all([
+      const [s, c, github, slack, vercel, warnings] = await Promise.all([
         apiFetch("/api/spaces"),
         apiFetch("/api/chats"),
         apiFetch("/api/connections/github"),
+        apiFetch("/api/connections/slack"),
         apiFetch("/api/connections/vercel-cli"),
         apiFetch("/api/spaces/warnings"),
       ]);
-      if (!s.ok || !c.ok || !github.ok || !vercel.ok || !warnings.ok) {
+      if (!s.ok || !c.ok || !github.ok || !slack.ok || !vercel.ok || !warnings.ok) {
         throw new Error("backend unreachable");
       }
       const connection: { connection: User["github"] | null } = await github.json();
+      const slackConnection: { connection: User["slack"] | null } = await slack.json();
       const vercelConnection: { connection: VercelCLIConnection | null } = await vercel.json();
-      setUser({ ...me.user, github: connection.connection ?? undefined });
+      setUser({
+        ...me.user,
+        github: connection.connection ?? undefined,
+        slack: slackConnection.connection ?? undefined,
+      });
       setVercelCLI(vercelConnection.connection);
       setSpaces(await s.json());
       setChats(await c.json());
@@ -378,6 +393,21 @@ export default function Home() {
                     Connect GitHub
                   </DropdownMenuItem>
                 )}
+                {user.slack ? (
+                  <DropdownMenuItem disabled>
+                    <MessageSquareIcon />
+                    {user.slack.user
+                      ? `${user.slack.user} in ${user.slack.team ?? user.slack.team_id}`
+                      : `Slack connected in ${user.slack.team ?? user.slack.team_id}`}
+                  </DropdownMenuItem>
+                ) : (
+                  <DropdownMenuItem
+                    render={<a href={`${apiBase()}/api/connections/slack/authorize`} />}
+                  >
+                    <MessageSquareIcon />
+                    Connect Slack
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuItem onClick={() => setVercelSheetOpen(true)}>
                   <TriangleIcon />
                   {vercelCLI ? "Vercel CLI connected" : "Connect Vercel CLI"}
@@ -389,6 +419,12 @@ export default function Home() {
                   <DropdownMenuItem variant="destructive" onClick={disconnectGitHub}>
                     <GitBranchIcon />
                     Disconnect GitHub
+                  </DropdownMenuItem>
+                )}
+                {user.slack && (
+                  <DropdownMenuItem variant="destructive" onClick={disconnectSlack}>
+                    <MessageSquareIcon />
+                    Disconnect Slack
                   </DropdownMenuItem>
                 )}
                 {vercelCLI && (
