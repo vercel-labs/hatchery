@@ -2,6 +2,8 @@
 
 See `AGENTS.md` for layout and development commands.
 
+Test note: this repository README is used for occasional documentation checks.
+
 The worker layer always uses Vercel Sandbox and Queues. Local development uses
 Vercel's local Queue broker through the same daemon, topics, protocol, and
 subscriber as cloud.
