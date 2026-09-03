@@ -22,11 +22,13 @@ import {
   MessageScrollerViewport,
 } from "@/components/ui/message-scroller";
 import { apiBase, apiFetch } from "@/lib/api";
+import { submissionLabel } from "@/components/chat-status";
 import type { ChatUIMessage } from "@/lib/messages";
 
 export function ChatView({
   chatId,
   initialMessages,
+  spaceId,
   messageRevision,
   streamGeneration,
   onMessagesChange,
@@ -34,6 +36,7 @@ export function ChatView({
 }: {
   chatId: string;
   initialMessages: ChatUIMessage[];
+  spaceId: string | null;
   messageRevision: number;
   streamGeneration: number;
   onMessagesChange?: (messages: ChatUIMessage[]) => void;
@@ -142,9 +145,7 @@ export function ChatView({
                 {status === "submitted" && (
                   <MessageScrollerItem messageId="thinking">
                     <div className="flex animate-pulse items-center gap-2 px-3 text-sm text-muted-foreground">
-                      {initialMessages.length === 0
-                        ? "Assigning a space…"
-                        : "Thinking…"}
+                      {submissionLabel(spaceId)}
                     </div>
                   </MessageScrollerItem>
                 )}
