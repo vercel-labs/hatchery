@@ -1200,6 +1200,7 @@ function LiveChat({
           <ChatView
             chatId={chat.id}
             initialMessages={initialMessages}
+            spaceId={chat.space_id}
             messageRevision={messageRevision}
             streamGeneration={streamGeneration}
             onMessagesChange={onMessagesChange}
