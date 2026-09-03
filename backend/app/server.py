@@ -102,51 +102,60 @@ class _StoreHub:
             if user_id is not None and chat.user_id != user_id:
                 span.set_attrs(ignored="owned_by_another_user", **{"chat.id": chat.id})
                 return
-            span.set_attrs(
-                {"chat.id": chat.id, "space.id": chat.space_id or ""},
-                created=created,
-            )
-            if created:
-                if inbound.persist:
+            async with turns.run(chat.id):
+                chat = await chats.get(chat.id) or chat
+                span.set_attrs(
+                    {"chat.id": chat.id, "space.id": chat.space_id or ""},
+                    created=created,
+                )
+                if chat.archived_at is not None:
+                    span.set_attrs(ignored="archived")
+                    await _deliver(
+                        chat.id,
+                        "This chat is archived. Unarchive it in Hatchery before posting.",
+                    )
+                    return
+                if created:
+                    if inbound.persist:
+                        await events.append(
+                            chat.id, "messages", ai.user_message(inbound.text).model_dump(mode="json")
+                        )
+                        await events.append(chat.id, "ui", {"type": "messages.changed"})
+                    await _classify_chat(
+                        chat.id,
+                        inbound.text,
+                        {
+                            "origin": channel,
+                            "author": _inbound_author(inbound),
+                            "repo": inbound.repo,
+                            "channel_state": inbound.state,
+                        },
+                        found,
+                    )
+                    chat = await chats.get(chat.id) or chat
+                    _spawn(_name_chat(chat.id, inbound.text))
+                elif chat.space_id is None:
+                    await _classify_chat(
+                        chat.id,
+                        inbound.text,
+                        {
+                            "origin": channel,
+                            "author": _inbound_author(inbound),
+                            "repo": inbound.repo,
+                            "channel_state": inbound.state,
+                        },
+                        found,
+                    )
+                    chat = await chats.get(chat.id) or chat
+                elif inbound.persist:
                     await events.append(
                         chat.id, "messages", ai.user_message(inbound.text).model_dump(mode="json")
                     )
                     await events.append(chat.id, "ui", {"type": "messages.changed"})
-                await _classify_chat(
-                    chat.id,
-                    inbound.text,
-                    {
-                        "origin": channel,
-                        "author": _inbound_author(inbound),
-                        "repo": inbound.repo,
-                        "channel_state": inbound.state,
-                    },
-                    found,
-                )
-                chat = await chats.get(chat.id) or chat
-                _spawn(_name_chat(chat.id, inbound.text))
-            elif chat.space_id is None:
-                await _classify_chat(
-                    chat.id,
-                    inbound.text,
-                    {
-                        "origin": channel,
-                        "author": _inbound_author(inbound),
-                        "repo": inbound.repo,
-                        "channel_state": inbound.state,
-                    },
-                    found,
-                )
-                chat = await chats.get(chat.id) or chat
-            elif inbound.persist:
-                await events.append(
-                    chat.id, "messages", ai.user_message(inbound.text).model_dump(mode="json")
-                )
-                await events.append(chat.id, "ui", {"type": "messages.changed"})
-            span.set_attrs({"space.id": chat.space_id or ""}, invoke=inbound.invoke)
-            log.info("inbound %s -> %s chat %s", channel, "new" if created else "existing", chat.id)
-            if inbound.invoke:
-                await _run_inbound_turn(chat.id)
+                span.set_attrs({"space.id": chat.space_id or ""}, invoke=inbound.invoke)
+                log.info("inbound %s -> %s chat %s", channel, "new" if created else "existing", chat.id)
+                if inbound.invoke:
+                    await _run_inbound_turn(chat.id)
 
     async def dedupe(self, key: str) -> bool:
         return await chats.dedupe(key)
@@ -519,6 +528,25 @@ async def create_chat(request: CreateChatRequest, http_request: fastapi.Request)
     )
 
 
+class ArchiveChatRequest(pydantic.BaseModel):
+    archived: bool
+
+
+@app.patch("/api/chats/{chat_id}/archive")
+async def archive_chat(chat_id: str, request: ArchiveChatRequest) -> models.Chat:
+    async with turns.run(chat_id):
+        chat = await chats.get(chat_id)
+        if chat is None:
+            raise fastapi.HTTPException(404, "unknown chat")
+        if request.archived and await durable.active_turn(chat_id) is not None:
+            raise fastapi.HTTPException(409, "chat has an active turn")
+        updated = await chats.set_archived(chat_id, request.archived)
+        if updated is None:
+            raise fastapi.HTTPException(404, "unknown chat")
+        await events.append(chat_id, "ui", {"type": "chat.changed"})
+        return updated
+
+
 class AssignChatSpaceRequest(pydantic.BaseModel):
     space_id: str
 
@@ -603,6 +631,13 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
     incoming, _ = ai.ui.ai_sdk.to_messages(request.messages)
     try:
         async with turns.run(request.chat_id):
+            current = await chats.get(request.chat_id)
+            if current is None:
+                raise fastapi.HTTPException(404, "unknown chat")
+            if current.archived_at is not None:
+                raise fastapi.HTTPException(
+                    409, "chat is archived; unarchive it before posting"
+                )
             if await durable.active_turn(request.chat_id) is not None:
                 raise turns.BusyError(
                     f"chat {request.chat_id} already has an active turn"
@@ -630,9 +665,6 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                     ),
                 )
 
-            current = await chats.get(request.chat_id)
-            if current is None:
-                raise fastapi.HTTPException(404, "unknown chat")
             if received and current.topic is None:
                 first = next(
                     (message for message in stored if message.role == "user"), None
@@ -730,13 +762,19 @@ async def suggest_chat_sandbox(chat_id: str) -> sandbox.Launch:
 
 @app.post("/api/chats/{chat_id}/sandboxes")
 async def create_chat_sandbox(chat_id: str, request: sandbox.Launch) -> dict:
-    if await chats.get(chat_id) is None:
-        raise fastapi.HTTPException(404, "unknown chat")
-    try:
-        created = await sandbox.create(chat_id, request)
-    except RuntimeError as error:
-        raise fastapi.HTTPException(409, str(error)) from error
-    return created.model_dump(exclude={"daemon_token"})
+    async with turns.run(chat_id):
+        chat = await chats.get(chat_id)
+        if chat is None:
+            raise fastapi.HTTPException(404, "unknown chat")
+        if chat.archived_at is not None:
+            raise fastapi.HTTPException(
+                409, "chat is archived; unarchive it before creating a sandbox"
+            )
+        try:
+            created = await sandbox.create(chat_id, request)
+        except RuntimeError as error:
+            raise fastapi.HTTPException(409, str(error)) from error
+        return created.model_dump(exclude={"daemon_token"})
 
 
 @app.get("/api/chats/{chat_id}/sandboxes")

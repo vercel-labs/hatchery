@@ -31,7 +31,9 @@ export function ChatView({
   spaceId,
   messageRevision,
   streamGeneration,
+  archived,
   onMessagesChange,
+  onUnarchive,
   onCreateSandbox,
 }: {
   chatId: string;
@@ -39,7 +41,9 @@ export function ChatView({
   spaceId: string | null;
   messageRevision: number;
   streamGeneration: number;
+  archived: boolean;
   onMessagesChange?: (messages: ChatUIMessage[]) => void;
+  onUnarchive: () => void;
   onCreateSandbox: () => void;
 }) {
   const transport = useMemo(
@@ -122,10 +126,12 @@ export function ChatView({
                 Describe the work. The dispatcher can start fx subagents.
               </EmptyDescription>
             </EmptyHeader>
-            <Button variant="outline" onClick={onCreateSandbox}>
-              <PlusIcon />
-              Create sandbox manually
-            </Button>
+            {!archived && (
+              <Button variant="outline" onClick={onCreateSandbox}>
+                <PlusIcon />
+                Create sandbox manually
+              </Button>
+            )}
           </Empty>
         </div>
       ) : (
@@ -163,11 +169,23 @@ export function ChatView({
             <AlertDescription>{error.message}</AlertDescription>
           </Alert>
         )}
-        <PromptForm
-          isBusy={isStreaming}
-          onSubmit={({ text }) => sendMessage({ text })}
-          onStop={() => void stop()}
-        />
+        {archived ? (
+          <Alert>
+            <AlertTitle>This chat is archived</AlertTitle>
+            <AlertDescription className="flex items-center justify-between gap-3">
+              <span>Unarchive it before posting or creating a sandbox.</span>
+              <Button size="sm" variant="outline" onClick={onUnarchive}>
+                Unarchive
+              </Button>
+            </AlertDescription>
+          </Alert>
+        ) : (
+          <PromptForm
+            isBusy={isStreaming}
+            onSubmit={({ text }) => sendMessage({ text })}
+            onStop={() => void stop()}
+          />
+        )}
       </div>
     </div>
   );

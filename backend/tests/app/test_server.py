@@ -356,6 +356,48 @@ async def test_chat_create_and_list():
     assert [x["id"] for x in listed] == [created["id"]]
 
 
+async def test_chat_archive_and_unarchive():
+    chat = await chats.create(None, "work", user_id="user_test")
+
+    async with client() as c:
+        archived = await c.patch(
+            f"/api/chats/{chat.id}/archive",
+            json={"archived": True},
+            headers={"origin": "http://test"},
+        )
+        listed = (await c.get("/api/chats")).json()
+        unarchived = await c.patch(
+            f"/api/chats/{chat.id}/archive",
+            json={"archived": False},
+            headers={"origin": "http://test"},
+        )
+
+    assert archived.status_code == 200
+    assert archived.json()["archived_at"] is not None
+    assert listed[0]["archived_at"] == archived.json()["archived_at"]
+    assert unarchived.status_code == 200
+    assert unarchived.json()["archived_at"] is None
+
+
+async def test_chat_archive_rejects_active_turn(monkeypatch):
+    chat = await chats.create(None, "running", user_id="user_test")
+
+    async def active_turn(_chat_id):
+        return object()
+
+    monkeypatch.setattr(server.durable, "active_turn", active_turn)
+    async with client() as c:
+        response = await c.patch(
+            f"/api/chats/{chat.id}/archive",
+            json={"archived": True},
+            headers={"origin": "http://test"},
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "chat has an active turn"}
+    assert (await chats.get(chat.id)).archived_at is None
+
+
 async def test_chat_space_assignment():
     destination = await server.spaces.create("docs")
     chat = await chats.create(None, "work")
@@ -485,6 +527,102 @@ def test_dedupe_tool_history_repairs_old_ui_duplicates():
     assert len(repaired) == 2
     assert repaired[0].tool_calls[0].tool_call_id == "call_1"
     assert repaired[1].tool_results[0].tool_call_id == "call_1"
+
+
+async def test_archived_chat_rejects_ui_post_before_persisting(monkeypatch):
+    chat = await chats.create(None, "archived", user_id="user_test")
+    await chats.set_archived(chat.id, True)
+    started = []
+
+    async def start_turn(*args):
+        started.append(args)
+
+    monkeypatch.setattr(server.durable, "start_turn", start_turn)
+    message = ai.user_message("should not be stored")
+    ui_message = ai.ui.ai_sdk.to_ui_messages([message])[0]
+    async with client() as c:
+        response = await c.post(
+            "/api/chat",
+            json={"chat_id": chat.id, "messages": [ui_message.model_dump(mode="json")]},
+            headers={"origin": "http://test"},
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "chat is archived; unarchive it before posting"
+    }
+    assert await events.read(chat.id, "messages") == []
+    assert started == []
+
+
+async def test_archived_chat_rejects_inbound_with_explanation(monkeypatch):
+    async def classify(prompt, metadata, candidates):
+        return candidates[0]
+
+    delivered = []
+    started = []
+
+    async def deliver(chat_id, message, *, final=True):
+        delivered.append((chat_id, message, final))
+        return []
+
+    async def start_turn(*args):
+        started.append(args)
+
+    monkeypatch.setattr(server.classifier, "classify", classify)
+    monkeypatch.setattr(server, "_deliver", deliver)
+    monkeypatch.setattr(server.durable, "start_turn", start_turn)
+    inbound = channels.Inbound(
+        token="C1:1.0",
+        text="first",
+        state={"team_id": "T1", "user_id": "U1"},
+    )
+    await server.bot.hub.dispatch("slack", inbound)
+    [chat] = await chats.list_all()
+    await chats.set_archived(chat.id, True)
+    before = await events.read(chat.id, "messages")
+
+    await server.bot.hub.dispatch(
+        "slack",
+        channels.Inbound(
+            token="C1:1.0",
+            text="blocked",
+            state={"team_id": "T1", "user_id": "U1"},
+        ),
+    )
+
+    assert await events.read(chat.id, "messages") == before
+    assert len(started) == 1
+    assert delivered == [
+        (
+            chat.id,
+            "This chat is archived. Unarchive it in Hatchery before posting.",
+            True,
+        )
+    ]
+
+
+async def test_archived_chat_rejects_manual_sandbox(monkeypatch):
+    chat = await chats.create(None, "archived", user_id="user_test")
+    await chats.set_archived(chat.id, True)
+    created = []
+
+    async def create(*args):
+        created.append(args)
+
+    monkeypatch.setattr(server.sandbox, "create", create)
+    async with client() as c:
+        response = await c.post(
+            f"/api/chats/{chat.id}/sandboxes",
+            json={},
+            headers={"origin": "http://test"},
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "chat is archived; unarchive it before creating a sandbox"
+    }
+    assert created == []
 
 
 async def test_hub_lands_inbound_in_one_chat(monkeypatch):

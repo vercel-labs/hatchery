@@ -86,5 +86,6 @@ export type Chat = {
   status: "queued" | "running" | "done" | "failed";
   sandbox_id: string | null;
   artifact: string | null;
+  archived_at: string | null;
   created_at: string;
 };

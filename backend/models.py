@@ -38,4 +38,5 @@ class Chat(pydantic.BaseModel):
     status: str = "queued"  # queued | running | done | failed
     sandbox_id: str | None = None
     artifact: str | None = None  # report text or issue/pr url
+    archived_at: str | None = None
     created_at: str

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
+  ArchiveIcon,
   BookMarkedIcon,
   CheckIcon,
   ChevronsUpDownIcon,
@@ -91,6 +92,7 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   Sidebar,
   SidebarContent,
+  SidebarFooter,
   SidebarGroup,
   SidebarGroupAction,
   SidebarGroupContent,
@@ -140,6 +142,53 @@ function ChatOriginIcon({ trigger }: { trigger: string }) {
   );
 }
 
+function ChatSidebarItem({
+  chat,
+  selected,
+  onArchiveChange,
+}: {
+  chat: Chat;
+  selected: boolean;
+  onArchiveChange: (chat: Chat, archived: boolean) => void;
+}) {
+  const archived = chat.archived_at !== null;
+  const name = chat.topic ?? (chat.title === "new chat" ? "…" : chat.title);
+  return (
+    <SidebarMenuItem>
+      <SidebarMenuButton
+        className="relative pl-3"
+        isActive={selected}
+        aria-current={selected ? "page" : undefined}
+        render={<Link href={`/chats/${encodeURIComponent(chat.id)}`} />}
+        tooltip={chat.topic ?? chat.title}
+      >
+        <span
+          className="absolute inset-y-1 left-0 w-0.5 rounded-full"
+          style={{ backgroundColor: spaceStripeColor(chat.space_id) }}
+        />
+        <span
+          className={
+            chat.status === "running"
+              ? "size-2 shrink-0 rounded-full bg-blue-500"
+              : "size-2 shrink-0 rounded-full bg-zinc-400"
+          }
+          title={chat.status === "running" ? "Running" : "Idle"}
+        />
+        <ChatOriginIcon trigger={chat.trigger} />
+        <span className="truncate">{name}</span>
+      </SidebarMenuButton>
+      <SidebarMenuAction
+        showOnHover
+        aria-label={`${archived ? "Unarchive" : "Archive"} ${name}`}
+        title={archived ? "Unarchive chat" : "Archive chat"}
+        onClick={() => onArchiveChange(chat, !archived)}
+      >
+        <ArchiveIcon />
+      </SidebarMenuAction>
+    </SidebarMenuItem>
+  );
+}
+
 export function AppShell() {
   const pathname = usePathname();
   const router = useRouter();
@@ -162,6 +211,7 @@ export function AppShell() {
   const [vercelSheetOpen, setVercelSheetOpen] = useState(false);
   const [vercelError, setVercelError] = useState("");
   const [savingVercel, setSavingVercel] = useState(false);
+  const [archiveOpen, setArchiveOpen] = useState(false);
   // set by space clicks only; chat clicks leave the order alone
   const [sortSpaceId, setSortSpaceId] = useState<string | null>(null);
 
@@ -265,14 +315,18 @@ export function AppShell() {
   );
 
   const activeSortSpaceId = selectedSpace?.id ?? sortSpaceId;
+  const activeChats = chats?.filter((chat) => chat.archived_at === null) ?? null;
   const sortedChats =
-    chats && activeSortSpaceId
-      ? [...chats].sort(
+    activeChats && activeSortSpaceId
+      ? [...activeChats].sort(
           (a, b) =>
             Number(b.space_id === activeSortSpaceId) -
             Number(a.space_id === activeSortSpaceId),
         )
-      : chats;
+      : activeChats;
+  const archivedChats = chats
+    ?.filter((chat) => chat.archived_at !== null)
+    .sort((a, b) => (b.archived_at ?? "").localeCompare(a.archived_at ?? "")) ?? [];
 
   const createSpace = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -325,6 +379,23 @@ export function AppShell() {
     const chat: Chat = await res.json();
     setChats((prev) => [chat, ...(prev ?? [])]);
     router.push(`/chats/${encodeURIComponent(chat.id)}`);
+  };
+
+  const setChatArchived = async (chat: Chat, archived: boolean) => {
+    const res = await apiFetch(`/api/chats/${chat.id}/archive`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ archived }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      window.alert(body.detail ?? `Could not ${archived ? "archive" : "unarchive"} chat.`);
+      return;
+    }
+    const updated: Chat = await res.json();
+    setChats((current) =>
+      current?.map((item) => (item.id === updated.id ? updated : item)) ?? null,
+    );
   };
 
   const assignChatSpace = async (chat: Chat, spaceId: string) => {
@@ -460,126 +531,159 @@ export function AppShell() {
         <SidebarSeparator />
 
         <SidebarContent>
-          <SidebarGroup>
-            <SidebarGroupLabel>Spaces</SidebarGroupLabel>
-            <SidebarGroupAction
-              title="New space"
-              aria-label="New space"
-              onClick={() => setAddingSpace(true)}
-            >
-              <PlusIcon />
-            </SidebarGroupAction>
-            <SidebarGroupContent>
-              {addingSpace && (
-                <form className="flex gap-1 px-2 pb-1" onSubmit={createSpace}>
-                  <Input
-                    autoFocus
-                    value={spaceName}
-                    onChange={(event) => setSpaceName(event.target.value)}
-                    placeholder="Space name"
-                    aria-label="Space name"
-                    className="h-7"
-                  />
-                  <Button type="submit" size="icon-xs" disabled={!spaceName.trim()}>
-                    <CheckIcon />
-                    <span className="sr-only">Add space</span>
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon-xs"
-                    onClick={() => {
-                      setAddingSpace(false);
-                      setSpaceName("");
-                    }}
-                  >
-                    <XIcon />
-                    <span className="sr-only">Cancel</span>
-                  </Button>
-                </form>
-              )}
-              <SidebarMenu>
-                {spaces === null
-                  ? Array.from({ length: failed ? 0 : 2 }).map((_, i) => (
-                      <SidebarMenuItem key={i}>
-                        <SidebarMenuSkeleton />
-                      </SidebarMenuItem>
+          {archiveOpen ? (
+            <SidebarGroup aria-label="Archived chats">
+              <SidebarGroupLabel>Archive</SidebarGroupLabel>
+              <SidebarGroupAction
+                title="Close archive"
+                aria-label="Close archive"
+                onClick={() => setArchiveOpen(false)}
+              >
+                <XIcon />
+              </SidebarGroupAction>
+              <SidebarGroupContent>
+                <SidebarMenu>
+                  {archivedChats.length > 0 ? (
+                    archivedChats.map((chat) => (
+                      <ChatSidebarItem
+                        key={chat.id}
+                        chat={chat}
+                        selected={selectedChat?.id === chat.id}
+                        onArchiveChange={(item, archived) =>
+                          void setChatArchived(item, archived)
+                        }
+                      />
                     ))
-                  : spaces.map((space) => (
-                      <SidebarMenuItem key={space.id}>
-                        <SidebarMenuButton
-                          isActive={selectedSpace?.id === space.id}
-                          onClick={() => setSortSpaceId(space.id)}
-                          render={
-                            <Link href={`/spaces/${encodeURIComponent(space.id)}`} />
-                          }
-                          tooltip={space.name}
-                        >
-                          <Dot color={space.color} />
-                          <span className="truncate">{space.name}</span>
-                        </SidebarMenuButton>
-                        <SidebarMenuAction
-                          showOnHover
-                          aria-label={`Remove ${space.name}`}
-                          title={`Remove ${space.name}`}
-                          onClick={() => deleteSpace(space)}
-                        >
-                          <Trash2Icon />
-                        </SidebarMenuAction>
-                      </SidebarMenuItem>
-                    ))}
-              </SidebarMenu>
-            </SidebarGroupContent>
-          </SidebarGroup>
+                  ) : (
+                    <li className="px-2 py-4 text-sm text-muted-foreground">
+                      No archived chats
+                    </li>
+                  )}
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </SidebarGroup>
+          ) : (
+            <>
+              <SidebarGroup>
+                <SidebarGroupLabel>Spaces</SidebarGroupLabel>
+                <SidebarGroupAction
+                  title="New space"
+                  aria-label="New space"
+                  onClick={() => setAddingSpace(true)}
+                >
+                  <PlusIcon />
+                </SidebarGroupAction>
+                <SidebarGroupContent>
+                  {addingSpace && (
+                    <form className="flex gap-1 px-2 pb-1" onSubmit={createSpace}>
+                      <Input
+                        autoFocus
+                        value={spaceName}
+                        onChange={(event) => setSpaceName(event.target.value)}
+                        placeholder="Space name"
+                        aria-label="Space name"
+                        className="h-7"
+                      />
+                      <Button type="submit" size="icon-xs" disabled={!spaceName.trim()}>
+                        <CheckIcon />
+                        <span className="sr-only">Add space</span>
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-xs"
+                        onClick={() => {
+                          setAddingSpace(false);
+                          setSpaceName("");
+                        }}
+                      >
+                        <XIcon />
+                        <span className="sr-only">Cancel</span>
+                      </Button>
+                    </form>
+                  )}
+                  <SidebarMenu>
+                    {spaces === null
+                      ? Array.from({ length: failed ? 0 : 2 }).map((_, i) => (
+                          <SidebarMenuItem key={i}>
+                            <SidebarMenuSkeleton />
+                          </SidebarMenuItem>
+                        ))
+                      : spaces.map((space) => (
+                          <SidebarMenuItem key={space.id}>
+                            <SidebarMenuButton
+                              isActive={selectedSpace?.id === space.id}
+                              onClick={() => setSortSpaceId(space.id)}
+                              render={
+                                <Link href={`/spaces/${encodeURIComponent(space.id)}`} />
+                              }
+                              tooltip={space.name}
+                            >
+                              <Dot color={space.color} />
+                              <span className="truncate">{space.name}</span>
+                            </SidebarMenuButton>
+                            <SidebarMenuAction
+                              showOnHover
+                              aria-label={`Remove ${space.name}`}
+                              title={`Remove ${space.name}`}
+                              onClick={() => deleteSpace(space)}
+                            >
+                              <Trash2Icon />
+                            </SidebarMenuAction>
+                          </SidebarMenuItem>
+                        ))}
+                  </SidebarMenu>
+                </SidebarGroupContent>
+              </SidebarGroup>
 
-          <SidebarGroup>
-            <SidebarGroupLabel>Chats</SidebarGroupLabel>
-            <SidebarGroupAction title="New chat" onClick={createChat}>
-              <PlusIcon />
-            </SidebarGroupAction>
-            <SidebarGroupContent>
-              <SidebarMenu>
-                {sortedChats === null
-                  ? Array.from({ length: failed ? 0 : 4 }).map((_, i) => (
-                      <SidebarMenuItem key={i}>
-                        <SidebarMenuSkeleton />
-                      </SidebarMenuItem>
-                    ))
-                  : sortedChats.map((chat) => (
-                      <SidebarMenuItem key={chat.id}>
-                        <SidebarMenuButton
-                          className="relative pl-3"
-                          isActive={selectedChat?.id === chat.id}
-                          render={
-                            <Link href={`/chats/${encodeURIComponent(chat.id)}`} />
-                          }
-                          tooltip={chat.topic ?? chat.title}
-                        >
-                          <span
-                            className="absolute inset-y-1 left-0 w-0.5 rounded-full"
-                            style={{
-                              backgroundColor: spaceStripeColor(chat.space_id),
-                            }}
+              <SidebarGroup>
+                <SidebarGroupLabel>Chats</SidebarGroupLabel>
+                <SidebarGroupAction title="New chat" onClick={createChat}>
+                  <PlusIcon />
+                </SidebarGroupAction>
+                <SidebarGroupContent>
+                  <SidebarMenu>
+                    {sortedChats === null
+                      ? Array.from({ length: failed ? 0 : 4 }).map((_, i) => (
+                          <SidebarMenuItem key={i}>
+                            <SidebarMenuSkeleton />
+                          </SidebarMenuItem>
+                        ))
+                      : sortedChats.map((chat) => (
+                          <ChatSidebarItem
+                            key={chat.id}
+                            chat={chat}
+                            selected={selectedChat?.id === chat.id}
+                            onArchiveChange={(item, archived) =>
+                              void setChatArchived(item, archived)
+                            }
                           />
-                          <span
-                            className={`size-2 shrink-0 rounded-full ${
-                              chat.status === "running"
-                                ? "bg-blue-500"
-                                : "bg-zinc-400"
-                            }`}
-                            title={chat.status === "running" ? "Running" : "Idle"}
-                          />
-                          <ChatOriginIcon trigger={chat.trigger} />
-                          <span className="truncate">
-                            {chat.topic ?? (chat.title === "new chat" ? "…" : chat.title)}
-                          </span>
-                        </SidebarMenuButton>
-                      </SidebarMenuItem>
-                    ))}
-              </SidebarMenu>
-            </SidebarGroupContent>
-          </SidebarGroup>
+                        ))}
+                  </SidebarMenu>
+                </SidebarGroupContent>
+              </SidebarGroup>
+            </>
+          )}
         </SidebarContent>
+        {!archiveOpen && (
+          <SidebarFooter className="border-t border-sidebar-border">
+            <SidebarMenu>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  aria-label={`Open archive, ${archivedChats.length} chats`}
+                  onClick={() => setArchiveOpen(true)}
+                  tooltip="Archive"
+                >
+                  <ArchiveIcon />
+                  <span>Archive</span>
+                  {archivedChats.length > 0 && (
+                    <span className="ml-auto tabular-nums">{archivedChats.length}</span>
+                  )}
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            </SidebarMenu>
+          </SidebarFooter>
+        )}
       </Sidebar>
 
       <Sheet open={vercelSheetOpen} onOpenChange={setVercelSheetOpen}>
@@ -669,6 +773,7 @@ export function AppShell() {
             chat={selectedChat}
             warning={selectedWarning?.warning}
             onChatChanged={refreshChats}
+            onUnarchive={() => void setChatArchived(selectedChat, false)}
             onSpaceAssigned={(spaceId) =>
               setChats((current) => {
                 if (
@@ -1100,11 +1205,13 @@ function LiveChat({
   chat,
   warning,
   onChatChanged,
+  onUnarchive,
   onSpaceAssigned,
 }: {
   chat: Chat;
   warning?: string;
   onChatChanged: () => void;
+  onUnarchive: () => void;
   onSpaceAssigned: (spaceId: string) => void;
 }) {
   const [initialMessages, setInitialMessages] = useState<
@@ -1203,7 +1310,9 @@ function LiveChat({
             spaceId={chat.space_id}
             messageRevision={messageRevision}
             streamGeneration={streamGeneration}
+            archived={chat.archived_at !== null}
             onMessagesChange={onMessagesChange}
+            onUnarchive={onUnarchive}
             onCreateSandbox={() => setShowSandboxForm(true)}
           />
         </div>

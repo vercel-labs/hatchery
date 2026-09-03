@@ -1,5 +1,7 @@
 import asyncio
+import json
 
+import store
 from store import chats, spaces
 
 
@@ -153,6 +155,35 @@ async def test_create_get_list():
     loaded = await chats.get(chat.id)
     assert loaded is not None and loaded.title == "manual chat"
     assert await chats.get("chat_missing") is None
+
+
+async def test_legacy_chat_without_archive_field_loads_as_active():
+    chat = await chats.create(None, "legacy")
+    path = store.data_dir() / "chats" / f"{chat.id}.json"
+    data = json.loads(path.read_text())
+    data.pop("archived_at")
+    path.write_text(json.dumps(data))
+
+    loaded = await chats.get(chat.id)
+
+    assert loaded is not None and loaded.archived_at is None
+
+
+async def test_archive_and_unarchive_are_persisted_and_idempotent():
+    chat = await chats.create(None, "work")
+
+    archived = await chats.set_archived(chat.id, True)
+    archived_again = await chats.set_archived(chat.id, True)
+
+    assert archived is not None and archived.archived_at is not None
+    assert archived_again is not None
+    assert archived_again.archived_at == archived.archived_at
+    assert (await chats.get(chat.id)).archived_at == archived.archived_at
+
+    unarchived = await chats.set_archived(chat.id, False)
+    assert unarchived is not None and unarchived.archived_at is None
+    assert (await chats.get(chat.id)).archived_at is None
+    assert await chats.set_archived("chat_missing", True) is None
 
 
 async def test_claim_user_sets_legacy_owner_once():
