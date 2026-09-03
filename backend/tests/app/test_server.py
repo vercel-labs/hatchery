@@ -25,7 +25,11 @@ def generated_topic(monkeypatch):
     async def generate(prompt):
         return "Test request"
 
+    async def slack_user(_team_id, _slack_user_id):
+        return "user_test"
+
     monkeypatch.setattr(server.topic, "generate", generate)
+    monkeypatch.setattr(server.connections.auth_store, "slack_user", slack_user)
 
 
 async def test_browser_api_requires_session(monkeypatch):
@@ -66,6 +70,18 @@ async def test_legacy_chat_is_claimed_on_direct_access():
 
     assert response.status_code == 200
     assert (await chats.get(chat.id)).user_id == "user_test"
+
+
+async def test_browser_does_not_claim_unowned_channel_chat():
+    chat, _ = await chats.claim("slack:C1:1.0", "slack", None, "legacy slack", {})
+
+    async with client() as c:
+        listed = await c.get("/api/chats")
+        direct = await c.get(f"/api/chats/{chat.id}/messages")
+
+    assert listed.json() == []
+    assert direct.status_code == 404
+    assert (await chats.get(chat.id)).user_id is None
 
 
 async def test_chat_routes_hide_another_users_chat(monkeypatch):
@@ -109,6 +125,54 @@ async def test_github_connection_routes(monkeypatch):
         )
 
     assert status.json() == {"connection": {"login": "octocat", "id": "42"}}
+    assert authorized.headers["location"] == "https://connect.example"
+    assert disconnected.status_code == 204
+    assert seen == {"authorized": "user_test", "disconnected": "user_test"}
+
+
+async def test_slack_connection_routes(monkeypatch):
+    seen = {}
+
+    async def begin(request, user):
+        seen["authorized"] = user["id"]
+        return server.fastapi.responses.RedirectResponse("https://connect.example")
+
+    async def disconnect(user):
+        seen["disconnected"] = user["id"]
+
+    async def token(user_id):
+        assert user_id == "user_test"
+        return "token"
+
+    monkeypatch.setattr(server.connections, "begin_slack", begin)
+    monkeypatch.setattr(server.connections, "disconnect_slack", disconnect)
+    monkeypatch.setattr(server.connections, "slack_token", token)
+    monkeypatch.setattr(
+        server.connections,
+        "slack_connection",
+        lambda user: {
+            "team_id": "T1",
+            "team": "Acme",
+            "user_id": "U1",
+            "user": "ada",
+        },
+    )
+
+    async with client() as c:
+        status = await c.get("/api/connections/slack")
+        authorized = await c.get("/api/connections/slack/authorize", follow_redirects=False)
+        disconnected = await c.delete(
+            "/api/connections/slack", headers={"origin": "http://test"}
+        )
+
+    assert status.json() == {
+        "connection": {
+            "team_id": "T1",
+            "team": "Acme",
+            "user_id": "U1",
+            "user": "ada",
+        }
+    }
     assert authorized.headers["location"] == "https://connect.example"
     assert disconnected.status_code == 204
     assert seen == {"authorized": "user_test", "disconnected": "user_test"}
@@ -353,6 +417,7 @@ async def test_chat_list_cleans_legacy_slack_title():
         space.id,
         "<@UBOT> old &lt;-&gt; title",
         {},
+        user_id="user_test",
     )
 
     async with client() as c:
@@ -447,11 +512,23 @@ async def test_hub_lands_inbound_in_one_chat(monkeypatch):
     hub = server.bot.hub
     await hub.dispatch(
         "slack",
-        channels.Inbound(token="C1:1.0", text="from slack", state={"channel_id": "C1"}, title="a thread"),
+        channels.Inbound(
+            token="C1:1.0",
+            text="from slack",
+            state={"channel_id": "C1", "team_id": "T1", "user_id": "U1"},
+            title="a thread",
+        ),
     )
-    await hub.dispatch("slack", channels.Inbound(token="C1:1.0", text="again", state={}))
+    await hub.dispatch(
+        "slack",
+        channels.Inbound(
+            token="C1:1.0",
+            text="again",
+            state={"team_id": "T1", "user_id": "U1"},
+        ),
+    )
     [chat] = await chats.list_all()
-    assert chat.trigger == "slack:C1:1.0"
+    assert chat.trigger == "slack:T1:C1:1.0"
     assert chat.title == "a thread"
     stored = await events.read(chat.id, "messages")
     assert len(stored) == 2
@@ -463,6 +540,133 @@ async def test_hub_lands_inbound_in_one_chat(monkeypatch):
         (chat.id, channels.protocol.TURN_STARTED),
         (chat.id, "reply"),
     ]
+
+
+async def test_slack_threads_are_scoped_by_workspace(monkeypatch):
+    async def classify(prompt, metadata, candidates):
+        return candidates[0]
+
+    async def slack_user(team_id, _slack_user_id):
+        return f"user_{team_id}"
+
+    runs = []
+
+    async def run(chat_id):
+        runs.append(chat_id)
+
+    monkeypatch.setattr(server.connections.auth_store, "slack_user", slack_user)
+    monkeypatch.setattr(server.classifier, "classify", classify)
+    monkeypatch.setattr(server, "_run_inbound_turn", run)
+    for team_id in ("T1", "T2"):
+        await server.bot.hub.dispatch(
+            "slack",
+            channels.Inbound(
+                token="C1:1.0",
+                text=f"from {team_id}",
+                state={"team_id": team_id, "user_id": "U1"},
+            ),
+        )
+
+    found = await chats.list_all()
+    assert {chat.trigger for chat in found} == {
+        "slack:T1:C1:1.0",
+        "slack:T2:C1:1.0",
+    }
+    assert {chat.user_id for chat in found} == {"user_T1", "user_T2"}
+    assert len(runs) == 2
+
+
+async def test_slack_legacy_binding_rejects_different_participant(monkeypatch):
+    legacy, _ = await chats.claim(
+        "slack:C1:1.0",
+        "slack",
+        None,
+        "legacy",
+        {"team_id": "T1", "user_id": "U1"},
+    )
+
+    async def slack_user(_team_id, _slack_user_id):
+        return "user_2"
+
+    runs = []
+
+    async def run(chat_id):
+        runs.append(chat_id)
+
+    monkeypatch.setattr(server.connections.auth_store, "slack_user", slack_user)
+    monkeypatch.setattr(server, "_run_inbound_turn", run)
+    await server.bot.hub.dispatch(
+        "slack",
+        channels.Inbound(
+            token="C1:1.0",
+            text="takeover",
+            state={"team_id": "T1", "user_id": "U2"},
+        ),
+    )
+
+    assert (await chats.get(legacy.id)).user_id is None
+    assert await events.read(legacy.id, "messages") == []
+    assert runs == []
+    [binding] = await chats.bindings(legacy.id)
+    assert binding.token == "slack:C1:1.0"
+
+
+async def test_slack_hub_ignores_unconnected_sender(monkeypatch):
+    async def slack_user(team_id, slack_user_id):
+        assert (team_id, slack_user_id) == ("T1", "U1")
+        return None
+
+    monkeypatch.setattr(server.connections.auth_store, "slack_user", slack_user)
+
+    await server.bot.hub.dispatch(
+        "slack",
+        channels.Inbound(
+            token="C1:1.0",
+            text="unconnected",
+            state={"team_id": "T1", "user_id": "U1"},
+        ),
+    )
+
+    assert await chats.list_all() == []
+
+
+async def test_slack_hub_rejects_takeover_without_appending_or_invoking(monkeypatch):
+    async def classify(prompt, metadata, candidates):
+        return candidates[0]
+
+    owners = iter(["user_1", "user_2"])
+
+    async def slack_user(_team_id, _slack_user_id):
+        return next(owners)
+
+    runs = []
+
+    async def run(chat_id):
+        runs.append(chat_id)
+
+    monkeypatch.setattr(server.connections.auth_store, "slack_user", slack_user)
+    monkeypatch.setattr(server.classifier, "classify", classify)
+    monkeypatch.setattr(server, "_run_inbound_turn", run)
+    first = channels.Inbound(
+        token="C1:1.0",
+        text="first",
+        state={"team_id": "T1", "user_id": "U1"},
+    )
+    second = channels.Inbound(
+        token="C1:1.0",
+        text="takeover",
+        state={"team_id": "T1", "user_id": "U2"},
+    )
+
+    await server.bot.hub.dispatch("slack", first)
+    [chat] = await chats.list_all()
+    await server.bot.hub.dispatch("slack", second)
+
+    assert chat.user_id == "user_1"
+    assert len(await events.read(chat.id, "messages")) == 1
+    assert runs == [chat.id]
+    [binding] = await chats.bindings(chat.id)
+    assert binding.state["user_id"] == "U1"
 
 
 async def test_hub_can_store_without_invoking_then_wake_without_persisting(monkeypatch):
@@ -479,12 +683,22 @@ async def test_hub_can_store_without_invoking_then_wake_without_persisting(monke
     hub = server.bot.hub
     await hub.dispatch(
         "slack",
-        channels.Inbound(token="C1:1.0", text="context", state={}, invoke=False),
+        channels.Inbound(
+            token="C1:1.0",
+            text="context",
+            state={"team_id": "T1", "user_id": "U1"},
+            invoke=False,
+        ),
     )
     [chat] = await chats.list_all()
     await hub.dispatch(
         "slack",
-        channels.Inbound(token="C1:1.0", text="context", state={}, persist=False),
+        channels.Inbound(
+            token="C1:1.0",
+            text="context",
+            state={"team_id": "T1", "user_id": "U1"},
+            persist=False,
+        ),
     )
 
     stored = await events.read(chat.id, "messages")

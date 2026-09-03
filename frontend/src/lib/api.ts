@@ -29,6 +29,14 @@ export type GitHubConnection = {
   connected_at: string;
 };
 
+export type SlackConnection = {
+  team_id: string;
+  team: string | null;
+  user_id: string;
+  user: string | null;
+  connected_at: string;
+};
+
 export type VercelCLIConnection = {
   user_id: string;
   username: string | null;
@@ -43,6 +51,7 @@ export type User = {
   username: string | null;
   picture: string | null;
   github?: GitHubConnection;
+  slack?: SlackConnection;
 };
 
 export type Resource = {
