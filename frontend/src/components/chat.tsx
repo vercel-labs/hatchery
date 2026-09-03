@@ -21,7 +21,7 @@ import {
   MessageScrollerProvider,
   MessageScrollerViewport,
 } from "@/components/ui/message-scroller";
-import { apiBase } from "@/lib/api";
+import { apiBase, apiFetch } from "@/lib/api";
 import type { ChatUIMessage } from "@/lib/messages";
 
 export function ChatView({
@@ -41,6 +41,7 @@ export function ChatView({
     () =>
       new DefaultChatTransport<ChatUIMessage>({
         api: `${apiBase()}/api/chat`,
+        credentials: "include",
         prepareSendMessagesRequest: ({ id, messages }) => {
           return { body: { chat_id: id, messages } };
         },
@@ -67,7 +68,7 @@ export function ChatView({
     ) {
       return;
     }
-    fetch(`${apiBase()}/api/chats/${chatId}/messages`)
+    apiFetch(`/api/chats/${chatId}/messages`)
       .then((response) => (response.ok ? response.json() : null))
       .then((stored: ChatUIMessage[] | null) => {
         if (stored) setMessages(stored);

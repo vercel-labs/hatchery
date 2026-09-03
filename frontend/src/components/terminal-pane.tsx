@@ -6,7 +6,7 @@ import { CheckIcon, CopyIcon, PlusIcon, XIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
-import { apiBase, wsBase } from "@/lib/api";
+import { apiFetch, wsBase } from "@/lib/api";
 
 export type SubagentTask = {
   id: string;
@@ -137,8 +137,8 @@ function TaskTerminal({ chatId, tab }: { chatId: string; tab: TerminalTab }) {
           setDetail(waitingDetail);
           retry = setTimeout(async () => {
             try {
-              const response = await fetch(
-                `${apiBase()}/api/chats/${chatId}/subagents/${tab.id}/readiness`,
+              const response = await apiFetch(
+                `/api/chats/${chatId}/subagents/${tab.id}/readiness`,
               );
               if (response.ok) {
                 const readiness = await response.json();
@@ -297,8 +297,8 @@ export function TerminalPane({
     if (!activeSandbox) return;
     setCreating(true);
     try {
-      const response = await fetch(
-        `${apiBase()}/api/chats/${chatId}/sandboxes/${activeSandbox.id}/terminals`,
+      const response = await apiFetch(
+        `/api/chats/${chatId}/sandboxes/${activeSandbox.id}/terminals`,
         { method: "POST" },
       );
       if (!response.ok) return;
@@ -316,8 +316,8 @@ export function TerminalPane({
     setDeletingId(tab.id);
     try {
       const collection = tab.kind === "subagent" ? "subagents" : "terminals";
-      const response = await fetch(
-        `${apiBase()}/api/chats/${chatId}/${collection}/${tab.id}`,
+      const response = await apiFetch(
+        `/api/chats/${chatId}/${collection}/${tab.id}`,
         { method: "DELETE" },
       );
       if (!response.ok) return;
@@ -333,8 +333,8 @@ export function TerminalPane({
     if (!window.confirm(`Delete ${box.title || "this sandbox"} and stop everything in it?`)) return;
     setDeletingId(box.id);
     try {
-      const response = await fetch(
-        `${apiBase()}/api/chats/${chatId}/sandboxes/${box.id}`,
+      const response = await apiFetch(
+        `/api/chats/${chatId}/sandboxes/${box.id}`,
         { method: "DELETE" },
       );
       if (!response.ok) return;

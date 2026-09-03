@@ -39,12 +39,15 @@ async def _send_command(
             span.set_attrs({"queue.message_id": message_id or ""})
 
 
-async def create(chat_id: str, spec: models.WorkerSpec) -> models.Worker:
+async def create(
+    chat_id: str, spec: models.WorkerSpec, *, user_id: str | None = None
+) -> models.Worker:
     now = _now()
     worker_id = f"wrk_{uuid.uuid4().hex[:12]}"
     record = models.Worker(
         id=worker_id,
         chat_id=chat_id,
+        user_id=user_id,
         sandbox_name=f"hatchery-{worker_id}",
         command_topic=protocol.command_topic(worker_id),
         title=spec.title,
@@ -62,7 +65,12 @@ async def create(chat_id: str, spec: models.WorkerSpec) -> models.Worker:
                 repo_count=len(spec.repos),
                 port_count=len(spec.ports),
             )
-            provisioned = await sandbox.provision(record.id, spec, record.daemon_token)
+            if record.user_id is None:
+                provisioned = await sandbox.provision(record.id, spec, record.daemon_token)
+            else:
+                provisioned = await sandbox.provision(
+                    record.id, spec, record.daemon_token, user_id=record.user_id
+                )
             span.set_attrs(sandbox_name=provisioned.sandbox_name)
     except Exception:
         record.status = "failed"

@@ -75,13 +75,34 @@ async def test_provision_creates_persistent_sandbox_and_checks_daemon(monkeypatc
     async def oidc_token():
         return "oidc-token"
 
+    async def github_credential(user_id, *, required=True):
+        calls["github_user"] = (user_id, required)
+        return "user-token"
+
+    async def git_identity(user_id):
+        assert user_id == "user_1"
+        return "The Octocat", "42+octocat@users.noreply.github.com"
+
+    async def vercel_credential(_user_id):
+        return None
+
     monkeypatch.setattr(sandbox.vercel_sandbox, "get_or_create_sandbox", get_or_create_sandbox)
     monkeypatch.setattr(sandbox.vercel_oidc, "get_vercel_oidc_token", oidc_token)
     monkeypatch.setattr(sandbox.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(sandbox, "_github_credential", github_credential)
+    monkeypatch.setattr(sandbox, "_vercel_credential", vercel_credential)
+    monkeypatch.setattr(sandbox, "_git_identity", git_identity)
 
-    provisioned = await sandbox.provision("wrk_1", models.WorkerSpec(), "secret")
+    provisioned = await sandbox.provision(
+        "wrk_1", models.WorkerSpec(), "secret", user_id="user_1"
+    )
 
     assert provisioned.sandbox_name == "hatchery-wrk_1"
+    assert calls["github_user"] == ("user_1", False)
+    github_rule = calls["network_policy"].allow["api.github.com"][0]
+    assert dict(github_rule.transform[0].headers) == {
+        "Authorization": "Bearer user-token"
+    }
     assert calls["options"]["persistent"] is True
     assert calls["options"]["execution_time_limit"] == sandbox.EXECUTION_TIME_LIMIT
     assert calls["update"] == {"execution_time_limit": sandbox.EXECUTION_TIME_LIMIT}
@@ -121,9 +142,162 @@ async def test_provision_creates_persistent_sandbox_and_checks_daemon(monkeypatc
     )
 
 
+async def test_vercel_token_is_injected_only_for_matching_bearer(monkeypatch):
+    async def oidc_token():
+        return "oidc-token"
+
+    monkeypatch.setattr(sandbox.vercel_oidc, "get_vercel_oidc_token", oidc_token)
+    policy = await sandbox._network_policy(None, None, "private-vercel-token")
+
+    rule = policy.allow["api.vercel.com"][0]
+    assert rule.match.headers[0].value.value == (
+        f"Bearer {sandbox.VERCEL_TOKEN_PLACEHOLDER}"
+    )
+    assert dict(rule.transform[0].headers) == {
+        "Authorization": "Bearer private-vercel-token"
+    }
+    assert policy.allow["vercel.com"] == policy.allow["api.vercel.com"]
+
+
 def test_workspace_matches_vercel_git_source_layout():
     assert sandbox._workspace(models.WorkerSpec(repos=["acme/app"])) == "/vercel/app"
     assert sandbox._workspace(models.WorkerSpec()) == "/vercel"
+
+
+async def test_setup_script_gets_github_placeholder(monkeypatch):
+    calls = []
+
+    class Files:
+        async def mkdir(self, path):
+            pass
+
+        async def write_text(self, path, text, mode):
+            pass
+
+    class Box:
+        fs = Files()
+        region = "iad1"
+
+        async def run_process(self, command, args, **options):
+            calls.append((command, args, options))
+
+        async def create_process(self, command, args, env):
+            return object()
+
+    async def identity(_user_id):
+        return None
+
+    async def start(*args, **kwargs):
+        return object()
+
+    monkeypatch.setattr(sandbox, "_git_identity", identity)
+    monkeypatch.setattr(sandbox, "_start_daemon", start)
+
+    await sandbox._bootstrap(
+        Box(),
+        "wrk_1",
+        models.WorkerSpec(setup_script="gh repo clone acme/app app"),
+        "secret",
+        identity=None,
+    )
+
+    setup = next(call for call in calls if call[1] == ["-lc", "gh repo clone acme/app app"])
+    assert setup[2]["env"] == {"GH_TOKEN": sandbox.GITHUB_TOKEN_PLACEHOLDER}
+
+
+async def test_github_credential_uses_connected_user(monkeypatch):
+    seen = []
+
+    async def token(user_id):
+        seen.append(user_id)
+        return "user-token"
+
+    monkeypatch.setattr(sandbox.connections, "github_token", token)
+
+    assert await sandbox._github_credential("user_1") == "user-token"
+    assert seen == ["user_1"]
+
+
+async def test_empty_sandbox_allows_missing_github_connection(monkeypatch):
+    async def token(_user_id):
+        raise sandbox.connections.ConnectionRequired(
+            httpx.Response(401, request=httpx.Request("GET", "https://connect.vercel.com")),
+            "connect",
+        )
+
+    monkeypatch.setattr(sandbox.connections, "github_token", token)
+
+    assert await sandbox._github_credential("user_1", required=False) is None
+
+
+async def test_git_identity_uses_connected_github_profile(monkeypatch):
+    async def identity(_user_id):
+        return {"id": "42", "login": "octocat", "name": "The Octocat"}
+
+    monkeypatch.setattr(sandbox.connections, "github_identity", identity)
+
+    assert await sandbox._git_identity("user_1") == (
+        "The Octocat",
+        "42+octocat@users.noreply.github.com",
+    )
+
+
+async def test_canonicalize_repos_follows_github_transfer(monkeypatch):
+    class Response:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"full_name": "new-owner/app"}
+
+    class Client:
+        def __init__(self, **kwargs):
+            assert kwargs["headers"]["authorization"] == "Bearer user-token"
+            assert kwargs["follow_redirects"] is True
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def get(self, path):
+            assert path == "/repos/old-owner/app"
+            return Response()
+
+    monkeypatch.setattr(sandbox.httpx, "AsyncClient", Client)
+    spec = models.WorkerSpec(repos=["old-owner/app"])
+
+    await sandbox._canonicalize_repos(spec, "user-token")
+
+    assert spec.repos == ["new-owner/app"]
+
+
+async def test_configure_repo_remotes_uses_canonical_names():
+    calls = []
+
+    class Box:
+        async def run_process(self, command, args, **options):
+            calls.append((command, args, options))
+
+    await sandbox._configure_repo_remotes(
+        Box(), models.WorkerSpec(repos=["new-owner/app"])
+    )
+
+    assert calls == [
+        (
+            "git",
+            [
+                "-C",
+                "/vercel/app",
+                "remote",
+                "set-url",
+                "origin",
+                "https://github.com/new-owner/app.git",
+            ],
+            {"check": True, "capture_output": True},
+        )
+    ]
 
 
 async def test_wait_for_daemon_retries_route_warmup(monkeypatch):
@@ -325,15 +499,31 @@ async def test_prepare_for_command_resumes_and_repairs_daemon(monkeypatch):
     async def credentials():
         return None
 
-    async def network_policy(credential, region):
-        assert (credential, region) == (None, "iad1")
+    async def network_policy(credential, region, vercel_token):
+        assert (credential, region, vercel_token) == (None, "iad1", None)
         return "queue-policy"
+
+    async def configure(box, identity):
+        calls.append(("git", box.region, identity))
 
     async def repair(box, worker_id, spec, token, routes):
         calls.append(("repair", worker_id, token, routes))
 
     monkeypatch.setattr(sandbox.vercel_sandbox, "resume_sandbox", resume_sandbox)
     monkeypatch.setattr(sandbox.git, "git_credentials", credentials)
+    async def identity(_user_id):
+        return None
+
+    async def github_credential(_user_id, *, required=True):
+        return None
+
+    async def vercel_credential(_user_id):
+        return None
+
+    monkeypatch.setattr(sandbox.git, "configure", configure)
+    monkeypatch.setattr(sandbox, "_git_identity", identity)
+    monkeypatch.setattr(sandbox, "_github_credential", github_credential)
+    monkeypatch.setattr(sandbox, "_vercel_credential", vercel_credential)
     monkeypatch.setattr(sandbox, "_network_policy", network_policy)
     monkeypatch.setattr(sandbox, "repair_daemon", repair)
     record = models.Worker(
@@ -349,6 +539,7 @@ async def test_prepare_for_command_resumes_and_repairs_daemon(monkeypatch):
         ("resume", "hatchery-wrk_1"),
         ("update", {"execution_time_limit": sandbox.EXECUTION_TIME_LIMIT}),
         ("policy", "queue-policy"),
+        ("git", "iad1", None),
         ("repair", "wrk_1", "secret", [models.Route(port=8787, url="https://daemon.example")]),
     ]
 
@@ -402,14 +593,21 @@ async def test_snapshot_create_and_restore(monkeypatch):
         calls.append("resume")
         return box
 
-    async def configure(found):
+    async def configure(found, identity=None):
         calls.append("git")
 
     async def credentials():
         return None
 
-    async def network_policy(credential, region):
+    async def github_credential(_user_id, *, required=True):
+        return None
+
+    async def vercel_credential(_user_id):
+        return None
+
+    async def network_policy(credential, region, vercel_token):
         assert region == "iad1"
+        assert vercel_token is None
         return "policy"
 
     async def repair(*args, **kwargs):
@@ -419,6 +617,8 @@ async def test_snapshot_create_and_restore(monkeypatch):
     monkeypatch.setattr(sandbox.vercel_sandbox, "resume_sandbox", resume_sandbox)
     monkeypatch.setattr(sandbox.git, "configure", configure)
     monkeypatch.setattr(sandbox.git, "git_credentials", credentials)
+    monkeypatch.setattr(sandbox, "_github_credential", github_credential)
+    monkeypatch.setattr(sandbox, "_vercel_credential", vercel_credential)
     monkeypatch.setattr(sandbox, "_network_policy", network_policy)
     monkeypatch.setattr(sandbox, "repair_daemon", repair)
     record = models.Worker(

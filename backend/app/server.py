@@ -28,7 +28,9 @@ import websockets.asyncio.client
 import ai
 import ai.ui.ai_sdk.outbound_stream
 import ai.ui.ai_sdk.ui_events
+import auth
 import channels
+import connections
 import models
 import store
 import vercel.functions
@@ -183,6 +185,29 @@ async def lifespan(_: fastapi.FastAPI):
 
 app = fastapi.FastAPI(title="hatchery", lifespan=lifespan)
 
+
+@app.middleware("http")
+async def browser_session(request: fastapi.Request, call_next):
+    path = request.url.path
+    public = (
+        path == "/api/health"
+        or path.startswith("/api/auth/")
+        or path.startswith("/channels/")
+    )
+    user = await auth.current_user(request) if path.startswith("/api/") else None
+    request.state.user = user
+    if path.startswith("/api/") and not public and user is None:
+        return fastapi.responses.JSONResponse({"detail": "sign in required"}, status_code=401)
+    match = re.match(r"^/api/chats/([^/]+)", path)
+    if match is not None and user is not None:
+        chat = await chats.claim_user(match.group(1), user["id"])
+        if chat is not None and chat.user_id != user["id"]:
+            return fastapi.responses.JSONResponse({"detail": "unknown chat"}, status_code=404)
+    if path.startswith("/api/") and request.method not in {"GET", "HEAD", "OPTIONS"} and not auth.valid_origin(request):
+        return fastapi.responses.JSONResponse({"detail": "invalid origin"}, status_code=403)
+    return await call_next(request)
+
+
 # local dev: the ui talks to :8000 directly for streams — next's dev proxy
 # severs quiet/long sse responses (and can't proxy websockets at all).
 app.add_middleware(
@@ -190,6 +215,7 @@ app.add_middleware(
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_credentials=True,
 )
 
 
@@ -198,10 +224,122 @@ async def health() -> dict:
     return {"ok": True, "channels": list(bot.channels)}
 
 
+@app.get("/api/auth/login")
+async def auth_login(request: fastapi.Request):
+    return await auth.begin(request)
+
+
+@app.get("/api/auth/callback")
+async def auth_callback(request: fastapi.Request, code: str = "", state: str = ""):
+    if not code or not state:
+        raise fastapi.HTTPException(400, "missing OAuth code or state")
+    return await auth.callback(request, code, state)
+
+
+@app.get("/api/auth/me")
+async def auth_me(request: fastapi.Request) -> dict:
+    return {"user": request.state.user}
+
+
+@app.post("/api/auth/logout")
+async def auth_logout(request: fastapi.Request):
+    return await auth.logout(request)
+
+
+@app.get("/api/connections/github")
+async def github_connection(request: fastapi.Request) -> dict:
+    user = request.state.user
+    connection = connections.github_connection(user)
+    if connection is None:
+        return {"connection": None}
+    try:
+        await connections.github_token(user["id"], connection.get("installation_id"))
+    except connections.ConnectionRequired:
+        return {"connection": None}
+    return {"connection": connection}
+
+
+@app.get("/api/connections/github/authorize")
+async def authorize_github(request: fastapi.Request):
+    user = request.state.user
+    return await connections.begin_github(request, user)
+
+
+@app.get("/api/connections/github/return")
+async def github_return(request: fastapi.Request):
+    user = request.state.user
+    try:
+        return await connections.finish_github(user)
+    except connections.ConnectionRequired as error:
+        raise fastapi.HTTPException(409, "GitHub authorization was not completed") from error
+
+
+@app.delete("/api/connections/github", status_code=204)
+async def disconnect_github(request: fastapi.Request) -> None:
+    user = request.state.user
+    await connections.disconnect_github(user)
+
+
+class VercelCLIRequest(pydantic.BaseModel):
+    token: str = pydantic.Field(min_length=1, max_length=512)
+
+
+@app.get("/api/connections/vercel-cli")
+async def vercel_cli_connection(request: fastapi.Request) -> dict:
+    user = request.state.user
+    return {"connection": await connections.vercel_cli_connection(user["id"])}
+
+
+@app.put("/api/connections/vercel-cli")
+async def connect_vercel_cli(
+    request: fastapi.Request, body: VercelCLIRequest
+) -> dict:
+    user = request.state.user
+    try:
+        connection = await connections.connect_vercel_cli(user["id"], body.token)
+    except ValueError as error:
+        raise fastapi.HTTPException(400, str(error)) from error
+    return {"connection": connection}
+
+
+@app.delete("/api/connections/vercel-cli", status_code=204)
+async def disconnect_vercel_cli(request: fastapi.Request) -> None:
+    user = request.state.user
+    await connections.disconnect_vercel_cli(user["id"])
+
+
+class SpaceWarning(pydantic.BaseModel):
+    space_id: str
+    repo: str
+    warning: str
+
+
 @app.get("/api/spaces")
 async def list_spaces() -> list[models.Space]:
     found = await spaces.list_all()
     return found or [await spaces.default()]
+
+
+@app.get("/api/spaces/warnings")
+async def space_warnings(request: fastapi.Request) -> list[SpaceWarning]:
+    user = request.state.user
+    warnings = []
+    for space in await spaces.list_all() or [await spaces.default()]:
+        if not space.repos:
+            continue
+        repo = space.repos[0]
+        try:
+            warning = await connections.github_repo_warning(user["id"], repo)
+        except connections.ConnectionRequired:
+            warning = f"Connect GitHub to let Hatchery make pull requests to {repo}."
+        if warning is None:
+            continue
+        log.warning(
+            "space main repository lacks Hatchery GitHub access",
+            extra={"space_id": space.id, "repo": repo, "user_id": user["id"]},
+        )
+        warnings.append(SpaceWarning(space_id=space.id, repo=repo, warning=warning))
+    return warnings
 
 
 class CreateSpaceRequest(pydantic.BaseModel):
@@ -285,8 +423,15 @@ async def update_space_resources(
 
 
 @app.get("/api/chats")
-async def list_chats() -> list[models.Chat]:
-    found = await chats.list_all()
+async def list_chats(request: fastapi.Request) -> list[models.Chat]:
+    user = request.state.user
+    found = []
+    if user is not None:
+        for chat in await chats.list_all():
+            if chat.user_id is None:
+                chat = await chats.claim_user(chat.id, user["id"]) or chat
+            if chat.user_id == user["id"]:
+                found.append(chat)
     for chat in found:
         if not chat.trigger.startswith("slack:") or chat.title.startswith("slack:"):
             continue
@@ -302,13 +447,18 @@ class CreateChatRequest(pydantic.BaseModel):
 
 
 @app.post("/api/chats")
-async def create_chat(request: CreateChatRequest) -> models.Chat:
+async def create_chat(request: CreateChatRequest, http_request: fastapi.Request) -> models.Chat:
+    user = http_request.state.user
     found = await spaces.list_all()
     if not found:
         found = [await spaces.default()]
     if request.space_id is not None and not any(space.id == request.space_id for space in found):
         raise fastapi.HTTPException(404, "unknown space")
-    return await chats.create(request.space_id, request.title)
+    return await chats.create(
+        request.space_id,
+        request.title,
+        user_id=user["id"] if user is not None else None,
+    )
 
 
 class AssignChatSpaceRequest(pydantic.BaseModel):
@@ -553,7 +703,10 @@ async def suggest_chat_sandbox(chat_id: str) -> sandbox.Launch:
 async def create_chat_sandbox(chat_id: str, request: sandbox.Launch) -> dict:
     if await chats.get(chat_id) is None:
         raise fastapi.HTTPException(404, "unknown chat")
-    created = await sandbox.create(chat_id, request)
+    try:
+        created = await sandbox.create(chat_id, request)
+    except RuntimeError as error:
+        raise fastapi.HTTPException(409, str(error)) from error
     return created.model_dump(exclude={"daemon_token"})
 
 
@@ -629,6 +782,19 @@ async def delete_chat_sandbox(chat_id: str, sandbox_id: str) -> None:
         raise fastapi.HTTPException(404, str(error)) from error
 
 
+async def _authenticate_websocket(ws: fastapi.WebSocket) -> bool:
+    if not auth.valid_origin(ws):
+        await ws.accept()
+        await ws.close(code=4403, reason="invalid origin")
+        return False
+    session_id = getattr(ws, "cookies", {}).get(auth.COOKIE, "")
+    if await auth.session_user(session_id) is not None:
+        return True
+    await ws.accept()
+    await ws.close(code=4401, reason="sign in required")
+    return False
+
+
 async def _bridge_tty(
     ws: fastapi.WebSocket,
     record: worker.Worker,
@@ -702,6 +868,8 @@ async def _bridge_tty(
 
 @app.websocket("/api/chats/{chat_id}/sandboxes/{sandbox_id}/ssh")
 async def sandbox_ssh(ws: fastapi.WebSocket, chat_id: str, sandbox_id: str) -> None:
+    if not await _authenticate_websocket(ws):
+        return
     record = await worker.get(sandbox_id)
     if record is None or record.chat_id != chat_id:
         await ws.accept()
@@ -778,6 +946,8 @@ async def task_readiness(chat_id: str, subagent_id: str) -> dict:
 
 @app.websocket("/api/chats/{chat_id}/subagents/{subagent_id}/tty")
 async def task_tty(ws: fastapi.WebSocket, chat_id: str, subagent_id: str) -> None:
+    if not await _authenticate_websocket(ws):
+        return
     task = await worker.get_task(chat_id, subagent_id)
     if task is None:
         await ws.accept()
@@ -797,6 +967,8 @@ async def task_tty(ws: fastapi.WebSocket, chat_id: str, subagent_id: str) -> Non
 
 @app.websocket("/api/chats/{chat_id}/terminals/{terminal_id}/tty")
 async def manual_tty(ws: fastapi.WebSocket, chat_id: str, terminal_id: str) -> None:
+    if not await _authenticate_websocket(ws):
+        return
     terminal = await worker.store.get_terminal(terminal_id)
     if terminal is None or terminal.chat_id != chat_id:
         await ws.accept()

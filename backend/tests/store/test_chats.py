@@ -46,6 +46,16 @@ async def test_create_get_list():
     assert await chats.get("chat_missing") is None
 
 
+async def test_claim_user_sets_legacy_owner_once():
+    chat = await chats.create(None, "legacy")
+
+    claimed = await chats.claim_user(chat.id, "user_1")
+    unchanged = await chats.claim_user(chat.id, "user_2")
+
+    assert claimed is not None and claimed.user_id == "user_1"
+    assert unchanged is not None and unchanged.user_id == "user_1"
+
+
 async def test_assign_space_updates_chat():
     destination = await spaces.create("docs")
     chat = await chats.create(None, "work")

@@ -28,12 +28,163 @@ def generated_topic(monkeypatch):
     monkeypatch.setattr(server.topic, "generate", generate)
 
 
+async def test_browser_api_requires_session(monkeypatch):
+    async def current_user(_request):
+        return None
+
+    monkeypatch.setattr(server.auth, "current_user", current_user)
+    async with client() as c:
+        protected = await c.get("/api/spaces")
+        health = await c.get("/api/health")
+        identity = await c.get("/api/auth/me")
+
+    assert protected.status_code == 401
+    assert protected.json() == {"detail": "sign in required"}
+    assert health.status_code == 200
+    assert identity.status_code == 200
+    assert identity.json() == {"user": None}
+
+
+async def test_websocket_auth_rejects_missing_session(monkeypatch):
+    async def session_user(_session_id):
+        return None
+
+    monkeypatch.setattr(server.auth, "session_user", session_user)
+    ws = BridgeWebSocket()
+    ws.cookies = {}
+    ws.headers = {}
+
+    assert await server._authenticate_websocket(ws) is False
+    assert ws.closed == (4401, "sign in required")
+
+
+async def test_legacy_chat_is_claimed_on_direct_access():
+    chat = await chats.create(None, "legacy")
+
+    async with client() as c:
+        response = await c.get(f"/api/chats/{chat.id}/messages")
+
+    assert response.status_code == 200
+    assert (await chats.get(chat.id)).user_id == "user_test"
+
+
+async def test_chat_routes_hide_another_users_chat(monkeypatch):
+    chat = await chats.create(None, "private", user_id="user_other")
+
+    async with client() as c:
+        listed = await c.get("/api/chats")
+        direct = await c.get(f"/api/chats/{chat.id}/messages")
+
+    assert listed.json() == []
+    assert direct.status_code == 404
+
+
+async def test_github_connection_routes(monkeypatch):
+    seen = {}
+
+    async def begin(request, user):
+        seen["authorized"] = user["id"]
+        return server.fastapi.responses.RedirectResponse("https://connect.example")
+
+    async def disconnect(user):
+        seen["disconnected"] = user["id"]
+
+    async def token(_user_id, _installation_id=None):
+        return "token"
+
+    monkeypatch.setattr(server.connections, "begin_github", begin)
+    monkeypatch.setattr(server.connections, "disconnect_github", disconnect)
+    monkeypatch.setattr(server.connections, "github_token", token)
+    monkeypatch.setattr(
+        server.connections,
+        "github_connection",
+        lambda user: {"login": "octocat", "id": "42"},
+    )
+
+    async with client() as c:
+        status = await c.get("/api/connections/github")
+        authorized = await c.get("/api/connections/github/authorize", follow_redirects=False)
+        disconnected = await c.delete(
+            "/api/connections/github", headers={"origin": "http://test"}
+        )
+
+    assert status.json() == {"connection": {"login": "octocat", "id": "42"}}
+    assert authorized.headers["location"] == "https://connect.example"
+    assert disconnected.status_code == 204
+    assert seen == {"authorized": "user_test", "disconnected": "user_test"}
+
+
+async def test_vercel_cli_connection_routes(monkeypatch):
+    seen = {}
+
+    async def connection(user_id):
+        assert user_id == "user_test"
+        return {"username": "ada"}
+
+    async def connect(user_id, token):
+        seen["connected"] = (user_id, token)
+        return {"username": "ada"}
+
+    async def disconnect(user_id):
+        seen["disconnected"] = user_id
+
+    monkeypatch.setattr(server.connections, "vercel_cli_connection", connection)
+    monkeypatch.setattr(server.connections, "connect_vercel_cli", connect)
+    monkeypatch.setattr(server.connections, "disconnect_vercel_cli", disconnect)
+
+    async with client() as c:
+        status = await c.get("/api/connections/vercel-cli")
+        connected = await c.put(
+            "/api/connections/vercel-cli",
+            json={"token": "private"},
+            headers={"origin": "http://test"},
+        )
+        disconnected = await c.delete(
+            "/api/connections/vercel-cli", headers={"origin": "http://test"}
+        )
+
+    assert status.json() == {"connection": {"username": "ada"}}
+    assert connected.json() == {"connection": {"username": "ada"}}
+    assert disconnected.status_code == 204
+    assert seen == {
+        "connected": ("user_test", "private"),
+        "disconnected": "user_test",
+    }
+
+
 async def test_spaces_seed_default():
     async with client() as c:
         listed = (await c.get("/api/spaces")).json()
     assert [s["id"] for s in listed] == ["spc_hatchery"]
     assert "goal" not in listed[0]
     assert not listed[0]["about"].startswith("# hatchery")
+
+
+async def test_space_warnings_check_main_repo_and_log(monkeypatch, caplog):
+    space = await server.spaces.create("docs")
+    space.repos = ["acme/main", "acme/secondary"]
+    await server.spaces.save(space)
+    checked = []
+
+    async def warning(user_id, repo):
+        checked.append((user_id, repo))
+        return "Install the Hatchery GitHub app on acme."
+
+    monkeypatch.setattr(server.connections, "github_repo_warning", warning)
+
+    with caplog.at_level("WARNING", logger="app"):
+        async with client() as c:
+            response = await c.get("/api/spaces/warnings")
+
+    assert response.json() == [
+        {
+            "space_id": space.id,
+            "repo": "acme/main",
+            "warning": "Install the Hatchery GitHub app on acme.",
+        }
+    ]
+    assert checked == [("user_test", "acme/main")]
+    assert "space main repository lacks Hatchery GitHub access" in caplog.text
 
 
 async def test_space_create_and_delete():
@@ -101,7 +252,7 @@ async def test_space_resources_update():
         response = await c.patch(
             "/api/spaces/spc_hatchery/resources",
             json={
-                "repos": ["anbuzin/hatchery"],
+                "repos": ["acme/app"],
                 "resources": [
                     {"title": "docs", "url": "https://example.com/docs", "kind": "link"}
                 ],
@@ -110,7 +261,7 @@ async def test_space_resources_update():
         listed = (await c.get("/api/spaces")).json()
 
     assert response.status_code == 200
-    assert response.json()["repos"] == ["anbuzin/hatchery"]
+    assert response.json()["repos"] == ["acme/app"]
     assert response.json()["resources"] == [
         {"title": "docs", "url": "https://example.com/docs", "kind": "link"}
     ]
@@ -125,7 +276,7 @@ async def test_space_resources_update_rejects_unknown_space_and_invalid_repo():
         )
         invalid = await c.patch(
             "/api/spaces/spc_hatchery/resources",
-            json={"repos": ["https://github.com/anbuzin/hatchery"], "resources": []},
+            json={"repos": ["https://github.com/acme/app"], "resources": []},
         )
 
     assert missing.status_code == 404

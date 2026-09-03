@@ -4,24 +4,55 @@ import { useCallback, useEffect, useState } from "react";
 import {
   BookMarkedIcon,
   CheckIcon,
+  ChevronsUpDownIcon,
   FolderGitIcon,
+  GitBranchIcon,
   LinkIcon,
+  TriangleAlertIcon,
+  LogOutIcon,
   PencilIcon,
   PlusIcon,
   TerminalIcon,
+  TriangleIcon,
   Trash2Icon,
   XIcon,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import { apiBase, type Chat, type Resource, type Space } from "@/lib/api";
+import {
+  apiBase,
+  apiFetch,
+  type Chat,
+  type Resource,
+  type Space,
+  type SpaceWarning,
+  type User,
+  type VercelCLIConnection,
+} from "@/lib/api";
 import type { ChatUIMessage } from "@/lib/messages";
 import { ChatView } from "@/components/chat";
 import { SandboxForm } from "@/components/sandbox-form";
 import { TerminalPane, type SandboxWorkspace } from "@/components/terminal-pane";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Empty,
   EmptyDescription,
@@ -45,6 +76,14 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Sidebar,
@@ -99,24 +138,87 @@ function ChatOriginIcon({ trigger }: { trigger: string }) {
 }
 
 export default function Home() {
+  const [user, setUser] = useState<User | null | undefined>(undefined);
   const [spaces, setSpaces] = useState<Space[] | null>(null);
   const [chats, setChats] = useState<Chat[] | null>(null);
+  const [spaceWarnings, setSpaceWarnings] = useState<SpaceWarning[]>([]);
   const [failed, setFailed] = useState(false);
   const [selection, setSelection] = useState<Selection>(null);
   const [addingSpace, setAddingSpace] = useState(false);
   const [spaceName, setSpaceName] = useState("");
+  const [vercelCLI, setVercelCLI] = useState<VercelCLIConnection | null>(null);
+  const [vercelToken, setVercelToken] = useState("");
+  const [vercelSheetOpen, setVercelSheetOpen] = useState(false);
+  const [vercelError, setVercelError] = useState("");
+  const [savingVercel, setSavingVercel] = useState(false);
   // set by space clicks only; chat clicks leave the order alone
   const [sortSpaceId, setSortSpaceId] = useState<string | null>(null);
 
+  const disconnectGitHub = async () => {
+    if (!window.confirm("Disconnect GitHub? Active sandboxes will lose repository access.")) {
+      return;
+    }
+    const response = await apiFetch("/api/connections/github", { method: "DELETE" });
+    if (response.ok) {
+      setUser((current) => current ? { ...current, github: undefined } : current);
+    }
+  };
+
+  const saveVercelCLI = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setSavingVercel(true);
+    setVercelError("");
+    const response = await apiFetch("/api/connections/vercel-cli", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: vercelToken }),
+    });
+    setSavingVercel(false);
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      setVercelError(body.detail ?? "Could not connect Vercel CLI access.");
+      return;
+    }
+    const body: { connection: VercelCLIConnection } = await response.json();
+    setVercelCLI(body.connection);
+    setVercelToken("");
+    setVercelSheetOpen(false);
+  };
+
+  const disconnectVercelCLI = async () => {
+    if (!window.confirm("Disconnect Vercel CLI access? Active sandboxes will lose deployment access.")) {
+      return;
+    }
+    const response = await apiFetch("/api/connections/vercel-cli", { method: "DELETE" });
+    if (response.ok) setVercelCLI(null);
+  };
+
   useEffect(() => {
     const load = async () => {
-      const [s, c] = await Promise.all([
-        fetch("/api/spaces"),
-        fetch("/api/chats"),
+      const identity = await apiFetch("/api/auth/me");
+      if (!identity.ok) throw new Error("backend unreachable");
+      const me: { user: User | null } = await identity.json();
+      if (!me.user) {
+        setUser(null);
+        return;
+      }
+      const [s, c, github, vercel, warnings] = await Promise.all([
+        apiFetch("/api/spaces"),
+        apiFetch("/api/chats"),
+        apiFetch("/api/connections/github"),
+        apiFetch("/api/connections/vercel-cli"),
+        apiFetch("/api/spaces/warnings"),
       ]);
-      if (!s.ok || !c.ok) throw new Error("backend unreachable");
+      if (!s.ok || !c.ok || !github.ok || !vercel.ok || !warnings.ok) {
+        throw new Error("backend unreachable");
+      }
+      const connection: { connection: User["github"] | null } = await github.json();
+      const vercelConnection: { connection: VercelCLIConnection | null } = await vercel.json();
+      setUser({ ...me.user, github: connection.connection ?? undefined });
+      setVercelCLI(vercelConnection.connection);
       setSpaces(await s.json());
       setChats(await c.json());
+      setSpaceWarnings(await warnings.json());
     };
     load().catch(() => setFailed(true));
   }, []);
@@ -132,6 +234,10 @@ export default function Home() {
     selection?.kind === "chat"
       ? (chats?.find((c) => c.id === selection.id) ?? null)
       : null;
+  const selectedWarning = spaceWarnings.find(
+    (warning) =>
+      warning.space_id === (selectedSpace?.id ?? selectedChat?.space_id),
+  );
 
   const sortedChats =
     chats && sortSpaceId
@@ -145,7 +251,7 @@ export default function Home() {
   const createSpace = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!spaceName.trim()) return;
-    const res = await fetch("/api/spaces", {
+    const res = await apiFetch("/api/spaces", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: spaceName }),
@@ -161,7 +267,7 @@ export default function Home() {
 
   const deleteSpace = async (space: Space) => {
     if (!window.confirm(`Remove ${space.name}?`)) return;
-    const res = await fetch(`/api/spaces/${space.id}`, { method: "DELETE" });
+    const res = await apiFetch(`/api/spaces/${space.id}`, { method: "DELETE" });
     if (res.status === 409) {
       window.alert("Remove this space's chats first.");
       return;
@@ -173,7 +279,7 @@ export default function Home() {
   };
 
   const refreshChats = useCallback(() => {
-    fetch("/api/chats")
+    apiFetch("/api/chats")
       .then((res) => (res.ok ? res.json() : null))
       .then((found: Chat[] | null) => {
         if (found) setChats(found);
@@ -182,7 +288,7 @@ export default function Home() {
   }, []);
 
   const createChat = async () => {
-    const res = await fetch("/api/chats", {
+    const res = await apiFetch("/api/chats", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -196,7 +302,7 @@ export default function Home() {
   };
 
   const assignChatSpace = async (chat: Chat, spaceId: string) => {
-    const res = await fetch(`/api/chats/${chat.id}/space`, {
+    const res = await apiFetch(`/api/chats/${chat.id}/space`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ space_id: spaceId }),
@@ -208,14 +314,101 @@ export default function Home() {
     );
   };
 
+  if (user === undefined && !failed) return <div className="h-svh" />;
+
+  if (user == null) {
+    return (
+      <main className="flex h-svh items-center justify-center p-6">
+        <Card className="w-full max-w-sm">
+          <CardHeader>
+            <CardTitle>Sign in to hatchery</CardTitle>
+            <CardDescription>Use your Vercel account to continue.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button
+              className="w-full"
+              nativeButton={false}
+              render={<a href="/api/auth/login" />}
+            >
+              Sign in with Vercel
+            </Button>
+          </CardContent>
+        </Card>
+      </main>
+    );
+  }
+
   return (
     <SidebarProvider className="h-svh overflow-hidden">
       <Sidebar>
-        <SidebarHeader className="px-4 py-3">
-          <span className="text-sm font-semibold">hatchery</span>
-          <span className="text-xs text-muted-foreground">
-            a software factory
-          </span>
+        <SidebarHeader className="p-2">
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={
+                <SidebarMenuButton size="lg" className="h-auto">
+                  <Avatar size="sm">
+                    <AvatarImage src={user.picture ?? undefined} alt="" />
+                    <AvatarFallback>
+                      {(user.name ?? user.username ?? user.email ?? "U").slice(0, 1).toUpperCase()}
+                    </AvatarFallback>
+                  </Avatar>
+                  <span className="min-w-0 flex-1">
+                    <span className="block font-semibold">hatchery</span>
+                    <span className="block truncate text-xs text-muted-foreground">
+                      {user.name ?? user.username ?? user.email}
+                    </span>
+                  </span>
+                  <ChevronsUpDownIcon />
+                </SidebarMenuButton>
+              }
+            />
+            <DropdownMenuContent side="bottom" align="start" className="min-w-60">
+              <DropdownMenuGroup>
+                <DropdownMenuLabel>Account</DropdownMenuLabel>
+                {user.github ? (
+                  <DropdownMenuItem disabled>
+                    <GitBranchIcon />
+                    Connected as @{user.github.login}
+                  </DropdownMenuItem>
+                ) : (
+                  <DropdownMenuItem
+                    render={<a href={`${apiBase()}/api/connections/github/authorize`} />}
+                  >
+                    <GitBranchIcon />
+                    Connect GitHub
+                  </DropdownMenuItem>
+                )}
+                <DropdownMenuItem onClick={() => setVercelSheetOpen(true)}>
+                  <TriangleIcon />
+                  {vercelCLI ? "Vercel CLI connected" : "Connect Vercel CLI"}
+                </DropdownMenuItem>
+              </DropdownMenuGroup>
+              <DropdownMenuSeparator />
+              <DropdownMenuGroup>
+                {user.github && (
+                  <DropdownMenuItem variant="destructive" onClick={disconnectGitHub}>
+                    <GitBranchIcon />
+                    Disconnect GitHub
+                  </DropdownMenuItem>
+                )}
+                {vercelCLI && (
+                  <DropdownMenuItem variant="destructive" onClick={disconnectVercelCLI}>
+                    <TriangleIcon />
+                    Disconnect Vercel CLI
+                  </DropdownMenuItem>
+                )}
+                <DropdownMenuItem
+                  onClick={async () => {
+                    await apiFetch("/api/auth/logout", { method: "POST" });
+                    window.location.reload();
+                  }}
+                >
+                  <LogOutIcon />
+                  Sign out
+                </DropdownMenuItem>
+              </DropdownMenuGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </SidebarHeader>
         <SidebarSeparator />
 
@@ -342,6 +535,49 @@ export default function Home() {
         </SidebarContent>
       </Sidebar>
 
+      <Sheet open={vercelSheetOpen} onOpenChange={setVercelSheetOpen}>
+        <SheetContent>
+          <SheetHeader>
+            <SheetTitle>{vercelCLI ? "Replace Vercel CLI token" : "Connect Vercel CLI"}</SheetTitle>
+            <SheetDescription>
+              Add your Vercel token to let agents access the teams and projects you can access.
+            </SheetDescription>
+          </SheetHeader>
+          <form className="flex flex-col gap-4 px-4" onSubmit={saveVercelCLI}>
+            <FieldGroup>
+              <Field data-invalid={Boolean(vercelError)}>
+                <FieldLabel htmlFor="vercel-token">Access token</FieldLabel>
+                <Input
+                  id="vercel-token"
+                  type="password"
+                  autoComplete="off"
+                  value={vercelToken}
+                  onChange={(event) => setVercelToken(event.target.value)}
+                  aria-invalid={Boolean(vercelError)}
+                  placeholder="vcp_…"
+                />
+                <FieldDescription>
+                  Create the narrowest token possible in Vercel account settings. It is stored encrypted.
+                </FieldDescription>
+                {vercelError && <FieldError>{vercelError}</FieldError>}
+              </Field>
+            </FieldGroup>
+            <Button type="submit" disabled={!vercelToken.trim() || savingVercel}>
+              {savingVercel ? "Connecting…" : vercelCLI ? "Replace token" : "Connect"}
+            </Button>
+          </form>
+          <SheetFooter>
+            <Button
+              variant="outline"
+              nativeButton={false}
+              render={<a href="https://vercel.com/account/settings/tokens" target="_blank" rel="noreferrer" />}
+            >
+              Create token in Vercel
+            </Button>
+          </SheetFooter>
+        </SheetContent>
+      </Sheet>
+
       <SidebarInset>
         <header className="flex h-14 items-center gap-2 border-b px-4">
           <SidebarTrigger />
@@ -384,6 +620,7 @@ export default function Home() {
           <LiveChat
             key={selectedChat.id}
             chat={selectedChat}
+            warning={selectedWarning?.warning}
             onChatChanged={refreshChats}
             onSpaceAssigned={(spaceId) =>
               setChats((current) => {
@@ -418,6 +655,7 @@ export default function Home() {
             ) : selectedSpace ? (
               <SpacePane
                 space={selectedSpace}
+                warning={selectedWarning?.warning}
                 onChange={(updated) =>
                   setSpaces((current) =>
                     current?.map((space) =>
@@ -469,11 +707,23 @@ function ResourceCard({ resource }: { resource: Resource }) {
   );
 }
 
+function RepositoryWarning({ warning }: { warning: string }) {
+  return (
+    <Alert>
+      <TriangleAlertIcon />
+      <AlertTitle>GitHub access needed</AlertTitle>
+      <AlertDescription>{warning}</AlertDescription>
+    </Alert>
+  );
+}
+
 function SpacePane({
   space,
+  warning,
   onChange,
 }: {
   space: Space;
+  warning?: string;
   onChange: (space: Space) => void;
 }) {
   const [editingDocument, setEditingDocument] = useState(false);
@@ -514,7 +764,7 @@ function SpacePane({
     setSavingDocument(true);
     setDocumentError("");
     try {
-      const response = await fetch(`/api/spaces/${space.id}`, {
+      const response = await apiFetch(`/api/spaces/${space.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: documentName, about: documentAbout }),
@@ -570,7 +820,7 @@ function SpacePane({
     setSavingResources(true);
     setResourceError("");
     try {
-      const response = await fetch(`/api/spaces/${space.id}/resources`, {
+      const response = await apiFetch(`/api/spaces/${space.id}/resources`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ repos, resources: links }),
@@ -588,6 +838,7 @@ function SpacePane({
   return (
     <div className="mx-auto grid w-full max-w-6xl gap-10 lg:grid-cols-[minmax(0,1fr)_18rem]">
       <section className="mx-auto flex w-full max-w-2xl min-w-0 flex-col gap-6">
+        {warning && <RepositoryWarning warning={warning} />}
         {editingDocument ? (
           <FieldGroup>
             <Field data-invalid={Boolean(documentError)}>
@@ -791,10 +1042,12 @@ function EditableResource({
 // Keyed by chat.id at the call site so useChat remounts per chat.
 function LiveChat({
   chat,
+  warning,
   onChatChanged,
   onSpaceAssigned,
 }: {
   chat: Chat;
+  warning?: string;
   onChatChanged: () => void;
   onSpaceAssigned: (spaceId: string) => void;
 }) {
@@ -808,7 +1061,7 @@ function LiveChat({
   const [preferredSandboxId, setPreferredSandboxId] = useState<string>();
 
   const loadSandboxes = useCallback(() => {
-    fetch(`${apiBase()}/api/chats/${chat.id}/sandboxes`)
+    apiFetch(`/api/chats/${chat.id}/sandboxes`)
       .then((res) => (res.ok ? res.json() : []))
       .then((found: SandboxWorkspace[]) => {
         setSandboxes(found);
@@ -818,7 +1071,7 @@ function LiveChat({
   }, [chat.id]);
 
   useEffect(() => {
-    fetch(`${apiBase()}/api/chats/${chat.id}/messages`)
+    apiFetch(`/api/chats/${chat.id}/messages`)
       .then((res) => (res.ok ? res.json() : []))
       .then(setInitialMessages)
       .catch(() => setInitialMessages([]));
@@ -828,6 +1081,7 @@ function LiveChat({
   useEffect(() => {
     const source = new EventSource(
       `${apiBase()}/api/chats/${chat.id}/events`,
+      { withCredentials: true },
     );
     source.onmessage = (message) => {
       const event = JSON.parse(message.data) as { type?: string };
@@ -869,6 +1123,11 @@ function LiveChat({
     <div className="@container flex min-h-0 flex-1">
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col @4xl:flex-row">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col @4xl:min-w-[28rem]">
+          {warning && (
+            <div className="p-3 pb-0">
+              <RepositoryWarning warning={warning} />
+            </div>
+          )}
           <ChatView
             chatId={chat.id}
             initialMessages={initialMessages}

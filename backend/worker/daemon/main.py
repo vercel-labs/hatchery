@@ -30,7 +30,7 @@ import uuid
 import asyncssh
 import websockets.asyncio.server
 
-VERSION = 10
+VERSION = 11
 REPLAY_LIMIT = 1024 * 1024
 FX_INPUT_READY = b"\x1b[?2004h"
 FX_INTERRUPT_SETTLE = 0.75
@@ -59,6 +59,11 @@ def agent_environment(env: dict[str, str] | None = None) -> dict[str, str]:
     }
     result = {name: value for name, value in source.items() if name not in private}
     result["PATH"] = f"/opt/hatchery/bin:{result.get('PATH', '/usr/local/bin:/usr/bin:/bin')}"
+    # CLIs require a local credential before sending a request. Sandbox network
+    # policy replaces these non-secret markers when the user connected access.
+    result["GH_TOKEN"] = "sandbox-network-policy-placeholder"
+    if source.get("HATCHERY_VERCEL_CLI_CONNECTED") == "1":
+        result["VERCEL_TOKEN"] = "sandbox-vercel-policy-placeholder"
     return result
 
 
@@ -93,7 +98,6 @@ class Runtime:
         self.fx_home = pathlib.Path(os.environ.get("FX_HOME", pathlib.Path.home() / ".fx"))
         self.instructions = os.environ.get("HATCHERY_AGENT_INSTRUCTIONS", "")
         self.loop: asyncio.AbstractEventLoop | None = None
-        self.sign_commits = None
 
     async def handle(self, raw: dict) -> None:
         """Accept one command only after its process handoff is complete.
@@ -103,13 +107,15 @@ class Runtime:
         the daemon crashed between those two steps.
         """
         task_id = str(raw.get("task_id") or "")
-        if not task_id or raw.get("worker_id") != self.worker_id:
+        if raw.get("worker_id") != self.worker_id:
+            return
+        kind = raw.get("type")
+        if not task_id:
             return
         sequence = int(raw.get("sequence", -1))
         async with self.command_lock:
             if sequence <= self.sequences.get(task_id, -1):
                 return
-            kind = raw.get("type")
             if kind == "task.cancel":
                 session = self.processes.get(task_id)
                 self.cancel_pending_input(session)
@@ -1181,53 +1187,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         loopback = self.client_address[0] in ("127.0.0.1", "::1")
-        if self.path in ("/pr-created", "/sign-commits"):
+        if self.path == "/pr-created":
             if not loopback:
                 self.send_error(403)
                 return
             body = self._json()
-            if self.path == "/pr-created":
-                url = str(body.get("url") or "")
-                if not re.fullmatch(r"https://github\.com/[^/\s]+/[^/\s]+/pull/\d+", url):
-                    self.send_error(400)
-                    return
-                runtime = self.runtime
-                task_id = str(body.get("task_id") or "")
-                if body.get("workspace") != self.workspace:
-                    self.send_error(403)
-                    return
-                if runtime is not None and task_id:
-                    asyncio.run_coroutine_threadsafe(
-                        runtime._emit(task_id, "task.output", {"pull_request": body}),
-                        runtime.loop,
-                    )
-                self._send_json({"ok": True})
+            url = str(body.get("url") or "")
+            if not re.fullmatch(r"https://github\.com/[^/\s]+/[^/\s]+/pull/\d+", url):
+                self.send_error(400)
                 return
-            if self.runtime is None or self.runtime.sign_commits is None:
-                self.send_error(503, "commit signing is not configured")
+            runtime = self.runtime
+            task_id = str(body.get("task_id") or "")
+            if body.get("workspace") != self.workspace:
+                self.send_error(403)
                 return
-            repo = body.get("repo") or {}
-            owner = str(repo.get("owner") or "")
-            name = str(repo.get("name") or "")
-            requested = [str(item.get("sha") or "") for item in body.get("commits") or []]
-            try:
-                origin = subprocess.run(
-                    ["git", "-C", self.workspace, "remote", "get-url", "origin"],
-                    text=True, capture_output=True, check=True,
-                ).stdout.strip()
-                match = re.search(r"github\.com[/:]([^/]+)/([^/#]+?)(?:\.git)?$", origin)
-                if match is None or (owner, name) != match.groups() or not requested:
-                    raise ValueError("sign request does not match the workspace repository")
-                for sha in requested:
-                    subprocess.run(
-                        ["git", "-C", self.workspace, "cat-file", "-e", f"{sha}^{{commit}}"],
-                        capture_output=True, check=True,
-                    )
-                signed = self.runtime.sign_commits(body)
-            except Exception as error:
-                self.send_error(502, str(error))
-                return
-            self._send_json({"signed_shas": signed})
+            if runtime is not None and task_id:
+                asyncio.run_coroutine_threadsafe(
+                    runtime._emit(task_id, "task.output", {"pull_request": body}),
+                    runtime.loop,
+                )
+            self._send_json({"ok": True})
             return
         if not self._authorized():
             return
@@ -1280,40 +1259,6 @@ def source() -> str:
     return pathlib.Path(__file__).read_text(encoding="utf-8")
 
 
-async def _sign_commits(connect, connector: str, request: dict) -> list[str]:
-    import httpx
-
-    token = await connect.get_token(connector, subject=connect.ConnectAppTokenSubject())
-    repo = request.get("repo") or {}
-    owner = str(repo.get("owner") or "")
-    name = str(repo.get("name") or "")
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+", owner) or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
-        raise ValueError("invalid GitHub repository")
-    signed: list[str] = []
-    headers = {
-        "authorization": f"Bearer {token}",
-        "accept": "application/vnd.github+json",
-        "x-github-api-version": "2022-11-28",
-    }
-    async with httpx.AsyncClient(base_url="https://api.github.com", headers=headers, timeout=60) as client:
-        for commit in request.get("commits") or []:
-            parents = [signed[-1]] if signed else [str(item) for item in commit.get("parents") or []]
-            body = {
-                "message": str(commit.get("message") or ""),
-                "tree": str(commit.get("tree_sha") or ""),
-                "parents": parents,
-            }
-            author = commit.get("original_author")
-            if isinstance(author, dict) and author.get("name") and author.get("email"):
-                trailer = f"Co-Authored-By: {author['name']} <{author['email']}>"
-                if trailer not in body["message"]:
-                    body["message"] = body["message"].rstrip() + f"\n\n{trailer}\n"
-            response = await client.post(f"/repos/{owner}/{name}/git/commits", json=body)
-            response.raise_for_status()
-            signed.append(str(response.json()["sha"]))
-    return signed
-
-
 async def poll_commands(queue, runtime: Runtime, worker_id: str, sleep=asyncio.sleep) -> None:
     while True:
         delivered = False
@@ -1349,7 +1294,7 @@ async def redeliver_command(delivery, runtime: Runtime) -> None:
 
 
 async def run(worker_id: str, workspace: str, port: int, state_path: str) -> None:
-    from vercel import connect, queue
+    from vercel import queue
 
     queue_client = queue.QueueClient(
         token=os.environ.get("VERCEL_QUEUE_TOKEN"),
@@ -1367,14 +1312,6 @@ async def run(worker_id: str, workspace: str, port: int, state_path: str) -> Non
         )
 
     runtime = Runtime(worker_id, workspace, publish, state_path)
-    connector = os.environ.get("GITHUB_CONNECTOR", "")
-    if connector:
-        def sign_commits(request: dict) -> list[str]:
-            future = asyncio.run_coroutine_threadsafe(
-                _sign_commits(connect, connector, request), runtime.loop
-            )
-            return future.result(timeout=300)
-        runtime.sign_commits = sign_commits
     runtime.loop = asyncio.get_running_loop()
     await runtime.recover_active_tasks()
     Handler.workspace = workspace

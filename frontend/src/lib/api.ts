@@ -9,6 +9,10 @@ export function apiBase(): string {
   return BACKEND_ORIGIN;
 }
 
+export function apiFetch(path: string, init?: RequestInit): Promise<Response> {
+  return fetch(`${BACKEND_ORIGIN}${path}`, { credentials: "include", ...init });
+}
+
 export function wsBase(): string {
   if (BACKEND_ORIGIN) return BACKEND_ORIGIN.replace(/^http/, "ws");
   return (
@@ -16,6 +20,30 @@ export function wsBase(): string {
     window.location.host
   );
 }
+
+export type GitHubConnection = {
+  id: string;
+  login: string;
+  avatar_url: string | null;
+  installation_id: string | null;
+  connected_at: string;
+};
+
+export type VercelCLIConnection = {
+  user_id: string;
+  username: string | null;
+  email: string | null;
+  connected_at: string;
+};
+
+export type User = {
+  id: string;
+  email: string | null;
+  name: string | null;
+  username: string | null;
+  picture: string | null;
+  github?: GitHubConnection;
+};
 
 export type Resource = {
   title: string;
@@ -33,8 +61,15 @@ export type Space = {
   created_at: string;
 };
 
+export type SpaceWarning = {
+  space_id: string;
+  repo: string;
+  warning: string;
+};
+
 export type Chat = {
   id: string;
+  user_id: string | null;
   space_id: string | null;
   title: string;
   topic: string | null;

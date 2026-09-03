@@ -15,8 +15,17 @@ import uuid
 
 GITHUB_BOT_NAME = "GitHub"
 GITHUB_BOT_EMAIL = "noreply@github.com"
+HATCHERY_CO_AUTHOR = "Co-Authored-By: hatchery-conn[bot] <320700705+hatchery-conn[bot]@users.noreply.github.com>"
 SIGNING_REJECTION = "must have verified signatures"
 SIGNING_GUARD = "HATCHERY_SIGN_IN_PROGRESS"
+GRAPHQL_URL = "https://api.github.com/graphql"
+CREATE_COMMIT_MUTATION = """
+mutation CreateCommit($input: CreateCommitOnBranchInput!) {
+  createCommitOnBranch(input: $input) {
+    commit { oid signature { isValid } }
+  }
+}
+"""
 GIT_CONFIG_ENV = (
     "GIT_CONFIG_GLOBAL",
     "GIT_CONFIG_SYSTEM",
@@ -134,13 +143,17 @@ async def configure_gh(box) -> None:
     )
 
 
-async def configure(box) -> None:
+async def configure(box, identity: tuple[str, str] | None = None) -> None:
     await configure_git_auth(box)
     await configure_gh(box)
-    for key in ("commit.gpgsign", "tag.gpgsign"):
+    values = []
+    if identity is not None:
+        values.extend((("user.name", identity[0]), ("user.email", identity[1])))
+    values.extend((("commit.gpgsign", "false"), ("tag.gpgsign", "false")))
+    for key, value in values:
         await box.run_process(
             "git",
-            ["config", "--global", "--replace-all", key, "false"],
+            ["config", "--global", "--replace-all", key, value],
             check=True,
             capture_output=True,
         )
@@ -317,17 +330,25 @@ def first_unsigned_commit(commits: list[Commit | dict]) -> int:
     return -1
 
 
-def sign_request(commits: list[Commit | dict], owner: str, repo: str, *, base_ref: str = "", env=None) -> dict:
+def sign_request(
+    commits: list[Commit | dict],
+    owner: str,
+    repo: str,
+    *,
+    base_oid: str = "",
+    branch: str = "",
+    env=None,
+) -> dict:
     items = []
     for value in commits:
         commit = value if isinstance(value, Commit) else Commit(**value)
-        item = {"sha": commit.sha, "tree_sha": commit.tree, "parents": list(commit.parents), "message": commit.message}
-        if commit.committer_name and commit.committer_email and not is_signed_by_app(commit):
-            item["original_author"] = {"name": commit.committer_name, "email": commit.committer_email}
-        items.append(item)
-    request = {"repo": {"owner": owner, "name": repo}, "commits": items}
-    if base_ref:
-        request["base_ref"] = base_ref
+        items.append({"sha": commit.sha, "tree_sha": commit.tree, "parents": list(commit.parents), "message": commit.message})
+    request = {
+        "repo": {"owner": owner, "name": repo},
+        "base_oid": base_oid,
+        "branch": branch,
+        "commits": items,
+    }
     if env is not None:
         request["env"] = scrub_git_config_env(env)
     return request
@@ -416,11 +437,16 @@ def _git(repo_dir: str, env: dict[str, str], *args: str) -> str:
 
 
 def _commit_chain(repo_dir: str, env: dict[str, str]) -> tuple[str, list[Commit]]:
-    try:
-        upstream = _git(repo_dir, env, "rev-parse", "@{upstream}").strip()
-        base = _git(repo_dir, env, "merge-base", upstream, "HEAD").strip()
-    except RuntimeError:
-        base = _git(repo_dir, env, "merge-base", "origin/main", "HEAD").strip()
+    candidates = ["@{upstream}", "refs/remotes/origin/HEAD", "refs/remotes/origin/main", "refs/heads/main"]
+    base = ""
+    for candidate in candidates:
+        try:
+            base = _git(repo_dir, env, "merge-base", candidate, "HEAD").strip()
+            break
+        except RuntimeError:
+            continue
+    if not base:
+        raise RuntimeError("could not find the base branch for commit signing")
     separator = "\x1f"
     record = "\x1e"
     output = _git(
@@ -438,33 +464,137 @@ def _commit_chain(repo_dir: str, env: dict[str, str]) -> tuple[str, list[Commit]
     return base, commits
 
 
+def _commit_changes(repo_dir: str, env: dict[str, str], parent: str, commit: str) -> dict:
+    names = subprocess.run(
+        [
+            "/usr/bin/git",
+            "-C",
+            repo_dir,
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "--no-renames",
+            "-r",
+            "-z",
+            parent,
+            commit,
+        ],
+        env=env,
+        capture_output=True,
+        check=True,
+    ).stdout.split(b"\0")
+    additions = []
+    deletions = []
+    for raw_path in names:
+        if not raw_path:
+            continue
+        path = raw_path.decode("utf-8")
+        old = _git(repo_dir, env, "ls-tree", parent, "--", path).split()
+        new = _git(repo_dir, env, "ls-tree", commit, "--", path).split()
+        old_mode = old[0] if old else ""
+        new_mode = new[0] if new else ""
+        if old_mode not in ("", "100644", "100755") or new_mode not in (
+            "",
+            "100644",
+            "100755",
+        ):
+            raise RuntimeError(f"GitHub signing does not support the Git mode for {path}")
+        if old_mode != new_mode and "100755" in (old_mode, new_mode):
+            raise RuntimeError(f"GitHub signing does not support executable mode changes for {path}")
+        if not new:
+            deletions.append({"path": path})
+            continue
+        content = subprocess.run(
+            ["/usr/bin/git", "-C", repo_dir, "show", f"{commit}:{path}"],
+            env=env,
+            capture_output=True,
+            check=True,
+        ).stdout
+        additions.append(
+            {"path": path, "contents": base64.b64encode(content).decode()}
+        )
+    return {"additions": additions, "deletions": deletions}
+
+
+def _commit_message(message: str) -> dict[str, str]:
+    headline, separator, body = message.partition("\n")
+    body = body.rstrip().lstrip("\n")
+    if HATCHERY_CO_AUTHOR not in body:
+        body = f"{body}\n\n{HATCHERY_CO_AUTHOR}".strip()
+    return {"headline": headline, **({"body": body} if separator or body else {})}
+
+
 def _sign_chain(repo_dir: str, env: dict[str, str]) -> None:
-    """Upload commit objects, ask the daemon to recreate them, and adopt the signed tip."""
-    _, commits = _commit_chain(repo_dir, env)
+    """Ask GitHub to replay commits onto a temporary, automatically signed branch."""
+    base, commits = _commit_chain(repo_dir, env)
     first = first_unsigned_commit(commits)
     if first < 0:
         return
     commits = commits[first:]
+    base = commits[0].parents[0] if commits[0].parents else base
     owner, repo = origin_owner_repo(repo_dir)
-    head = commits[-1].sha
-    temporary = f"refs/hatchery/sign-{uuid.uuid4().hex}"
+    branch = f"hatchery/sign-{uuid.uuid4().hex}"
     remote = f"https://github.com/{owner}/{repo}.git"
-    _git(repo_dir, env, "push", remote, f"{head}:{temporary}")
+    _git(repo_dir, env, "push", remote, f"{base}:refs/heads/{branch}")
     try:
-        request = sign_request(commits, owner, repo)
-        url = os.environ.get("HATCHERY_SIGN_URL", "http://127.0.0.1:8787/sign-commits")
-        body = json.dumps(request).encode()
-        with urllib.request.urlopen(urllib.request.Request(url, data=body, headers={"content-type": "application/json"}), timeout=300) as response:
-            result = json.load(response)
-        signed = result.get("signed_shas") or result.get("signedShas") or []
-        if len(signed) != len(commits):
-            raise RuntimeError("signing service returned an incomplete commit chain")
+        request = sign_request(commits, owner, repo, base_oid=base, branch=branch)
+        parent = base
+        for item in request["commits"]:
+            item["file_changes"] = _commit_changes(
+                repo_dir, env, parent, str(item["sha"])
+            )
+            parent = str(item["sha"])
+        signed = []
+        expected = base
+        for item in request["commits"]:
+            variables = {
+                "input": {
+                    "branch": {
+                        "repositoryNameWithOwner": f"{owner}/{repo}",
+                        "branchName": branch,
+                    },
+                    "expectedHeadOid": expected,
+                    "message": _commit_message(str(item.get("message") or "")),
+                    "fileChanges": item["file_changes"],
+                }
+            }
+            body = json.dumps({"query": CREATE_COMMIT_MUTATION, "variables": variables}).encode()
+            api_request = urllib.request.Request(
+                GRAPHQL_URL,
+                data=body,
+                headers={
+                    "authorization": "Bearer sandbox-network-policy-placeholder",
+                    "accept": "application/vnd.github+json",
+                    "content-type": "application/json",
+                    "x-github-api-version": "2026-03-10",
+                },
+            )
+            with urllib.request.urlopen(api_request, timeout=60) as response:
+                result = json.load(response)
+            errors = result.get("errors") if isinstance(result, dict) else None
+            if errors:
+                raise RuntimeError(f"GitHub signed commit failed: {str(errors)[:500]}")
+            created = result["data"]["createCommitOnBranch"]["commit"]
+            if not (created.get("signature") or {}).get("isValid"):
+                raise RuntimeError("GitHub created a commit without a valid signature")
+            expected = str(created["oid"])
+            signed.append(expected)
         _git(repo_dir, env, "fetch", remote, signed[-1])
         _git(repo_dir, env, "reset", "--hard", signed[-1])
     finally:
         subprocess.run(
-            ["/usr/bin/git", "-C", repo_dir, "push", remote, f":{temporary}"],
-            env=env, text=True, capture_output=True, check=False,
+            [
+                "/usr/bin/git",
+                "-C",
+                repo_dir,
+                "push",
+                remote,
+                f":refs/heads/{branch}",
+            ],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
         )
 
 

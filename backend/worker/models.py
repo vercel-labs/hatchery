@@ -56,6 +56,7 @@ class Route(pydantic.BaseModel):
 class Worker(pydantic.BaseModel):
     id: str
     chat_id: str
+    user_id: str | None = None
     sandbox_name: str
     command_topic: str
     title: str

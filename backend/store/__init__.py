@@ -22,9 +22,10 @@ def use_postgres() -> bool:
 
 async def ensure_ready() -> None:
     """Prepare all stores (idempotent DDL / local dirs). Call once at startup."""
-    from store import chats, events, spaces
+    from store import auth, chats, events, spaces
     from worker import store as workers
 
+    await auth.ensure_ready()
     await spaces.ensure_ready()
     await chats.ensure_ready()
     await events.ensure_ready()
