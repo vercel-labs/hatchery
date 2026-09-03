@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
+import { usePathname, useRouter } from "next/navigation";
 import {
   BookMarkedIcon,
   CheckIcon,
@@ -138,13 +140,21 @@ function ChatOriginIcon({ trigger }: { trigger: string }) {
   );
 }
 
-export default function Home() {
+export function AppShell() {
+  const pathname = usePathname();
+  const router = useRouter();
+  const spaceMatch = pathname.match(/^\/spaces\/([^/]+)$/);
+  const chatMatch = pathname.match(/^\/chats\/([^/]+)$/);
+  const selection: Selection = spaceMatch
+    ? { kind: "space", id: decodeURIComponent(spaceMatch[1]) }
+    : chatMatch
+      ? { kind: "chat", id: decodeURIComponent(chatMatch[1]) }
+      : null;
   const [user, setUser] = useState<User | null | undefined>(undefined);
   const [spaces, setSpaces] = useState<Space[] | null>(null);
   const [chats, setChats] = useState<Chat[] | null>(null);
   const [spaceWarnings, setSpaceWarnings] = useState<SpaceWarning[]>([]);
   const [failed, setFailed] = useState(false);
-  const [selection, setSelection] = useState<Selection>(null);
   const [addingSpace, setAddingSpace] = useState(false);
   const [spaceName, setSpaceName] = useState("");
   const [vercelCLI, setVercelCLI] = useState<VercelCLIConnection | null>(null);
@@ -254,12 +264,13 @@ export default function Home() {
       warning.space_id === (selectedSpace?.id ?? selectedChat?.space_id),
   );
 
+  const activeSortSpaceId = selectedSpace?.id ?? sortSpaceId;
   const sortedChats =
-    chats && sortSpaceId
+    chats && activeSortSpaceId
       ? [...chats].sort(
           (a, b) =>
-            Number(b.space_id === sortSpaceId) -
-            Number(a.space_id === sortSpaceId),
+            Number(b.space_id === activeSortSpaceId) -
+            Number(a.space_id === activeSortSpaceId),
         )
       : chats;
 
@@ -274,7 +285,7 @@ export default function Home() {
     if (!res.ok) return;
     const space: Space = await res.json();
     setSpaces((current) => [...(current ?? []), space]);
-    setSelection({ kind: "space", id: space.id });
+    router.push(`/spaces/${encodeURIComponent(space.id)}`);
     setSortSpaceId(space.id);
     setSpaceName("");
     setAddingSpace(false);
@@ -289,7 +300,7 @@ export default function Home() {
     }
     if (!res.ok) return;
     setSpaces((current) => current?.filter((item) => item.id !== space.id) ?? null);
-    if (selection?.kind === "space" && selection.id === space.id) setSelection(null);
+    if (selection?.kind === "space" && selection.id === space.id) router.push("/");
     if (sortSpaceId === space.id) setSortSpaceId(null);
   };
 
@@ -313,7 +324,7 @@ export default function Home() {
     if (!res.ok) return;
     const chat: Chat = await res.json();
     setChats((prev) => [chat, ...(prev ?? [])]);
-    setSelection({ kind: "chat", id: chat.id });
+    router.push(`/chats/${encodeURIComponent(chat.id)}`);
   };
 
   const assignChatSpace = async (chat: Chat, spaceId: string) => {
@@ -498,10 +509,10 @@ export default function Home() {
                       <SidebarMenuItem key={space.id}>
                         <SidebarMenuButton
                           isActive={selectedSpace?.id === space.id}
-                          onClick={() => {
-                            setSelection({ kind: "space", id: space.id });
-                            setSortSpaceId(space.id);
-                          }}
+                          onClick={() => setSortSpaceId(space.id)}
+                          render={
+                            <Link href={`/spaces/${encodeURIComponent(space.id)}`} />
+                          }
                           tooltip={space.name}
                         >
                           <Dot color={space.color} />
@@ -539,8 +550,8 @@ export default function Home() {
                         <SidebarMenuButton
                           className="relative pl-3"
                           isActive={selectedChat?.id === chat.id}
-                          onClick={() =>
-                            setSelection({ kind: "chat", id: chat.id })
+                          render={
+                            <Link href={`/chats/${encodeURIComponent(chat.id)}`} />
                           }
                           tooltip={chat.topic ?? chat.title}
                         >
@@ -700,6 +711,15 @@ export default function Home() {
                   )
                 }
               />
+            ) : selection && spaces !== null && chats !== null ? (
+              <Empty>
+                <EmptyHeader>
+                  <EmptyTitle>Not found</EmptyTitle>
+                  <EmptyDescription>
+                    This {selection.kind} does not exist or you cannot access it.
+                  </EmptyDescription>
+                </EmptyHeader>
+              </Empty>
             ) : (
               <Empty>
                 <EmptyHeader>
