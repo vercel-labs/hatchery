@@ -1,8 +1,29 @@
+import ast
+import inspect
+import textwrap
+
 import ai
 
 from agent import durable
 from store import chats, events
 import worker
+
+
+def test_workflow_body_does_not_import_side_effect_modules():
+    tree = ast.parse(textwrap.dedent(inspect.getsource(durable.run_turn.func)))
+    imported = {
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    }
+    imported.update(
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    )
+
+    assert not imported
 
 
 async def test_durable_tools_keep_effects_non_retriable():
@@ -114,6 +135,29 @@ async def test_deliver_replies_finishes_worker_completion(monkeypatch):
     assert current.completion_message == "done"
     assert current.completion_delivered is True
     assert (await chats.get(chat.id)).status == "done"
+
+
+async def test_active_turn_reconciles_failed_workflow(monkeypatch):
+    await events.append(
+        "chat_1",
+        "turns",
+        {
+            "type": "turn.started",
+            "turn_id": "turn_1",
+            "run_id": "run_1",
+            "origin": "ui",
+            "task_id": None,
+        },
+    )
+
+    class Run:
+        async def status(self):
+            return "failed"
+
+    monkeypatch.setattr(durable.vercel.workflow, "Run", lambda _run_id: Run())
+
+    assert await durable.active_turn("chat_1") is None
+    assert (await events.read("chat_1", "turns"))[-1][1]["type"] == "turn.failed"
 
 
 async def test_start_turn_registers_before_announcing(monkeypatch):

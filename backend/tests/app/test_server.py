@@ -866,6 +866,12 @@ async def test_resume_chat_stream_uses_registered_run(monkeypatch):
     )
     seen = []
 
+    class Run:
+        async def status(self):
+            return "running"
+
+    monkeypatch.setattr(server.vercel.workflow, "Run", lambda _run_id: Run())
+
     async def to_sse(run_id, turn_id):
         seen.append((run_id, turn_id))
         yield "data: [DONE]\n\n"

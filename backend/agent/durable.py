@@ -344,8 +344,37 @@ async def register_turn(turn: TurnInput, run_id: str) -> int:
 
 
 @workflow.step
+async def finish_turn(
+    turn: TurnInput,
+    run_id: str,
+    state: typing.Literal["completed", "failed", "cancelled"],
+    error: str | None = None,
+) -> None:
+    """Persist terminal ownership and UI invalidation outside workflow replay."""
+    from store import events, turns
+
+    await turns.finish(turn.chat_id, turn.turn_id, run_id, state, error)
+    if state == "completed":
+        await events.append(turn.chat_id, "ui", {"type": "messages.changed"})
+
+
+@workflow.step
 async def close_stream(writer: vercel.workflow.WorkflowWritable) -> None:
     await writer.close()
+
+
+def lifecycle_event(
+    event_type: str, turn: TurnInput, error: str | None = None
+) -> dict[str, typing.Any]:
+    """Build replay-safe lifecycle wire data without importing side-effect modules."""
+    data: dict[str, typing.Any] = {
+        "kind": "lifecycle",
+        "type": event_type,
+        "turn_id": turn.turn_id,
+        "chat_id": turn.chat_id,
+        "error": error,
+    }
+    return data
 
 
 @workflow.step
@@ -427,22 +456,10 @@ async def deliver_replies(turn: TurnInput, replies: list[str]) -> None:
 @ai.experimental_telemetry.use_time(vercel.workflow.time_ns)
 async def run_turn(turn: TurnInput) -> None:
     """Run, commit, and deliver one durable dispatcher turn."""
-    from agent import stream
-    from store import events, turns
-
     writer = vercel.workflow.get_writable()
     run_id = vercel.workflow.get_workflow_metadata().run_id
     await register_turn(turn, run_id)
-    await write_lifecycle_event(
-        writer,
-        stream.dump_event(
-            stream.LifecycleEvent(
-                type="turn.started",
-                turn_id=turn.turn_id,
-                chat_id=turn.chat_id,
-            )
-        ),
-    )
+    await write_lifecycle_event(writer, lifecycle_event("turn.started", turn))
     await emit_turn_event(turn.chat_id, "turn.started")
     try:
         prepared = await prepare_turn(turn)
@@ -466,35 +483,33 @@ async def run_turn(turn: TurnInput) -> None:
                 await ship_spans(collector.finished_spans)
             replies = await commit_messages(turn.chat_id, added)
         await deliver_replies(turn, replies)
-        await turns.finish(turn.chat_id, turn.turn_id, run_id, "completed")
-        await write_lifecycle_event(
-            writer,
-            stream.dump_event(
-                stream.LifecycleEvent(
-                    type="turn.completed",
-                    turn_id=turn.turn_id,
-                    chat_id=turn.chat_id,
-                )
-            ),
-        )
-        await events.append(turn.chat_id, "ui", {"type": "messages.changed"})
+        await finish_turn(turn, run_id, "completed")
+        await write_lifecycle_event(writer, lifecycle_event("turn.completed", turn))
     except Exception as error:
-        await turns.finish(turn.chat_id, turn.turn_id, run_id, "failed", str(error))
+        await finish_turn(turn, run_id, "failed", str(error))
         await write_lifecycle_event(
-            writer,
-            stream.dump_event(
-                stream.LifecycleEvent(
-                    type="turn.failed",
-                    turn_id=turn.turn_id,
-                    chat_id=turn.chat_id,
-                    error=str(error),
-                )
-            ),
+            writer, lifecycle_event("turn.failed", turn, str(error))
         )
         await emit_turn_event(turn.chat_id, "turn.failed", str(error))
         raise
     finally:
         await close_stream(writer)
+
+
+async def active_turn(chat_id: str) -> "turns.ActiveTurn | None":
+    """Return a live owner and reconcile workflows that died before cleanup."""
+    from store import turns
+
+    active = await turns.active(chat_id)
+    if active is None:
+        return None
+    status = await vercel.workflow.Run(active.run_id).status()
+    if status in {"pending", "running"}:
+        return active
+    state: typing.Literal["completed", "failed", "cancelled"]
+    state = status if status in {"completed", "failed", "cancelled"} else "failed"
+    await turns.finish(chat_id, active.turn_id, active.run_id, state)
+    return None
 
 
 async def start_turn(
@@ -507,7 +522,7 @@ async def start_turn(
     from store import turns
 
     async with turns.run(chat_id):
-        if await turns.active(chat_id) is not None:
+        if await active_turn(chat_id) is not None:
             raise turns.BusyError(f"chat {chat_id} already has an active turn")
         turn_id = f"turn_{uuid.uuid4().hex}"
         run = await vercel.workflow.start(

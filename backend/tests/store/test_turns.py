@@ -63,5 +63,11 @@ async def test_start_turn_rejects_an_active_owner(monkeypatch):
 
     monkeypatch.setattr(durable.vercel.workflow, "start", start)
     await durable.start_turn("chat_1", "ui")
+
+    class ActiveRun:
+        async def status(self):
+            return "running"
+
+    monkeypatch.setattr(durable.vercel.workflow, "Run", lambda _run_id: ActiveRun())
     with pytest.raises(turns.BusyError):
         await durable.start_turn("chat_1", "worker", "task_1")

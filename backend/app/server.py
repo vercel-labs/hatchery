@@ -603,7 +603,7 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
     incoming, _ = ai.ui.ai_sdk.to_messages(request.messages)
     try:
         async with turns.run(request.chat_id):
-            if await turns.active(request.chat_id) is not None:
+            if await durable.active_turn(request.chat_id) is not None:
                 raise turns.BusyError(
                     f"chat {request.chat_id} already has an active turn"
                 )
@@ -665,7 +665,7 @@ async def resume_chat_stream(chat_id: str):
     """Replay and tail the active durable turn, or return 204 while idle."""
     if await chats.get(chat_id) is None:
         raise fastapi.HTTPException(404, "unknown chat")
-    turn = await turns.active(chat_id)
+    turn = await durable.active_turn(chat_id)
     if turn is None:
         return fastapi.Response(status_code=204)
     return fastapi.responses.StreamingResponse(
