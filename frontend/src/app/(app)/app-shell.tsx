@@ -746,16 +746,14 @@ export function AppShell() {
           <span className="min-w-0 flex-1 truncate text-sm font-medium">
             {selectedSpace?.name ?? selectedChat?.title ?? "hatchery"}
           </span>
-          {selectedChat && (
+          {selectedChat?.archived_at && (
             <Button
               variant="ghost"
               size="sm"
-              onClick={() =>
-                void setChatArchived(selectedChat, selectedChat.archived_at === null)
-              }
+              onClick={() => void setChatArchived(selectedChat, false)}
             >
               <ArchiveIcon />
-              {selectedChat.archived_at ? "Unarchive" : "Archive"}
+              Unarchive
             </Button>
           )}
           {selectedChat?.space_id && spaces && (
