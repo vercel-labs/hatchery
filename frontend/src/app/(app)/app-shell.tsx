@@ -35,6 +35,7 @@ import {
   type VercelCLIConnection,
 } from "@/lib/api";
 import type { ChatUIMessage } from "@/lib/messages";
+import { terminalVisibilityAfterSandboxLoad } from "./app-shell-state";
 import { ChatView } from "@/components/chat";
 import { SandboxForm } from "@/components/sandbox-form";
 import { TerminalPane, type SandboxWorkspace } from "@/components/terminal-pane";
@@ -1167,9 +1168,11 @@ function LiveChat({
       .then((found: SandboxWorkspace[]) => {
         setSandboxes(found);
         onTerminalVisibilityChange((current) =>
-          Object.hasOwn(current, chat.id)
-            ? current
-            : { ...current, [chat.id]: found.length > 0 },
+          terminalVisibilityAfterSandboxLoad(
+            current,
+            chat.id,
+            found.length > 0,
+          ),
         );
       })
       .catch(() => {});
