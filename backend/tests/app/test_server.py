@@ -1098,10 +1098,16 @@ async def test_sandbox_routes_use_chat_scoped_control_plane(monkeypatch):
 
     class Record:
         id = "wrk_1"
+        sandbox_name = "hatchery-wrk_1"
 
         def model_dump(self, exclude=None):
             assert exclude == {"daemon_token"}
-            return {"id": self.id, "chat_id": chat.id, "title": "sandbox"}
+            return {
+                "id": self.id,
+                "chat_id": chat.id,
+                "title": "sandbox",
+                "status": "running",
+            }
 
     async def list_all(chat_id):
         seen["listed"] = chat_id
@@ -1110,6 +1116,10 @@ async def test_sandbox_routes_use_chat_scoped_control_plane(monkeypatch):
     async def create(chat_id, launch):
         seen["created"] = (chat_id, launch)
         return Record()
+
+    async def is_live(name):
+        seen["liveness"] = name
+        return True
 
     task = server.worker.Task(
         id="task_1", chat_id=chat.id, worker_id="wrk_1", title="fix",
@@ -1120,6 +1130,7 @@ async def test_sandbox_routes_use_chat_scoped_control_plane(monkeypatch):
     await server.worker.store.save_task(task)
     monkeypatch.setattr(server.sandbox, "list_all", list_all)
     monkeypatch.setattr(server.sandbox, "create", create)
+    monkeypatch.setattr(server.worker.sandbox, "is_live", is_live)
 
     async with client() as c:
         listed = await c.get(f"/api/chats/{chat.id}/sandboxes")
@@ -1135,10 +1146,13 @@ async def test_sandbox_routes_use_chat_scoped_control_plane(monkeypatch):
     assert listed.status_code == 200
     assert created.status_code == 200
     assert listed.json()[0]["id"] == "wrk_1"
+    assert listed.json()[0]["status"] == "running"
+    assert listed.json()[0]["live"] is True
     assert listed.json()[0]["subagents"][0]["task_id"] == "task_1"
     assert listed.json()[0]["subagents"][0]["fx_session_id"] == "fx_1"
     assert created.json()["id"] == "wrk_1"
     assert seen["listed"] == chat.id
+    assert seen["liveness"] == "hatchery-wrk_1"
     assert seen["created"][0] == chat.id
     assert old.status_code == 404
 

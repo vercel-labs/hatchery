@@ -160,6 +160,15 @@ async def provision(
     return Provisioned(name, routes)
 
 
+async def is_live(name: str) -> bool:
+    """Check sandbox liveness without resuming it."""
+    try:
+        box = await vercel_sandbox.get_sandbox(name=name)
+    except Exception:
+        return False
+    return box.status == vercel_sandbox.SandboxStatus.RUNNING
+
+
 async def stop(name: str) -> None:
     box = await vercel_sandbox.get_sandbox(name=name)
     await box.stop()
