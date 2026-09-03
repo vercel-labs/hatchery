@@ -113,11 +113,6 @@ type Selection =
   | { kind: "chat"; id: string }
   | null;
 
-type TerminalState = {
-  available: boolean;
-  open: boolean;
-};
-
 function Dot({ color }: { color: string | undefined }) {
   return (
     <span
@@ -168,8 +163,8 @@ export function AppShell() {
   const [vercelSheetOpen, setVercelSheetOpen] = useState(false);
   const [vercelError, setVercelError] = useState("");
   const [savingVercel, setSavingVercel] = useState(false);
-  const [terminalStates, setTerminalStates] = useState<
-    Record<string, TerminalState>
+  const [terminalVisibility, setTerminalVisibility] = useState<
+    Record<string, boolean>
   >({});
   // set by space clicks only; chat clicks leave the order alone
   const [sortSpaceId, setSortSpaceId] = useState<string | null>(null);
@@ -272,11 +267,9 @@ export function AppShell() {
     (warning) =>
       warning.space_id === (selectedSpace?.id ?? selectedChat?.space_id),
   );
-  const terminalState = selectedChat
-    ? terminalStates[selectedChat.id]
-    : undefined;
-  const terminalAvailable = terminalState?.available ?? false;
-  const terminalOpen = terminalState?.open ?? false;
+  const terminalOpen = selectedChat
+    ? (terminalVisibility[selectedChat.id] ?? false)
+    : false;
 
   const activeSortSpaceId = selectedSpace?.id ?? sortSpaceId;
   const sortedChats =
@@ -660,22 +653,11 @@ export function AppShell() {
               size="icon-sm"
               aria-label={terminalOpen ? "Close sandbox pane" : "Open sandbox pane"}
               aria-pressed={terminalOpen}
-              title={
-                terminalAvailable
-                  ? terminalOpen
-                    ? "Close sandbox pane"
-                    : "Open sandbox pane"
-                  : "No sandbox available"
-              }
-              disabled={!terminalAvailable}
+              title={terminalOpen ? "Close sandbox pane" : "Open sandbox pane"}
               onClick={() =>
-                setTerminalStates((current) => ({
+                setTerminalVisibility((current) => ({
                   ...current,
-                  [selectedChat.id]: {
-                    ...current[selectedChat.id],
-                    available: true,
-                    open: !terminalOpen,
-                  },
+                  [selectedChat.id]: !terminalOpen,
                 }))
               }
             >
@@ -711,7 +693,7 @@ export function AppShell() {
             chat={selectedChat}
             warning={selectedWarning?.warning}
             terminalOpen={terminalOpen}
-            onTerminalStatesChange={setTerminalStates}
+            onTerminalVisibilityChange={setTerminalVisibility}
             onChatChanged={refreshChats}
             onSpaceAssigned={(spaceId) =>
               setChats((current) => {
@@ -1144,15 +1126,15 @@ function LiveChat({
   chat,
   warning,
   terminalOpen,
-  onTerminalStatesChange,
+  onTerminalVisibilityChange,
   onChatChanged,
   onSpaceAssigned,
 }: {
   chat: Chat;
   warning?: string;
   terminalOpen: boolean;
-  onTerminalStatesChange: React.Dispatch<
-    React.SetStateAction<Record<string, TerminalState>>
+  onTerminalVisibilityChange: React.Dispatch<
+    React.SetStateAction<Record<string, boolean>>
   >;
   onChatChanged: () => void;
   onSpaceAssigned: (spaceId: string) => void;
@@ -1166,34 +1148,32 @@ function LiveChat({
   const [showSandboxForm, setShowSandboxForm] = useState(false);
   const [preferredSandboxId, setPreferredSandboxId] = useState<string>();
 
-  const updateTerminalState = useCallback(
-    (update: (current?: TerminalState) => TerminalState) => {
-      onTerminalStatesChange((current) => ({
+  const setTerminalOpen = useCallback(
+    (open: boolean) => {
+      onTerminalVisibilityChange((current) => ({
         ...current,
-        [chat.id]: update(current[chat.id]),
+        [chat.id]: open,
       }));
     },
-    [chat.id, onTerminalStatesChange],
+    [chat.id, onTerminalVisibilityChange],
   );
 
   const loadSandboxes = useCallback(() => {
     apiFetch(`/api/chats/${chat.id}/sandboxes`)
-      .then((res) => (res.ok ? res.json() : []))
+      .then((res) => {
+        if (!res.ok) throw new Error("could not load sandboxes");
+        return res.json();
+      })
       .then((found: SandboxWorkspace[]) => {
         setSandboxes(found);
-        updateTerminalState((current) => ({
-          available: found.length > 0,
-          open: found.length > 0 ? true : (current?.open ?? false),
-        }));
+        onTerminalVisibilityChange((current) =>
+          Object.hasOwn(current, chat.id)
+            ? current
+            : { ...current, [chat.id]: found.length > 0 },
+        );
       })
-      .catch(() => {
-        setSandboxes([]);
-        updateTerminalState((current) => ({
-          available: false,
-          open: current?.open ?? false,
-        }));
-      });
-  }, [chat.id, updateTerminalState]);
+      .catch(() => {});
+  }, [chat.id, onTerminalVisibilityChange]);
 
   useEffect(() => {
     apiFetch(`/api/chats/${chat.id}/messages`)
@@ -1282,29 +1262,19 @@ function LiveChat({
             className="absolute top-2 right-2"
             aria-label="Open sandbox terminal pane"
             title="Open sandbox terminal pane"
-            onClick={() =>
-              updateTerminalState((current) => ({
-                available: current?.available ?? true,
-                open: true,
-              }))
-            }
+            onClick={() => setTerminalOpen(true)}
           >
             <TerminalIcon />
             terminal
           </Button>
         )}
-        {terminalOpen && sandboxes.length > 0 && (
+        {terminalOpen && (
           <TerminalPane
             key={`${chat.id}:${preferredSandboxId ?? ""}`}
             chatId={chat.id}
             sandboxes={sandboxes}
             preferredSandboxId={preferredSandboxId}
-            onClose={() =>
-              updateTerminalState((current) => ({
-                available: current?.available ?? true,
-                open: false,
-              }))
-            }
+            onClose={() => setTerminalOpen(false)}
             onCreateSandbox={() => setShowSandboxForm(true)}
             onChanged={loadSandboxes}
           />
@@ -1315,10 +1285,7 @@ function LiveChat({
           onOpenChange={setShowSandboxForm}
           onCreated={(sandboxId) => {
             setPreferredSandboxId(sandboxId);
-            updateTerminalState((current) => ({
-              available: current?.available ?? true,
-              open: true,
-            }));
+            setTerminalOpen(true);
             loadSandboxes();
           }}
         />

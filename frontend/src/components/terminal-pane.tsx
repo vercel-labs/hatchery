@@ -361,7 +361,6 @@ export function TerminalPane({
       setSelectedSandboxId(next?.id ?? "");
       setSelectedTabId(tabs(next).at(-1)?.id ?? "");
       onChanged();
-      if (!remaining.length) onClose();
     } finally {
       setDeletingId("");
     }
@@ -411,64 +410,66 @@ export function TerminalPane({
           <XIcon />
         </Button>
       </div>
-      <div className="flex h-9 shrink-0 items-center gap-1 overflow-x-auto border-b px-2">
-        {activeTabs.map((tab, index) => (
-          <div key={tab.id} className="flex shrink-0 items-center">
+      {activeSandbox && (
+        <>
+          <div className="flex h-9 shrink-0 items-center gap-1 overflow-x-auto border-b px-2">
+            {activeTabs.map((tab, index) => (
+              <div key={tab.id} className="flex shrink-0 items-center">
+                <Button
+                  variant={tab.id === activeTab?.id ? "secondary" : "ghost"}
+                  size="xs"
+                  className="max-w-40 rounded-r-none"
+                  onClick={() => setSelectedTabId(tab.id)}
+                >
+                  <span className="truncate">
+                    {tab.title || `${tab.kind === "manual" ? "bash" : "subagent"} ${index + 1}`}
+                  </span>
+                </Button>
+                <Button
+                  variant={tab.id === activeTab?.id ? "secondary" : "ghost"}
+                  size="icon-xs"
+                  className="rounded-l-none"
+                  aria-label={`Close ${tab.title || tab.kind}`}
+                  disabled={deletingId === tab.id}
+                  onClick={() => void deleteTab(tab)}
+                >
+                  <XIcon />
+                </Button>
+              </div>
+            ))}
             <Button
-              variant={tab.id === activeTab?.id ? "secondary" : "ghost"}
-              size="xs"
-              className="max-w-40 rounded-r-none"
-              onClick={() => setSelectedTabId(tab.id)}
-            >
-              <span className="truncate">
-                {tab.title || `${tab.kind === "manual" ? "bash" : "subagent"} ${index + 1}`}
-              </span>
-            </Button>
-            <Button
-              variant={tab.id === activeTab?.id ? "secondary" : "ghost"}
+              variant="ghost"
               size="icon-xs"
-              className="rounded-l-none"
-              aria-label={`Close ${tab.title || tab.kind}`}
-              disabled={deletingId === tab.id}
-              onClick={() => void deleteTab(tab)}
+              className="shrink-0"
+              aria-label="New bash terminal"
+              disabled={
+                creating || activeSandbox.status !== "running" || !sandboxAuthorized
+              }
+              onClick={createTerminal}
             >
-              <XIcon />
+              <PlusIcon />
             </Button>
           </div>
-        ))}
-        <Button
-          variant="ghost"
-          size="icon-xs"
-          className="shrink-0"
-          aria-label="New bash terminal"
-          disabled={
-            creating || activeSandbox?.status !== "running" || !sandboxAuthorized
-          }
-          onClick={createTerminal}
-        >
-          <PlusIcon />
-        </Button>
-      </div>
-      {activeTab && sandboxAuthorized ? (
-        <TaskTerminal key={activeTab.id} chatId={chatId} tab={activeTab} />
-      ) : activeSandbox && !sandboxAuthorized ? (
-        <div className="flex min-h-0 flex-1 items-center justify-center">
-          <Button variant="outline" onClick={loadSandbox}>
-            Load sandbox
-          </Button>
-        </div>
-      ) : (
-        <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-muted-foreground">
-          {activeSandbox?.status === "failed" ? "Sandbox failed" : "Sandbox ready"}
-        </div>
-      )}
-      {activeSandbox && (
-        <div className="flex shrink-0 items-start gap-2 border-t p-2">
-          <pre className="min-w-0 flex-1 overflow-auto text-xs text-muted-foreground">
-            {context}
-          </pre>
-          <CopyContext value={context} />
-        </div>
+          {activeTab && sandboxAuthorized ? (
+            <TaskTerminal key={activeTab.id} chatId={chatId} tab={activeTab} />
+          ) : !sandboxAuthorized ? (
+            <div className="flex min-h-0 flex-1 items-center justify-center">
+              <Button variant="outline" onClick={loadSandbox}>
+                Load sandbox
+              </Button>
+            </div>
+          ) : (
+            <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-muted-foreground">
+              {activeSandbox.status === "failed" ? "Sandbox failed" : "Sandbox ready"}
+            </div>
+          )}
+          <div className="flex shrink-0 items-start gap-2 border-t p-2">
+            <pre className="min-w-0 flex-1 overflow-auto text-xs text-muted-foreground">
+              {context}
+            </pre>
+            <CopyContext value={context} />
+          </div>
+        </>
       )}
     </div>
   );
