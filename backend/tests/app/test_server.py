@@ -28,8 +28,16 @@ def generated_topic(monkeypatch):
     async def slack_user(_team_id, _slack_user_id):
         return "user_test"
 
+    async def github_user(_github_user_id):
+        return "user_test"
+
+    async def get_user(_user_id):
+        return {"id": "user_test", "email": "test@vercel.com"}
+
     monkeypatch.setattr(server.topic, "generate", generate)
     monkeypatch.setattr(server.connections.auth_store, "slack_user", slack_user)
+    monkeypatch.setattr(server.connections.auth_store, "github_user", github_user)
+    monkeypatch.setattr(server.connections.auth_store, "get_user", get_user)
 
 
 async def test_browser_api_requires_session(monkeypatch):
@@ -746,6 +754,24 @@ async def test_slack_legacy_binding_rejects_different_participant(monkeypatch):
     assert binding.token == "slack:C1:1.0"
 
 
+async def test_channel_hub_ignores_linked_but_disallowed_sender(monkeypatch):
+    async def get_user(_user_id):
+        return {"id": "user_test", "email": "removed@vercel.com"}
+
+    monkeypatch.setattr(server.connections.auth_store, "get_user", get_user)
+
+    await server.bot.hub.dispatch(
+        "slack",
+        channels.Inbound(
+            token="C1:1.0",
+            text="revoked",
+            state={"team_id": "T1", "user_id": "U1"},
+        ),
+    )
+
+    assert await chats.list_all() == []
+
+
 async def test_slack_hub_ignores_unconnected_sender(monkeypatch):
     async def slack_user(team_id, slack_user_id):
         assert (team_id, slack_user_id) == ("T1", "U1")
@@ -872,7 +898,7 @@ async def test_ambiguous_repo_classifies_then_runs_original_request(monkeypatch)
         channels.Inbound(
             token="repo:1:issue:7",
             text="fix the docs",
-            state={"kind": "issue", "sender": "octocat"},
+            state={"kind": "issue", "sender": "octocat", "sender_id": "42"},
             repo="vercel/repo",
         ),
     )
@@ -886,7 +912,7 @@ async def test_ambiguous_repo_classifies_then_runs_original_request(monkeypatch)
                 "origin": "github",
                 "author": "octocat",
                 "repo": "vercel/repo",
-                "channel_state": {"kind": "issue", "sender": "octocat"},
+                "channel_state": {"kind": "issue", "sender": "octocat", "sender_id": "42"},
             },
             [first.id, second.id],
         )

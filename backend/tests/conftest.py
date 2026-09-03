@@ -9,9 +9,10 @@ def local_store(monkeypatch, tmp_path):
     monkeypatch.setenv("HATCHERY_PUBLIC_URL", "https://hatchery.example")
     monkeypatch.setenv("VERCEL_APP_CLIENT_ID", "test-client")
     monkeypatch.setenv("VERCEL_APP_CLIENT_SECRET", "test-secret")
+    monkeypatch.setenv("HATCHERY_ALLOWED_EMAILS", "test@vercel.com")
 
     async def session_user(_session_id):
-        return {"id": "user_test"}
+        return {"id": "user_test", "email": "test@vercel.com"}
 
     from app import server
 

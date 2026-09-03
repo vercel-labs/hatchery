@@ -84,7 +84,10 @@ async def finish_github(user: dict) -> fastapi.responses.RedirectResponse:
         "installation_id": token.installation_id,
         "connected_at": datetime.datetime.now(datetime.UTC).isoformat(),
     }
-    await auth_store.save_github_connection(user["id"], connection)
+    try:
+        await auth_store.save_github_connection(user["id"], connection)
+    except auth_store.GitHubIdentityConflict as error:
+        raise fastapi.HTTPException(409, "GitHub account is already connected") from error
     return fastapi.responses.RedirectResponse("/")
 
 

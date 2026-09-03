@@ -135,6 +135,7 @@ class GitHubChannel:
             "number": number,
             "root_comment_id": root,
             "comment_id": comment.get("id"),
+            "sender_id": str(sender.get("id", "")),
         }
         return channels.Inbound(
             token=token,

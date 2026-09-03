@@ -56,7 +56,7 @@ def issue_comment(body: str = "@e2e-bot please port this", pull: bool = False, *
         "comment": {"id": 900, "body": body, "html_url": "https://github.com/v/r/issues/5#issuecomment-900"},
         "issue": issue,
         "repository": {"id": 42, "full_name": "vercel/repo"},
-        "sender": {"login": "andrey", "type": "User"},
+        "sender": {"id": 7, "login": "andrey", "type": "User"},
     }
     payload.update(overrides)
     return payload
@@ -90,6 +90,7 @@ async def test_issue_comment_mention_dispatches():
     assert 'repository="vercel/repo"' in inbound.text
     assert inbound.state["kind"] == "issue"
     assert inbound.state["number"] == 5
+    assert inbound.state["sender_id"] == "7"
 
 
 async def test_pr_comment_gets_pull_token():

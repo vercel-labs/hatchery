@@ -43,6 +43,15 @@ CREATE TABLE IF NOT EXISTS hatchery_slack_identities (
     CONSTRAINT hatchery_slack_identity PRIMARY KEY (team_id, slack_user_id),
     CONSTRAINT hatchery_slack_user UNIQUE (user_id)
 );
+CREATE TABLE IF NOT EXISTS hatchery_github_identities (
+    github_user_id TEXT PRIMARY KEY,
+    user_id        TEXT NOT NULL REFERENCES hatchery_users(id) ON DELETE CASCADE UNIQUE,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+INSERT INTO hatchery_github_identities (github_user_id, user_id)
+SELECT data->'github'->>'id', id FROM hatchery_users
+WHERE data->'github'->>'id' IS NOT NULL
+ON CONFLICT DO NOTHING;
 """
 
 
@@ -95,12 +104,52 @@ async def delete_connection(user_id: str, name: str) -> None:
     )
 
 
+class GitHubIdentityConflict(RuntimeError):
+    """A GitHub account is already linked to another Hatchery user."""
+
+
 async def save_github_connection(user_id: str, connection: dict) -> None:
-    await save_connection(user_id, "github", connection)
+    pool = await db.pool()
+    try:
+        async with pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                "DELETE FROM hatchery_github_identities WHERE user_id = $1", user_id
+            )
+            await conn.execute(
+                "INSERT INTO hatchery_github_identities (github_user_id, user_id) VALUES ($1, $2)",
+                connection["id"],
+                user_id,
+            )
+            result = await conn.execute(
+                "UPDATE hatchery_users SET data = jsonb_set(data, '{github}', $2::jsonb) WHERE id = $1",
+                user_id,
+                json.dumps(connection),
+            )
+            if result != "UPDATE 1":
+                raise RuntimeError("unknown Hatchery user")
+    except asyncpg.UniqueViolationError as error:
+        raise GitHubIdentityConflict("GitHub account is already connected") from error
+
+
+async def github_user(github_user_id: str) -> str | None:
+    if not github_user_id:
+        return None
+    row = await (await db.pool()).fetchrow(
+        "SELECT user_id FROM hatchery_github_identities WHERE github_user_id = $1",
+        github_user_id,
+    )
+    return str(row["user_id"]) if row is not None else None
 
 
 async def delete_github_connection(user_id: str) -> None:
-    await delete_connection(user_id, "github")
+    pool = await db.pool()
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute(
+            "DELETE FROM hatchery_github_identities WHERE user_id = $1", user_id
+        )
+        await conn.execute(
+            "UPDATE hatchery_users SET data = data - 'github' WHERE id = $1", user_id
+        )
 
 
 class SlackIdentityConflict(RuntimeError):
