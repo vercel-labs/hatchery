@@ -48,7 +48,9 @@ async def test_suggest_uses_luna_and_space_description(monkeypatch):
 
     launch = await sandbox.suggest(space)
 
-    assert launch == sandbox.Launch(title="docs", repos=["acme/docs"], ports=[3000])
+    assert launch == sandbox.Launch(
+        title="docs", repos=["acme/docs"], ports=[3000], size="small"
+    )
     assert seen["model"] == "openai/gpt-5.6-luna"
     assert seen["output_type"] is sandbox.Launch
     assert seen["params"].output.max_tokens == 4096
@@ -88,6 +90,14 @@ async def test_sandbox_operations_delegate_with_chat_scope(monkeypatch):
     assert seen["chat_id"] == "chat_1"
     assert seen["user_id"] == "user_1"
     assert seen["spec"].repos == ["acme/app"]
+    assert seen["spec"].size == "small"
+    assert seen["spec"].resolved_resources() == (2, 4096)
+
+
+def test_launch_accepts_only_supported_sizes():
+    assert sandbox.Launch(size="big").size == "big"
+    with pytest.raises(ValueError):
+        sandbox.Launch(size="medium")
 
 
 async def test_launch_task_immediately_invalidates_ui(monkeypatch):

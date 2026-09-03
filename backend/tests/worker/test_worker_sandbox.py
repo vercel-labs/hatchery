@@ -104,6 +104,12 @@ async def test_provision_creates_persistent_sandbox_and_checks_daemon(monkeypatc
         "Authorization": "Bearer user-token"
     }
     assert calls["options"]["persistent"] is True
+    assert calls["options"]["resources"].vcpus == 2
+    assert calls["options"]["resources"].memory == 4096
+    assert calls["options"]["tags"] == {
+        "hatchery-worker": "wrk_1",
+        "hatchery-size": "small",
+    }
     assert calls["options"]["execution_time_limit"] == sandbox.EXECUTION_TIME_LIMIT
     assert calls["update"] == {"execution_time_limit": sandbox.EXECUTION_TIME_LIMIT}
     bootstrap = calls["runs"][0][1][1]
@@ -140,6 +146,24 @@ async def test_provision_creates_persistent_sandbox_and_checks_daemon(monkeypatc
         "https://daemon.example/health",
         {"authorization": "Bearer secret"},
     )
+
+
+def test_worker_spec_resolves_semantic_and_legacy_resources():
+    assert models.WorkerSpec().resolved_resources() == (2, 4096)
+    assert models.WorkerSpec(size="big").resolved_resources() == (4, 8192)
+    legacy = models.WorkerSpec.model_validate({"vcpus": 6, "memory": 12288})
+    assert legacy.size is None
+    assert legacy.resolved_resources() == (6, 12288)
+
+
+def test_worker_spec_rejects_conflicting_resources_and_preserves_partial_legacy_values():
+    import pytest
+
+    with pytest.raises(ValueError, match="cannot be combined"):
+        models.WorkerSpec(size="big", vcpus=4, memory=8192)
+    legacy = models.WorkerSpec.model_validate({"vcpus": 2})
+    assert legacy.size is None
+    assert legacy.resolved_resources() == (2, None)
 
 
 async def test_is_live_passively_checks_running_status(monkeypatch):

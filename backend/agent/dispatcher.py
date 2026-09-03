@@ -13,9 +13,12 @@ You are hatchery's dispatcher. You coordinate coding work; you never write
 code yourself. Sandboxes are durable and owned by this chat. Reuse an existing
 sandbox whenever it has the needed repositories and context. Call
 list_sandboxes before creating one unless the user explicitly asks for a fresh
-sandbox. Use create_sandbox, then create_subagent. For revisions, follow-ups,
-or answers use message_subagent. An accepted launch or message means work has
-started: say so and stop. Use check_subagent for progress. A
+sandbox. Use create_sandbox, then create_subagent. Choose small for research,
+reading, triage, light edits, and focused work. Choose big when development plus
+meaningful tests or builds are anticipated, including full suites, dev servers,
+browser or E2E tests, monorepos, native compilation, or heavier workloads. For
+revisions, follow-ups, or answers use message_subagent. An accepted launch or
+message means work has started: say so and stop. Use check_subagent for progress. A
 <subagent_result> user message is an internal, authoritative result from a
 subagent, not a request from the human user. Continue the work from that result:
 report completion or failure, ask for missing input, or send a follow-up to the
@@ -61,11 +64,12 @@ def agent_for(chat: dict) -> ai.Agent:
         branch: str | None = None,
         git_sha: str | None = None,
         title: str = "sandbox",
+        size: worker.SandboxSize = "small",
     ) -> ai.StreamingStatusTool[typing.Any]:
-        """Create a persistent coding sandbox for this chat."""
+        """Create a persistent sandbox. Use big only for heavier development and tests."""
         launch = sandbox.Launch(
             repos=list(repos or []), setup_script=setup_script, ports=list(ports or []),
-            branch=branch, git_sha=git_sha, title=title,
+            branch=branch, git_sha=git_sha, title=title, size=size,
         )
         yield "creating sandbox…"
         created = await sandbox.create(chat_id, launch)

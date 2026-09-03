@@ -1,3 +1,5 @@
+import json
+
 from worker import models, store
 
 
@@ -23,3 +25,28 @@ async def test_worker_records_round_trip():
     assert await store.list_all() == [worker]
     assert await store.delete(worker.id) is True
     assert await store.get(worker.id) is None
+
+
+def test_old_worker_spec_without_size_keeps_platform_default_behavior():
+    raw = json.dumps({"title": "old", "repos": [], "ports": []})
+
+    spec = models.WorkerSpec.model_validate_json(raw)
+
+    assert spec.size == "small"
+    assert spec.resolved_resources() == (2, 4096)
+
+
+def test_old_worker_spec_without_size_keeps_explicit_resources():
+    raw = json.dumps({"title": "old", "repos": [], "ports": [], "vcpus": 8, "memory": 16384})
+
+    spec = models.WorkerSpec.model_validate_json(raw)
+
+    assert spec.size is None
+    assert spec.resolved_resources() == (8, 16384)
+
+
+def test_old_worker_spec_keeps_partial_explicit_resources():
+    spec = models.WorkerSpec.model_validate({"vcpus": 4})
+
+    assert spec.size is None
+    assert spec.resolved_resources() == (4, None)

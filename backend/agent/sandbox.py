@@ -13,7 +13,9 @@ import worker
 class Launch(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(
         extra="forbid",
-        json_schema_extra={"required": ["title", "repos", "setup_script", "ports", "branch", "git_sha"]},
+        json_schema_extra={
+            "required": ["title", "repos", "setup_script", "ports", "branch", "git_sha", "size"]
+        },
     )
 
     title: str = "sandbox"
@@ -22,6 +24,7 @@ class Launch(pydantic.BaseModel):
     ports: list[int] = []
     branch: str | None = None
     git_sha: str | None = None
+    size: worker.SandboxSize = "small"
 
     @pydantic.field_validator("title")
     @classmethod
@@ -60,7 +63,11 @@ Select only relevant owner/repo repositories from the space. The first repo is
 primary. Copy an applicable recommended setup script verbatim; otherwise omit
 it. Expose only ports the described project is likely to use, at most four.
 Use a short plain title. Omit branch and git_sha unless the description names
-them explicitly. Return only the requested structured output."""
+them explicitly. Use small for research, reading, triage, light edits, and
+focused work. Use big only when development plus meaningful tests or builds
+are anticipated, including full suites, dev servers, browser or E2E tests,
+monorepos, native compilation, or heavier workloads. Return only the requested
+structured output."""
 
 
 async def suggest(space: models.Space) -> Launch:

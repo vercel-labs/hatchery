@@ -18,6 +18,8 @@ def test_system_prompt_describes_worker_flow():
     prompt = dispatcher.system_prompt(space())
     assert "Sandboxes are durable" in prompt
     assert "create_subagent" in prompt
+    assert "Choose small" in prompt
+    assert "Choose big" in prompt
     assert "vercel/vercel-py" in prompt
 
 
@@ -38,6 +40,25 @@ async def test_worker_tools_are_chat_scoped(monkeypatch):
     }
     assert await tools["list_sandboxes"].fn() == []
     assert seen["chat_id"] == "chat_1"
+
+
+async def test_create_sandbox_forwards_size(monkeypatch):
+    seen = {}
+    created = type("Worker", (), {"model_dump": lambda self, **_kwargs: {"id": "wrk_1"}})()
+
+    async def create(chat_id, launch):
+        seen.update(chat_id=chat_id, launch=launch)
+        return created
+
+    monkeypatch.setattr(dispatcher.sandbox, "create", create)
+    agent = dispatcher.agent_for({"id": "chat_1"})
+    tool = next(tool for tool in agent.tools if tool.name == "create_sandbox")
+
+    updates = [update async for update in tool.fn(size="big")]
+
+    assert updates[-1] == {"id": "wrk_1"}
+    assert seen["chat_id"] == "chat_1"
+    assert seen["launch"].size == "big"
 
 
 async def test_create_subagent_returns_task_id(monkeypatch):

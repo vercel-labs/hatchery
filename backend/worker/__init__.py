@@ -1,6 +1,6 @@
 """Durable coding workers backed by Vercel Sandbox."""
 
-from worker.models import Task, Terminal, Worker, WorkerSpec
+from worker.models import SandboxSize, Task, Terminal, Worker, WorkerSpec
 from worker.worker import (
     cancel_task,
     create,
@@ -20,6 +20,7 @@ from worker.worker import (
 )
 
 __all__ = (
+    "SandboxSize",
     "Task",
     "Terminal",
     "Worker",

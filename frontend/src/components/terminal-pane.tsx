@@ -35,7 +35,12 @@ export type SandboxWorkspace = {
   status: string;
   live: boolean;
   created_at: string;
-  spec: { repos: string[] };
+  spec: {
+    repos: string[];
+    size?: "small" | "big" | null;
+    vcpus?: number | null;
+    memory?: number | null;
+  };
   routes: Array<{ port: number; url: string }>;
   subagents: SubagentTask[];
   terminals: ManualTerminal[];

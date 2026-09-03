@@ -15,6 +15,14 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { apiBase, apiFetch } from "@/lib/api";
@@ -26,6 +34,7 @@ type Launch = {
   ports: number[];
   branch: string | null;
   git_sha: string | null;
+  size: "small" | "big";
 };
 
 const emptyLaunch: Launch = {
@@ -35,6 +44,7 @@ const emptyLaunch: Launch = {
   ports: [],
   branch: null,
   git_sha: null,
+  size: "small",
 };
 
 export function SandboxForm({
@@ -108,12 +118,12 @@ export function SandboxForm({
         <form className="flex min-h-0 flex-1 flex-col" onSubmit={create}>
           {suggesting ? (
             <FieldGroup className="overflow-y-auto px-4 pb-4" aria-busy="true">
-              {["Title", "Repositories", "Setup script", "Ports", "Primary branch", "Primary git SHA"].map(
+              {["Title", "Size", "Repositories", "Setup script", "Ports", "Primary branch", "Primary git SHA"].map(
                 (label, index) => (
                   <Field key={label} data-disabled>
                     <FieldLabel>{label}</FieldLabel>
-                    <Skeleton className={index === 2 ? "h-32 w-full" : "h-9 w-full"} />
-                    {(index === 1 || index === 3) && <Skeleton className="h-4 w-2/3" />}
+                    <Skeleton className={index === 3 ? "h-32 w-full" : "h-9 w-full"} />
+                    {(index === 1 || index === 2 || index === 4) && <Skeleton className="h-4 w-2/3" />}
                   </Field>
                 ),
               )}
@@ -128,6 +138,26 @@ export function SandboxForm({
                 value={launch.title}
                 onChange={(event) => setLaunch({ ...launch, title: event.target.value })}
               />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="sandbox-size">Size</FieldLabel>
+              <Select
+                value={launch.size}
+                onValueChange={(size) => setLaunch({ ...launch, size: size as Launch["size"] })}
+              >
+                <SelectTrigger id="sandbox-size" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    <SelectItem value="small">Small — 2 vCPU / 4 GB</SelectItem>
+                    <SelectItem value="big">Big — 4 vCPU / 8 GB</SelectItem>
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+              <FieldDescription>
+                Big is for development with meaningful tests, builds, or dev servers.
+              </FieldDescription>
             </Field>
             <Field>
               <FieldLabel htmlFor="sandbox-repos">Repositories</FieldLabel>

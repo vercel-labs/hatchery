@@ -105,6 +105,7 @@ async def create_sandbox_step(
     branch: str | None,
     git_sha: str | None,
     title: str,
+    size: typing.Literal["small", "big"],
 ) -> dict[str, typing.Any]:
     from agent import sandbox
 
@@ -117,6 +118,7 @@ async def create_sandbox_step(
             branch=branch,
             git_sha=git_sha,
             title=title,
+            size=size,
         ),
     )
     return created.model_dump(exclude={"daemon_token"})
@@ -183,8 +185,9 @@ async def create_sandbox(
     branch: str | None = None,
     git_sha: str | None = None,
     title: str = "sandbox",
+    size: typing.Literal["small", "big"] = "small",
 ) -> dict[str, typing.Any]:
-    """Create a persistent coding sandbox for this chat."""
+    """Create a persistent sandbox. Use big only for heavier development and tests."""
     return await create_sandbox_step(
         current_agent.get().chat_id,
         list(repos or []),
@@ -193,6 +196,7 @@ async def create_sandbox(
         branch,
         git_sha,
         title,
+        size,
     )
 
 
