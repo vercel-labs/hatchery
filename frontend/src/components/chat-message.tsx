@@ -66,7 +66,14 @@ export function ChatMessage({ message }: { message: ChatUIMessage }) {
                   via slack
                 </span>
               )}
-              <BubbleContent>{text}</BubbleContent>
+              <BubbleContent>
+                <TextPart
+                  text={text}
+                  role={message.role}
+                  preserveLineBreaks
+                  className="px-0 [--typeset-size:14px] [--typeset-leading:1.625] [--typeset-flow:0.875em]"
+                />
+              </BubbleContent>
             </Bubble>
           )}
         </MessageContent>
