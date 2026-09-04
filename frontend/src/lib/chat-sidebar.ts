@@ -6,6 +6,12 @@ export type ChatSidebarText = {
   label: string;
 };
 
+export function chatAttentionLabel(chat: Chat): string | null {
+  if (chat.attention_reason === "result_available") return "Result available";
+  if (chat.attention_reason === "blocked") return "Blocked";
+  return null;
+}
+
 export function chatSidebarText(chat: Chat): ChatSidebarText {
   const author = chat.author_display_name?.trim() || null;
   const topic = chat.topic?.trim();

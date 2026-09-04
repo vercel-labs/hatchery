@@ -155,6 +155,29 @@ async def claim_user(
         return chat
 
 
+async def set_attention(
+    chat_id: str, reason: models.AttentionReason | None
+) -> models.Chat | None:
+    if store.use_postgres():
+        from store import db
+
+        row = await (await db.pool()).fetchrow(
+            "UPDATE hatchery_chats SET data = data || "
+            "jsonb_build_object('attention_reason', $2::text) "
+            "WHERE id = $1 RETURNING data",
+            chat_id,
+            reason,
+        )
+        return _chat(row["data"]) if row is not None else None
+    with _lock:
+        chat = _read_chat(chat_id)
+        if chat is None:
+            return None
+        chat.attention_reason = reason
+        _write_chat(chat)
+        return chat
+
+
 async def set_archived(chat_id: str, archived: bool) -> models.Chat | None:
     current = await get(chat_id)
     if current is None or (current.archived_at is not None) == archived:

@@ -202,6 +202,18 @@ async def test_legacy_chat_without_archive_field_loads_as_active():
     assert loaded.author_display_name is None
 
 
+async def test_attention_reason_is_persisted_and_cleared():
+    chat = await chats.create(None, "work")
+
+    required = await chats.set_attention(chat.id, "result_available")
+    assert required is not None and required.attention_reason == "result_available"
+    assert (await chats.get(chat.id)).attention_reason == "result_available"
+
+    cleared = await chats.set_attention(chat.id, None)
+    assert cleared is not None and cleared.attention_reason is None
+    assert (await chats.get(chat.id)).attention_reason is None
+
+
 async def test_archive_and_unarchive_are_persisted_and_idempotent():
     chat = await chats.create(None, "work")
 

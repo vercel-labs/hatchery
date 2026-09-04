@@ -34,6 +34,7 @@ async def test_durable_tools_keep_effects_non_retriable():
     assert durable.create_sandbox_step.max_retries == 0
     assert durable.create_subagent_step.max_retries == 0
     assert durable.message_subagent_step.max_retries == 0
+    assert durable.require_attention_step.max_retries == 0
     assert durable.deliver_replies.max_retries == 0
 
 
@@ -87,6 +88,33 @@ async def test_tools_read_trusted_chat_id_from_current_agent(monkeypatch):
 
     assert calls == ["chat_1"]
     assert durable.list_sandboxes.tool.spec.params["properties"] == {}
+
+
+async def test_durable_require_attention_uses_trusted_chat_id(monkeypatch):
+    calls = []
+
+    async def step(chat_id, reason):
+        calls.append((chat_id, reason))
+        return {"reason": reason}
+
+    class Writer:
+        async def write(self, value):
+            pass
+
+    monkeypatch.setattr(durable, "require_attention_step", step)
+    agent = durable.DurableDispatcher("chat_trusted", Writer())
+    token = durable.current_agent.set(agent)
+    try:
+        assert await durable.require_attention.fn("result_available") == {
+            "reason": "result_available"
+        }
+    finally:
+        durable.current_agent.reset(token)
+
+    assert calls == [("chat_trusted", "result_available")]
+    properties = durable.require_attention.tool.spec.params["properties"]
+    assert set(properties) == {"reason"}
+    assert properties["reason"]["enum"] == ["result_available", "blocked"]
 
 
 async def test_create_sandbox_tool_forwards_size(monkeypatch):

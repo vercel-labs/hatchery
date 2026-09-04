@@ -526,6 +526,48 @@ async def test_chat_archive_rejects_active_turn(monkeypatch):
     assert (await chats.get(chat.id)).archived_at is None
 
 
+async def test_mark_chat_seen_clears_attention_and_notifies():
+    chat = await chats.create(None, "work", user_id="user_test")
+    await chats.set_attention(chat.id, "blocked")
+
+    async with client() as c:
+        loaded = await c.get(f"/api/chats/{chat.id}/messages")
+        still_required = await chats.get(chat.id)
+        response = await c.post(
+            f"/api/chats/{chat.id}/seen", headers={"origin": "http://test"}
+        )
+
+    assert loaded.status_code == 200
+    assert still_required is not None and still_required.attention_reason == "blocked"
+    assert response.status_code == 200
+    assert response.json()["attention_reason"] is None
+    assert (await chats.get(chat.id)).attention_reason is None
+    assert await events.read(chat.id, "ui") == [(0, {"type": "chat.changed"})]
+
+
+async def test_mark_chat_seen_is_authenticated_and_owner_scoped(monkeypatch):
+    chat = await chats.create(None, "work", user_id="user_other")
+    await chats.set_attention(chat.id, "result_available")
+
+    async with client() as c:
+        hidden = await c.post(
+            f"/api/chats/{chat.id}/seen", headers={"origin": "http://test"}
+        )
+
+    async def current_user(_request):
+        return None
+
+    monkeypatch.setattr(server.auth, "current_user", current_user)
+    async with client() as c:
+        unauthenticated = await c.post(
+            f"/api/chats/{chat.id}/seen", headers={"origin": "http://test"}
+        )
+
+    assert hidden.status_code == 404
+    assert unauthenticated.status_code == 401
+    assert (await chats.get(chat.id)).attention_reason == "result_available"
+
+
 async def test_chat_space_assignment():
     destination = await server.spaces.create("docs")
     chat = await chats.create(None, "work")

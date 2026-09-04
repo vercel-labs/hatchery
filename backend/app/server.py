@@ -693,6 +693,15 @@ class AssignChatSpaceRequest(pydantic.BaseModel):
     space_id: str
 
 
+@app.post("/api/chats/{chat_id}/seen")
+async def mark_chat_seen(chat_id: str) -> models.Chat:
+    updated = await chats.set_attention(chat_id, None)
+    if updated is None:
+        raise fastapi.HTTPException(404, "unknown chat")
+    await events.append(chat_id, "ui", {"type": "chat.changed"})
+    return updated
+
+
 @app.patch("/api/chats/{chat_id}/space")
 async def assign_chat_space(chat_id: str, request: AssignChatSpaceRequest) -> models.Chat:
     if await spaces.get(request.space_id) is None:
