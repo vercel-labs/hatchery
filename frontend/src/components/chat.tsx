@@ -1,6 +1,6 @@
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { PlusIcon } from "lucide-react";
 
 import { ChatMessage } from "@/components/chat-message";
@@ -21,7 +21,7 @@ import {
   MessageScrollerProvider,
   MessageScrollerViewport,
 } from "@/components/ui/message-scroller";
-import { apiBase, apiFetch } from "@/lib/api";
+import { apiBase, apiFetch, type Chat } from "@/lib/api";
 import { submissionLabel } from "@/components/chat-status";
 import type { ChatUIMessage } from "@/lib/messages";
 
@@ -32,7 +32,9 @@ export function ChatView({
   messageRevision,
   streamGeneration,
   archived,
+  attentionReason,
   onMessagesChange,
+  onSeen,
   onUnarchive,
   onCreateSandbox,
 }: {
@@ -42,7 +44,9 @@ export function ChatView({
   messageRevision: number;
   streamGeneration: number;
   archived: boolean;
+  attentionReason: Chat["attention_reason"];
   onMessagesChange?: (messages: ChatUIMessage[]) => void;
+  onSeen: (chat: Chat) => void;
   onUnarchive: () => void;
   onCreateSandbox: () => void;
 }) {
@@ -78,6 +82,8 @@ export function ChatView({
   });
 
   const attachedGeneration = useRef(streamGeneration);
+  const [markingSeen, setMarkingSeen] = useState(false);
+  const [seenError, setSeenError] = useState("");
 
   useEffect(() => {
     onMessagesChange?.(messages);
@@ -114,6 +120,22 @@ export function ChatView({
   }, [chatId, messageRevision, setMessages, status]);
 
   const isStreaming = status === "submitted" || status === "streaming";
+
+  const markAsSeen = async () => {
+    setMarkingSeen(true);
+    setSeenError("");
+    try {
+      const response = await apiFetch(`/api/chats/${chatId}/seen`, {
+        method: "POST",
+      });
+      if (!response.ok) throw new Error();
+      onSeen(await response.json());
+    } catch {
+      setSeenError("Could not mark this chat as seen.");
+    } finally {
+      setMarkingSeen(false);
+    }
+  };
 
   return (
     <div className="mx-auto flex min-h-0 w-full flex-1 flex-col">
@@ -172,6 +194,24 @@ export function ChatView({
             <AlertTitle>Request failed</AlertTitle>
             <AlertDescription>{error.message}</AlertDescription>
           </Alert>
+        )}
+        {seenError && (
+          <Alert variant="destructive">
+            <AlertTitle>Request failed</AlertTitle>
+            <AlertDescription>{seenError}</AlertDescription>
+          </Alert>
+        )}
+        {attentionReason && (
+          <div className="flex justify-end">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={markingSeen}
+              onClick={markAsSeen}
+            >
+              {markingSeen ? "Marking as seen…" : "Mark as seen"}
+            </Button>
+          </div>
         )}
         {archived ? (
           <Alert>

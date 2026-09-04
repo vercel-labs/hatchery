@@ -1,6 +1,11 @@
 """Core entities: spaces and chats. (Named models.py: types.py would shadow stdlib types.)"""
 
+import typing
+
 import pydantic
+
+
+AttentionReason = typing.Literal["result_available", "blocked"]
 
 
 class Resource(pydantic.BaseModel):
@@ -50,5 +55,6 @@ class Chat(pydantic.BaseModel):
     status: str = "queued"  # queued | running | done | failed
     sandbox_id: str | None = None
     artifact: str | None = None  # report text or issue/pr url
+    attention_reason: AttentionReason | None = None
     archived_at: str | None = None
     created_at: str

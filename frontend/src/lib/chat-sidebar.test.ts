@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { Chat } from "./api.ts";
-import { chatSidebarText } from "./chat-sidebar.ts";
+import { chatAttentionLabel, chatSidebarText } from "./chat-sidebar.ts";
 
 function chat(overrides: Partial<Chat> = {}): Chat {
   return {
@@ -16,11 +16,21 @@ function chat(overrides: Partial<Chat> = {}): Chat {
     status: "queued",
     sandbox_id: null,
     artifact: null,
+    attention_reason: null,
     archived_at: null,
     created_at: "2026-09-04T00:00:00Z",
     ...overrides,
   };
 }
+
+test("labels persisted attention reasons", () => {
+  assert.equal(
+    chatAttentionLabel(chat({ attention_reason: "result_available" })),
+    "Result available",
+  );
+  assert.equal(chatAttentionLabel(chat({ attention_reason: "blocked" })), "Blocked");
+  assert.equal(chatAttentionLabel(chat()), null);
+});
 
 test("combines the persisted author and possessive fragment", () => {
   assert.deepEqual(chatSidebarText(chat({ topic: "'s cron jobs work" })), {

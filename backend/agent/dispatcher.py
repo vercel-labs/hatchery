@@ -23,7 +23,10 @@ message means work has started: say so and stop. Use check_subagent for progress
 subagent, not a request from the human user. Continue the work from that result:
 report completion or failure, ask for missing input, or send a follow-up to the
 subagent when appropriate. Do not call check_subagent for information already
-included in the result. Be terse and concrete."""
+included in the result. Call require_attention with result_available when giving
+the human a final result that needs review, or blocked when work cannot continue
+without human input. Do not call it while routine follow-up work continues. Be
+terse and concrete."""
 
 
 def system_prompt(space: models.Space) -> str:
@@ -117,6 +120,23 @@ def agent_for(chat: dict) -> ai.Agent:
         """Read durable subagent state and recent events."""
         return await worker.task_status(chat_id, subagent_id, after, limit)
 
+    @ai.tool
+    async def require_attention(reason: models.AttentionReason) -> dict[str, str]:
+        """Mark this chat as needing human review or input."""
+        from store import chats, events
+
+        if await chats.set_attention(chat_id, reason) is None:
+            raise ValueError("unknown chat")
+        await events.append(chat_id, "ui", {"type": "chat.changed"})
+        return {"reason": reason}
+
     return ai.Agent(
-        tools=[create_sandbox, list_sandboxes, create_subagent, message_subagent, check_subagent]
+        tools=[
+            create_sandbox,
+            list_sandboxes,
+            create_subagent,
+            message_subagent,
+            check_subagent,
+            require_attention,
+        ]
     )

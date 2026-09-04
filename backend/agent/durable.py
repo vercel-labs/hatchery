@@ -172,6 +172,18 @@ async def check_subagent_step(
     return await worker.task_status(chat_id, subagent_id, after, limit)
 
 
+@workflow.step(max_retries=0)
+async def require_attention_step(
+    chat_id: str, reason: typing.Literal["result_available", "blocked"]
+) -> dict[str, str]:
+    from store import chats, events
+
+    if await chats.set_attention(chat_id, reason) is None:
+        raise ValueError("unknown chat")
+    await events.append(chat_id, "ui", {"type": "chat.changed"})
+    return {"reason": reason}
+
+
 current_agent: contextvars.ContextVar["DurableDispatcher"] = contextvars.ContextVar(
     "current_agent"
 )
@@ -241,12 +253,21 @@ async def check_subagent(
     )
 
 
+@ai.tool
+async def require_attention(
+    reason: typing.Literal["result_available", "blocked"],
+) -> dict[str, str]:
+    """Mark this chat as needing human review or input."""
+    return await require_attention_step(current_agent.get().chat_id, reason)
+
+
 TOOLS = [
     create_sandbox,
     list_sandboxes,
     create_subagent,
     message_subagent,
     check_subagent,
+    require_attention,
 ]
 
 

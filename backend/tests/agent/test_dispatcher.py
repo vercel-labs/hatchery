@@ -1,5 +1,8 @@
+import pytest
+
 import models
 from agent import dispatcher
+from store import chats, events
 
 
 def space():
@@ -20,6 +23,9 @@ def test_system_prompt_describes_worker_flow():
     assert "create_subagent" in prompt
     assert "Choose small" in prompt
     assert "Choose big" in prompt
+    assert "require_attention with result_available" in prompt
+    assert "blocked when work cannot continue" in prompt
+    assert "Do not call it while routine follow-up work continues" in prompt
     assert "vercel/vercel-py" in prompt
 
 
@@ -36,7 +42,7 @@ async def test_worker_tools_are_chat_scoped(monkeypatch):
 
     assert set(tools) == {
         "create_sandbox", "list_sandboxes", "create_subagent",
-        "message_subagent", "check_subagent",
+        "message_subagent", "check_subagent", "require_attention",
     }
     assert await tools["list_sandboxes"].fn() == []
     assert seen["chat_id"] == "chat_1"
@@ -82,3 +88,17 @@ async def test_create_subagent_returns_task_id(monkeypatch):
         "sandbox_id": "wrk_1",
         "state": "pending",
     }
+
+
+async def test_require_attention_uses_scoped_chat_and_validates_reason():
+    chat = await chats.create(None, "work")
+    agent = dispatcher.agent_for({"id": chat.id})
+    tool = next(tool for tool in agent.tools if tool.name == "require_attention")
+
+    assert "chat_id" not in tool.tool.spec.params["properties"]
+    assert await tool.fn("blocked") == {"reason": "blocked"}
+    assert (await chats.get(chat.id)).attention_reason == "blocked"
+    assert await events.read(chat.id, "ui") == [(0, {"type": "chat.changed"})]
+
+    with pytest.raises(Exception):
+        await tool.tool.spec.params_adapter.validate_python({"reason": "routine"})

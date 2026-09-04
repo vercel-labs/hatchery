@@ -37,8 +37,9 @@ import {
   type User,
   type VercelCLIConnection,
 } from "@/lib/api";
-import { chatSidebarText } from "@/lib/chat-sidebar";
+import { chatAttentionLabel, chatSidebarText } from "@/lib/chat-sidebar";
 import type { ChatUIMessage } from "@/lib/messages";
+import { cn } from "@/lib/utils";
 import { ChatView } from "@/components/chat";
 import { SandboxForm } from "@/components/sandbox-form";
 import { TerminalPane, type SandboxWorkspace } from "@/components/terminal-pane";
@@ -152,6 +153,7 @@ function ChatSidebarItem({
   onArchiveChange: (chat: Chat, archived: boolean) => void;
 }) {
   const archived = chat.archived_at !== null;
+  const attentionLabel = chatAttentionLabel(chat);
   const text = chatSidebarText(chat);
   return (
     <SidebarMenuItem>
@@ -173,6 +175,18 @@ function ChatSidebarItem({
           {text.author && !text.fragment.startsWith("'") ? " " : null}
           {text.fragment}
         </span>
+        {attentionLabel && (
+          <div
+            className={cn(
+              "ml-auto size-2 shrink-0 rounded-full",
+              chat.attention_reason === "result_available"
+                ? "bg-green-500"
+                : "bg-yellow-500",
+            )}
+            title={attentionLabel}
+            aria-label={attentionLabel}
+          />
+        )}
       </SidebarMenuButton>
       <SidebarMenuAction
         showOnHover
@@ -404,6 +418,12 @@ export function AppShell() {
       current?.map((item) => (item.id === updated.id ? updated : item)) ?? null,
     );
   };
+
+  const updateChat = useCallback((updated: Chat) => {
+    setChats((current) =>
+      current?.map((item) => (item.id === updated.id ? updated : item)) ?? null,
+    );
+  }, []);
 
   const assignChatSpace = async (chat: Chat, spaceId: string) => {
     const res = await apiFetch(`/api/chats/${chat.id}/space`, {
@@ -786,6 +806,7 @@ export function AppShell() {
             chat={selectedChat}
             warning={selectedWarning?.warning}
             onChatChanged={refreshChats}
+            onChatUpdated={updateChat}
             onUnarchive={() => void setChatArchived(selectedChat, false)}
             onSpaceAssigned={(spaceId) =>
               setChats((current) => {
@@ -1464,12 +1485,14 @@ function LiveChat({
   chat,
   warning,
   onChatChanged,
+  onChatUpdated,
   onUnarchive,
   onSpaceAssigned,
 }: {
   chat: Chat;
   warning?: string;
   onChatChanged: () => void;
+  onChatUpdated: (chat: Chat) => void;
   onUnarchive: () => void;
   onSpaceAssigned: (spaceId: string) => void;
 }) {
@@ -1590,7 +1613,9 @@ function LiveChat({
             messageRevision={messageRevision}
             streamGeneration={streamGeneration}
             archived={chat.archived_at !== null}
+            attentionReason={chat.attention_reason}
             onMessagesChange={onMessagesChange}
+            onSeen={onChatUpdated}
             onUnarchive={onUnarchive}
             onCreateSandbox={() => setShowSandboxForm(true)}
           />
