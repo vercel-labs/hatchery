@@ -11,6 +11,8 @@ import {
   FolderGitIcon,
   GitBranchIcon,
   LinkIcon,
+  PauseIcon,
+  PlayIcon,
   TriangleAlertIcon,
   LogOutIcon,
   PencilIcon,
@@ -28,6 +30,7 @@ import {
   apiBase,
   apiFetch,
   type Chat,
+  type Job,
   type Resource,
   type Space,
   type SpaceWarning,
@@ -806,6 +809,7 @@ export function AppShell() {
               </Empty>
             ) : selectedSpace ? (
               <SpacePane
+                key={selectedSpace.id}
                 space={selectedSpace}
                 warning={selectedWarning?.warning}
                 onChange={(updated) =>
@@ -900,6 +904,36 @@ function SpacePane({
   const [url, setUrl] = useState("");
   const [savingResources, setSavingResources] = useState(false);
   const [resourceError, setResourceError] = useState("");
+  const [jobs, setJobs] = useState<Job[] | null>(null);
+  const [jobsLoadError, setJobsLoadError] = useState(false);
+  const [jobEditorOpen, setJobEditorOpen] = useState(false);
+  const [editingJob, setEditingJob] = useState<Job | null>(null);
+  const [jobSchedule, setJobSchedule] = useState("");
+  const [jobPrompt, setJobPrompt] = useState("");
+  const [jobErrors, setJobErrors] = useState<{
+    schedule?: string;
+    prompt?: string;
+    form?: string;
+  }>({});
+  const [jobBusy, setJobBusy] = useState<string | null>(null);
+
+  useEffect(() => {
+    let current = true;
+    apiFetch(`/api/spaces/${space.id}/jobs`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error();
+        return (await response.json()) as Job[];
+      })
+      .then((found) => {
+        if (current) setJobs(found);
+      })
+      .catch(() => {
+        if (current) setJobsLoadError(true);
+      });
+    return () => {
+      current = false;
+    };
+  }, [space.id]);
 
   const resources = [
     ...space.repos.map((repo) => ({
@@ -993,6 +1027,95 @@ function SpacePane({
       setResourceError("Could not save resources.");
     } finally {
       setSavingResources(false);
+    }
+  };
+
+  const closeJobEditor = () => {
+    setJobEditorOpen(false);
+    setEditingJob(null);
+    setJobSchedule("");
+    setJobPrompt("");
+    setJobErrors({});
+  };
+
+  const openJob = (job: Job | null) => {
+    setJobEditorOpen(true);
+    setEditingJob(job);
+    setJobSchedule(job?.schedule ?? "0 9 * * 1-5");
+    setJobPrompt(job?.prompt ?? "");
+    setJobErrors({});
+  };
+
+  const saveJob = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setJobBusy("save");
+    setJobErrors({});
+    try {
+      const path = editingJob
+        ? `/api/jobs/${editingJob.id}`
+        : `/api/spaces/${space.id}/jobs`;
+      const response = await apiFetch(path, {
+        method: editingJob ? "PUT" : "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ schedule: jobSchedule, prompt: jobPrompt }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        const details = Array.isArray(body.detail) ? body.detail : [];
+        setJobErrors({
+          schedule: details.find((item: { loc?: string[] }) => item.loc?.at(-1) === "schedule")?.msg,
+          prompt: details.find((item: { loc?: string[] }) => item.loc?.at(-1) === "prompt")?.msg,
+          form: details.length ? undefined : body.detail ?? "Could not save job.",
+        });
+        return;
+      }
+      const saved: Job = await response.json();
+      setJobs((current) =>
+        editingJob
+          ? (current ?? []).map((job) => (job.id === saved.id ? saved : job))
+          : [...(current ?? []), saved],
+      );
+      closeJobEditor();
+    } catch {
+      setJobErrors({ form: "Could not save job." });
+    } finally {
+      setJobBusy(null);
+    }
+  };
+
+  const setJobPaused = async (job: Job) => {
+    setJobBusy(job.id);
+    setJobErrors({});
+    try {
+      const response = await apiFetch(`/api/jobs/${job.id}/pause`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paused: !job.paused }),
+      });
+      if (!response.ok) throw new Error();
+      const updated: Job = await response.json();
+      setJobs((current) =>
+        current?.map((item) => (item.id === updated.id ? updated : item)) ?? null,
+      );
+    } catch {
+      setJobErrors({ form: `Could not ${job.paused ? "resume" : "pause"} job.` });
+    } finally {
+      setJobBusy(null);
+    }
+  };
+
+  const deleteJob = async (job: Job) => {
+    if (!window.confirm("Delete this scheduled job?")) return;
+    setJobBusy(job.id);
+    setJobErrors({});
+    try {
+      const response = await apiFetch(`/api/jobs/${job.id}`, { method: "DELETE" });
+      if (!response.ok) throw new Error();
+      setJobs((current) => current?.filter((item) => item.id !== job.id) ?? null);
+    } catch {
+      setJobErrors({ form: "Could not delete job." });
+    } finally {
+      setJobBusy(null);
     }
   };
 
@@ -1167,6 +1290,132 @@ function SpacePane({
           ))
         ) : (
           <span className="px-1 text-sm text-muted-foreground">No resources yet.</span>
+        )}
+        <Separator className="my-3" />
+        <div className="flex h-7 items-center justify-between px-1">
+          <span className="text-xs font-medium text-muted-foreground">Jobs</span>
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            aria-label="Add job"
+            onClick={() => openJob(null)}
+          >
+            <PlusIcon />
+          </Button>
+        </div>
+        {jobEditorOpen && (
+          <form onSubmit={saveJob}>
+            <Card size="sm">
+              <CardHeader>
+                <CardTitle>{editingJob ? "Edit job" : "New job"}</CardTitle>
+                <CardDescription>Schedules use UTC.</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <FieldGroup>
+                  <Field data-invalid={Boolean(jobErrors.schedule)}>
+                    <FieldLabel htmlFor={`job-schedule-${space.id}`}>Schedule</FieldLabel>
+                    <Input
+                      id={`job-schedule-${space.id}`}
+                      value={jobSchedule}
+                      onChange={(event) => setJobSchedule(event.target.value)}
+                      placeholder="0 9 * * 1-5"
+                      className="font-mono"
+                      aria-invalid={Boolean(jobErrors.schedule)}
+                      aria-describedby={
+                        jobErrors.schedule
+                          ? `job-schedule-help-${space.id} job-schedule-error-${space.id}`
+                          : `job-schedule-help-${space.id}`
+                      }
+                    />
+                    <FieldDescription id={`job-schedule-help-${space.id}`}>
+                      Five-field cron expression in UTC.
+                    </FieldDescription>
+                    <FieldError id={`job-schedule-error-${space.id}`}>
+                      {jobErrors.schedule}
+                    </FieldError>
+                  </Field>
+                  <Field data-invalid={Boolean(jobErrors.prompt)}>
+                    <FieldLabel htmlFor={`job-prompt-${space.id}`}>Prompt</FieldLabel>
+                    <Textarea
+                      id={`job-prompt-${space.id}`}
+                      value={jobPrompt}
+                      onChange={(event) => setJobPrompt(event.target.value)}
+                      aria-invalid={Boolean(jobErrors.prompt)}
+                      aria-describedby={
+                        jobErrors.prompt ? `job-prompt-error-${space.id}` : undefined
+                      }
+                    />
+                    <FieldError id={`job-prompt-error-${space.id}`}>
+                      {jobErrors.prompt}
+                    </FieldError>
+                  </Field>
+                  <FieldError>{jobErrors.form}</FieldError>
+                  <div className="flex justify-end gap-2">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      disabled={jobBusy === "save"}
+                      onClick={closeJobEditor}
+                    >
+                      Cancel
+                    </Button>
+                    <Button type="submit" disabled={jobBusy === "save"}>
+                      {jobBusy === "save" ? "Saving" : "Save"}
+                    </Button>
+                  </div>
+                </FieldGroup>
+              </CardContent>
+            </Card>
+          </form>
+        )}
+        {!jobEditorOpen && jobErrors.form && <FieldError>{jobErrors.form}</FieldError>}
+        {jobs === null && !jobsLoadError && (
+          <span className="px-1 text-sm text-muted-foreground">Loading jobs…</span>
+        )}
+        {jobsLoadError && (
+          <span className="px-1 text-sm text-destructive">Could not load jobs.</span>
+        )}
+        {jobs?.map((job) => (
+          <Card key={job.id} size="sm">
+            <CardHeader>
+              <CardTitle className="truncate">{job.prompt}</CardTitle>
+              <CardDescription className="font-mono">
+                {job.schedule} UTC{job.paused ? " · paused" : ""}
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="flex justify-end gap-1">
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                aria-label={job.paused ? "Resume job" : "Pause job"}
+                disabled={jobBusy === job.id}
+                onClick={() => setJobPaused(job)}
+              >
+                {job.paused ? <PlayIcon /> : <PauseIcon />}
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                aria-label="Edit job"
+                disabled={jobBusy === job.id}
+                onClick={() => openJob(job)}
+              >
+                <PencilIcon />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                aria-label="Delete job"
+                disabled={jobBusy === job.id}
+                onClick={() => deleteJob(job)}
+              >
+                <Trash2Icon />
+              </Button>
+            </CardContent>
+          </Card>
+        ))}
+        {jobs?.length === 0 && !jobEditorOpen && (
+          <span className="px-1 text-sm text-muted-foreground">No jobs yet.</span>
         )}
       </aside>
     </div>

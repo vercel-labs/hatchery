@@ -76,6 +76,14 @@ export type SpaceWarning = {
   warning: string;
 };
 
+export type Job = {
+  id: string;
+  space_id: string;
+  schedule: string;
+  prompt: string;
+  paused: boolean;
+};
+
 export type Chat = {
   id: string;
   user_id: string | null;

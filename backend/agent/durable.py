@@ -21,7 +21,7 @@ workflow = vercel.workflow.Workflows(
 class TurnInput(pydantic.BaseModel):
     chat_id: str
     turn_id: str = "turn_unknown"
-    origin: typing.Literal["ui", "channel", "worker"]
+    origin: typing.Literal["ui", "channel", "worker", "cron"]
     task_id: str | None = None
 
 
@@ -301,10 +301,25 @@ async def write_lifecycle_event(
 @workflow.step
 async def register_turn(turn: TurnInput, run_id: str) -> int:
     """Idempotently register and announce a run from either side of startup."""
-    from store import events, turns
+    from store import events, jobs, turns
 
     async with turns.run(turn.chat_id):
         records = await events.read(turn.chat_id, "turns")
+        owner = next(
+            (
+                data.get("run_id")
+                for _, data in records
+                if data.get("type") == "turn.started"
+                and data.get("turn_id") == turn.turn_id
+            ),
+            None,
+        )
+        if isinstance(owner, str) and owner != run_id:
+            raise RuntimeError(f"turn {turn.turn_id} is already owned by run {owner}")
+        if turn.origin == "cron" and not await jobs.claim_run(turn.turn_id, run_id):
+            committed = await jobs.started_run(turn.turn_id)
+            owner = committed or "a paused or deleted job"
+            raise RuntimeError(f"scheduled turn {turn.turn_id} is already owned by {owner}")
         existing = next(
             (
                 index
@@ -518,8 +533,9 @@ async def active_turn(chat_id: str) -> "turns.ActiveTurn | None":
 
 async def start_turn(
     chat_id: str,
-    origin: typing.Literal["ui", "channel", "worker"],
+    origin: typing.Literal["ui", "channel", "worker", "cron"],
     task_id: str | None = None,
+    turn_id: str | None = None,
 ) -> "turns.ActiveTurn":
     """Claim, start, register, and announce one durable dispatcher turn."""
     import uuid
@@ -528,7 +544,7 @@ async def start_turn(
     async with turns.run(chat_id):
         if await active_turn(chat_id) is not None:
             raise turns.BusyError(f"chat {chat_id} already has an active turn")
-        turn_id = f"turn_{uuid.uuid4().hex}"
+        turn_id = turn_id or f"turn_{uuid.uuid4().hex}"
         run = await vercel.workflow.start(
             run_turn,
             TurnInput(

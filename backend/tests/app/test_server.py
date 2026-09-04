@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 from unittest import mock
 
 import httpx
@@ -272,6 +273,19 @@ async def test_space_create_and_delete():
     assert deleted.status_code == 204
 
 
+async def test_space_delete_cascades_owner_scoped_jobs():
+    space = await server.spaces.create("scheduled")
+    own = await server.jobs.create(space.id, "user_test", "0 9 * * *", "Mine")
+    other = await server.jobs.create(space.id, "user_other", "0 10 * * *", "Theirs")
+
+    async with client() as c:
+        response = await c.delete(f"/api/spaces/{space.id}")
+
+    assert response.status_code == 204
+    assert await server.jobs.get(own.id) is None
+    assert await server.jobs.get(other.id) is None
+
+
 async def test_space_delete_rejects_unknown_space_and_space_with_chats():
     space = await server.spaces.create("busy")
     await chats.create(space.id, "chat")
@@ -353,6 +367,95 @@ async def test_space_resources_update_rejects_unknown_space_and_invalid_repo():
 
     assert missing.status_code == 404
     assert invalid.status_code == 422
+
+
+async def test_job_routes_are_owner_scoped():
+    await server.spaces.default()
+    async with client() as c:
+        created = await c.post(
+            "/api/spaces/spc_hatchery/jobs",
+            json={"schedule": "0 9 * * 1-5", "prompt": "Check reports"},
+            headers={"origin": "http://test"},
+        )
+        listed = await c.get("/api/spaces/spc_hatchery/jobs")
+        paused = await c.patch(
+            f"/api/jobs/{created.json()['id']}/pause",
+            json={"paused": True},
+            headers={"origin": "http://test"},
+        )
+        invalid = await c.put(
+            f"/api/jobs/{created.json()['id']}",
+            json={"schedule": "0 0 9 * * *", "prompt": "bad"},
+            headers={"origin": "http://test"},
+        )
+        deleted = await c.delete(
+            f"/api/jobs/{created.json()['id']}", headers={"origin": "http://test"}
+        )
+
+    assert created.status_code == 200
+    assert listed.json() == [created.json()]
+    assert paused.json()["paused"] is True
+    assert invalid.status_code == 422
+    assert deleted.status_code == 204
+
+
+async def test_cron_heartbeat_auth_and_reconciliation(monkeypatch):
+    monkeypatch.setenv("CRON_SECRET", "cron-test-secret")
+    space = await server.spaces.default()
+    job = await server.jobs.create(space.id, "user_test", "* * * * *", "Do work")
+    job.next_run_at = (datetime.datetime.now(datetime.UTC) - datetime.timedelta(minutes=2)).isoformat()
+    server.jobs._write_job(job)
+    starts = []
+
+    async def start_turn(chat_id, origin, task_id=None, turn_id=None):
+        starts.append((chat_id, origin, turn_id))
+        await server.jobs.claim_run(turn_id, "run_1")
+        return server.turns.ActiveTurn(turn_id, "run_1", origin, task_id, 0)
+
+    monkeypatch.setattr(server.durable, "start_turn", start_turn)
+    async with client() as c:
+        denied = await c.get("/api/cron")
+        first = await c.get(
+            "/api/cron", headers={"authorization": "Bearer cron-test-secret"}
+        )
+        duplicate = await c.get(
+            "/api/cron", headers={"authorization": "Bearer cron-test-secret"}
+        )
+        visible = await c.get("/api/chats")
+
+    assert denied.status_code == 401
+    assert first.json() == {"ok": True, "started": 1}
+    assert duplicate.json() == {"ok": True, "started": 0}
+    assert len(starts) == 1
+    assert starts[0][1] == "cron"
+    assert visible.json()[0]["trigger"] == f"cron:{job.id}"
+    transcript = await server._transcript(starts[0][0])
+    assert [message.text for message in transcript] == ["Do work"]
+
+
+async def test_paused_pending_job_does_not_start(monkeypatch):
+    secret = "cron-test-secret"
+    monkeypatch.setenv("CRON_SECRET", secret)
+    space = await server.spaces.default()
+    job = await server.jobs.create(space.id, "user_test", "* * * * *", "Do work")
+    now = datetime.datetime.now(datetime.UTC)
+    job.next_run_at = (now - datetime.timedelta(minutes=1)).isoformat()
+    server.jobs._write_job(job)
+    await server.jobs.claim_due(now)
+    await server.jobs.set_paused(job.id, True)
+    starts = []
+
+    async def start_turn(*args, **kwargs):
+        starts.append((args, kwargs))
+
+    monkeypatch.setattr(server.durable, "start_turn", start_turn)
+    async with client() as c:
+        response = await c.get(
+            "/api/cron", headers={"authorization": f"Bearer {secret}"}
+        )
+
+    assert response.json() == {"ok": True, "started": 0}
+    assert starts == []
 
 
 async def test_chat_create_and_list():
