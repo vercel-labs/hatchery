@@ -31,7 +31,6 @@ async def generate(prompt: str) -> str:
             sampling={
                 ai.TemperatureSamplerParams: ai.TemperatureSamplerParams(temperature=0)
             },
-            output=ai.OutputParams(max_tokens=10 * 10),
         ),
     ) as result:
         async for _ in result:

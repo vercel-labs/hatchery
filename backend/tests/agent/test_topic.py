@@ -46,4 +46,4 @@ async def test_generate_allows_structured_output(monkeypatch):
     assert "wants to rewire slack" in topic.SYSTEM
     assert seen["model"] == "openai/gpt-5.6-luna"
     assert seen["output_type"] is topic.Topic
-    assert seen["params"].output.max_tokens == 100
+    assert seen["params"].output is None
