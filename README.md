@@ -36,3 +36,8 @@ Hatchery rewrites that endpoint to the public vgrok origin for the sandbox.
 Deployments use hosted Vercel Queues through deployment OIDC. No local worker or
 in-process task bypass exists. Sandbox and subagent terminals require the browser
 session before the backend bridges them to the authenticated in-sandbox daemon.
+
+Scheduled jobs use five-field UTC cron expressions. Vercel calls `/api/cron` every
+minute; set the same long random `CRON_SECRET` on the backend deployment so its
+`Authorization: Bearer` header is accepted. Local heartbeat checks can use
+`curl -H "Authorization: Bearer $CRON_SECRET" http://localhost:3000/api/cron`.

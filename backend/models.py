@@ -28,6 +28,17 @@ class Space(pydantic.BaseModel):
         return repos
 
 
+class Job(pydantic.BaseModel):
+    id: str
+    space_id: str
+    owner_id: str
+    schedule: str
+    prompt: str
+    paused: bool = False
+    next_run_at: str
+    created_at: str
+
+
 class Chat(pydantic.BaseModel):
     id: str  # "chat_<hex>"
     user_id: str | None = None

@@ -3,6 +3,7 @@ import inspect
 import textwrap
 
 import ai
+import pytest
 
 from agent import durable
 from store import chats, events
@@ -180,6 +181,30 @@ async def test_active_turn_reconciles_failed_workflow(monkeypatch):
 
     assert await durable.active_turn("chat_1") is None
     assert (await events.read("chat_1", "turns"))[-1][1]["type"] == "turn.failed"
+
+
+async def test_cron_register_turn_rejects_duplicate_run(monkeypatch):
+    async def claim_run(_turn_id, run_id):
+        return run_id == "run_1"
+
+    async def started_run(_turn_id):
+        return "run_1"
+
+    from store import jobs
+
+    monkeypatch.setattr(jobs, "claim_run", claim_run)
+    monkeypatch.setattr(jobs, "started_run", started_run)
+    turn = durable.TurnInput(chat_id="chat_1", turn_id="turn_stable", origin="cron")
+
+    await durable.register_turn.func(turn, "run_1")
+    with pytest.raises(RuntimeError, match="already owned"):
+        await durable.register_turn.func(turn, "run_2")
+
+    started = [
+        data for _, data in await events.read("chat_1", "turns")
+        if data.get("type") == "turn.started"
+    ]
+    assert [event["run_id"] for event in started] == ["run_1"]
 
 
 async def test_start_turn_registers_before_announcing(monkeypatch):
