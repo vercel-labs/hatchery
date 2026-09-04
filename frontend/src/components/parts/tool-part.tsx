@@ -2,6 +2,7 @@ import { getToolName } from "ai";
 import { BanIcon, CheckIcon, ShieldAlertIcon, XIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
+import { formatToolPayload } from "@/components/parts/tool-payload";
 import { Spinner } from "@/components/ui/spinner";
 import type { ChatToolPart } from "@/lib/messages";
 
@@ -39,12 +40,7 @@ function status(part: ChatToolPart): { icon: ReactNode; label: string } {
 export function ToolPart({ part }: { part: ChatToolPart }) {
   const name = getToolName(part);
   const { icon, label } = status(part);
-  const input =
-    part.input == null
-      ? null
-      : typeof part.input === "string"
-        ? part.input
-        : ((part.input as { task?: string }).task ?? JSON.stringify(part.input));
+  const input = part.input == null ? null : formatToolPayload(part.input);
 
   return (
     <>
@@ -54,9 +50,9 @@ export function ToolPart({ part }: { part: ChatToolPart }) {
         <span>{label}</span>
       </div>
       {input != null && (
-        <div className="max-h-24 overflow-y-auto px-1.5 font-mono text-xs break-all whitespace-pre-wrap text-muted-foreground">
+        <pre className="max-h-24 overflow-auto px-1.5 font-mono text-xs break-words whitespace-pre-wrap text-muted-foreground">
           {input}
-        </div>
+        </pre>
       )}
       {part.state === "output-available" && part.output != null && (
         <pre className="max-h-64 overflow-auto rounded-lg bg-muted p-2 font-mono text-xs break-all whitespace-pre-wrap">
@@ -66,7 +62,9 @@ export function ToolPart({ part }: { part: ChatToolPart }) {
         </pre>
       )}
       {part.state === "output-error" && (
-        <div className="px-1.5 text-xs text-destructive">{part.errorText}</div>
+        <pre className="max-h-64 overflow-auto px-1.5 font-mono text-xs break-words whitespace-pre-wrap text-destructive">
+          {formatToolPayload(part.errorText)}
+        </pre>
       )}
     </>
   );
