@@ -16,6 +16,7 @@ dependencies = [
     "vercel",
     "vercel-connect",
     "websockets>=15,<17",
+    "croniter>=6,<7",
 ]
 
 [dependency-groups]

@@ -8,6 +8,9 @@
       "entrypoint": "pyproject.toml"
     }
   },
+  "crons": [
+    { "path": "/api/cron", "schedule": "* * * * *" }
+  ],
   "rewrites": [
     { "source": "/api/(.*)", "destination": { "service": "backend" } },
     { "source": "/channels/(.*)", "destination": { "service": "backend" } },

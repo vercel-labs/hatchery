@@ -13,6 +13,8 @@ _StoreHub (dedupe, claim binding, append); no turn runs on inbound yet.
 
 import asyncio
 import contextlib
+import datetime
+import hmac
 import html
 import json
 import logging
@@ -39,7 +41,7 @@ from agent import classifier, dispatcher, durable, sandbox, stream as agent_stre
 import worker
 from worker import protocol as worker_protocol
 from channels import github, slack
-from store import chats, events, spaces, turns
+from store import chats, events, jobs, spaces, turns
 
 log = logging.getLogger("app")
 _background: set[asyncio.Task] = set()
@@ -241,6 +243,7 @@ async def browser_session(request: fastapi.Request, call_next):
     path = request.url.path
     public = (
         path == "/api/health"
+        or path == "/api/cron"
         or path.startswith("/api/auth/")
         or path.startswith("/channels/")
     )
@@ -450,8 +453,10 @@ async def create_space(request: CreateSpaceRequest) -> models.Space:
 async def delete_space(space_id: str) -> None:
     if any(chat.space_id == space_id for chat in await chats.list_all()):
         raise fastapi.HTTPException(409, "space still has chats")
-    if not await spaces.delete(space_id):
+    if await spaces.get(space_id) is None:
         raise fastapi.HTTPException(404, "unknown space")
+    await jobs.delete_for_space(space_id)
+    await spaces.delete(space_id)
 
 
 class UpdateSpaceRequest(pydantic.BaseModel):
@@ -507,6 +512,120 @@ async def update_space_resources(
         }
     )
     return await spaces.save(updated)
+
+
+class JobResponse(pydantic.BaseModel):
+    id: str
+    space_id: str
+    schedule: str
+    prompt: str
+    paused: bool
+
+
+class JobRequest(pydantic.BaseModel):
+    schedule: str
+    prompt: str
+
+    @pydantic.field_validator("schedule")
+    @classmethod
+    def valid_schedule(cls, schedule: str) -> str:
+        return jobs.validate_schedule(schedule)
+
+    @pydantic.field_validator("prompt")
+    @classmethod
+    def valid_prompt(cls, prompt: str) -> str:
+        prompt = prompt.strip()
+        if not prompt:
+            raise ValueError("prompt must not be empty")
+        return prompt
+
+
+class PauseJobRequest(pydantic.BaseModel):
+    paused: bool
+
+
+async def _owned_job(job_id: str, user_id: str) -> models.Job:
+    job = await jobs.get(job_id)
+    if job is None or job.owner_id != user_id:
+        raise fastapi.HTTPException(404, "unknown job")
+    return job
+
+
+def _job_response(job: models.Job) -> JobResponse:
+    return JobResponse.model_validate(job.model_dump())
+
+
+@app.get("/api/spaces/{space_id}/jobs")
+async def list_jobs(space_id: str, request: fastapi.Request) -> list[JobResponse]:
+    if await spaces.get(space_id) is None:
+        raise fastapi.HTTPException(404, "unknown space")
+    return [
+        _job_response(job)
+        for job in await jobs.list_for_space(space_id, request.state.user["id"])
+    ]
+
+
+@app.post("/api/spaces/{space_id}/jobs")
+async def create_job(
+    space_id: str, body: JobRequest, request: fastapi.Request
+) -> JobResponse:
+    if await spaces.get(space_id) is None:
+        raise fastapi.HTTPException(404, "unknown space")
+    return _job_response(
+        await jobs.create(space_id, request.state.user["id"], body.schedule, body.prompt)
+    )
+
+
+@app.put("/api/jobs/{job_id}")
+async def update_job(job_id: str, body: JobRequest, request: fastapi.Request) -> JobResponse:
+    await _owned_job(job_id, request.state.user["id"])
+    updated = await jobs.update(job_id, body.schedule, body.prompt)
+    assert updated is not None
+    return _job_response(updated)
+
+
+@app.patch("/api/jobs/{job_id}/pause")
+async def pause_job(
+    job_id: str, body: PauseJobRequest, request: fastapi.Request
+) -> JobResponse:
+    await _owned_job(job_id, request.state.user["id"])
+    updated = await jobs.set_paused(job_id, body.paused)
+    assert updated is not None
+    return _job_response(updated)
+
+
+@app.delete("/api/jobs/{job_id}", status_code=204)
+async def delete_job(job_id: str, request: fastapi.Request) -> None:
+    await _owned_job(job_id, request.state.user["id"])
+    await jobs.delete(job_id)
+
+
+@app.get("/api/cron")
+async def cron_heartbeat(request: fastapi.Request) -> dict:
+    secret = os.environ.get("CRON_SECRET")
+    authorization = request.headers.get("authorization", "")
+    if not secret or not hmac.compare_digest(authorization, f"Bearer {secret}"):
+        raise fastapi.HTTPException(401, "invalid cron authorization")
+    now = datetime.datetime.now(datetime.UTC)
+    await jobs.claim_due(now)
+    started = 0
+    for execution in await jobs.lease_pending(now):
+        registered = next(
+            (
+                data.get("run_id")
+                for _, data in await events.read(execution.chat_id, "turns")
+                if data.get("type") == "turn.started"
+                and data.get("turn_id") == execution.turn_id
+            ),
+            None,
+        )
+        if isinstance(registered, str):
+            await jobs.mark_started(execution, registered)
+            continue
+        await durable.start_turn(execution.chat_id, "cron", turn_id=execution.turn_id)
+        started += 1
+    await jobs.cleanup(now)
+    return {"ok": True, "started": started}
 
 
 @app.get("/api/chats")
