@@ -29,6 +29,7 @@ async def test_claim_sets_owner_and_rejects_owner_state_takeover():
         "hello",
         {"user_id": "U1"},
         user_id="hatchery_1",
+        author_display_name="Ada",
     )
     second, reused = await chats.claim(
         "slack:C1:100.1",
@@ -42,6 +43,7 @@ async def test_claim_sets_owner_and_rejects_owner_state_takeover():
     assert created is True and reused is False
     assert first.id == second.id
     assert second.user_id == "hatchery_1"
+    assert second.author_display_name == "Ada"
     [binding] = await chats.bindings(first.id)
     assert binding.state == {"user_id": "U1"}
 
@@ -71,6 +73,31 @@ async def test_matching_connected_owner_claims_and_migrates_legacy_binding():
     assert (await chats.get(legacy.id)).user_id == "hatchery_1"
     [binding] = await chats.bindings(legacy.id)
     assert binding.token == "slack:T1:C1:100.1"
+
+
+async def test_matching_connected_owner_snapshots_author_on_claim():
+    legacy, _ = await chats.claim(
+        "slack:T1:C1:100.2",
+        "slack",
+        None,
+        "legacy",
+        {"team_id": "T1", "user_id": "U1"},
+    )
+
+    claimed, created = await chats.claim(
+        "slack:T1:C1:100.2",
+        "slack",
+        None,
+        "connected",
+        {"team_id": "T1", "user_id": "U1"},
+        user_id="hatchery_1",
+        author_display_name="Ada",
+    )
+
+    assert created is False
+    assert claimed.id == legacy.id
+    assert claimed.user_id == "hatchery_1"
+    assert claimed.author_display_name == "Ada"
 
 
 async def test_different_identity_cannot_claim_or_migrate_legacy_binding():
@@ -148,8 +175,12 @@ async def test_claim_is_single_owner_under_concurrency():
 
 
 async def test_create_get_list():
-    chat = await chats.create(None, "manual chat")
+    chat = await chats.create(
+        None, "manual chat", user_id="user_1", author_display_name="Ada"
+    )
     assert chat.trigger == "ui"
+    assert chat.user_id == "user_1"
+    assert chat.author_display_name == "Ada"
     assert chat.space_id is None
     assert [c.id for c in await chats.list_all()] == [chat.id]
     loaded = await chats.get(chat.id)
@@ -162,11 +193,13 @@ async def test_legacy_chat_without_archive_field_loads_as_active():
     path = store.data_dir() / "chats" / f"{chat.id}.json"
     data = json.loads(path.read_text())
     data.pop("archived_at")
+    data.pop("author_display_name")
     path.write_text(json.dumps(data))
 
     loaded = await chats.get(chat.id)
 
     assert loaded is not None and loaded.archived_at is None
+    assert loaded.author_display_name is None
 
 
 async def test_archive_and_unarchive_are_persisted_and_idempotent():
@@ -189,11 +222,13 @@ async def test_archive_and_unarchive_are_persisted_and_idempotent():
 async def test_claim_user_sets_legacy_owner_once():
     chat = await chats.create(None, "legacy")
 
-    claimed = await chats.claim_user(chat.id, "user_1")
-    unchanged = await chats.claim_user(chat.id, "user_2")
+    claimed = await chats.claim_user(chat.id, "user_1", "Ada")
+    unchanged = await chats.claim_user(chat.id, "user_2", "Grace")
 
     assert claimed is not None and claimed.user_id == "user_1"
+    assert claimed.author_display_name == "Ada"
     assert unchanged is not None and unchanged.user_id == "user_1"
+    assert unchanged.author_display_name == "Ada"
 
 
 async def test_assign_space_updates_chat():

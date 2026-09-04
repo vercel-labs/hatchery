@@ -77,10 +77,12 @@ async def create(
     title: str,
     trigger: str = "ui",
     user_id: str | None = None,
+    author_display_name: str | None = None,
 ) -> models.Chat:
     chat = models.Chat(
         id=f"chat_{uuid.uuid4().hex[:12]}",
         user_id=user_id,
+        author_display_name=author_display_name,
         space_id=space_id,
         title=title,
         trigger=trigger,
@@ -125,15 +127,19 @@ async def list_all() -> list[models.Chat]:
         return found
 
 
-async def claim_user(chat_id: str, user_id: str) -> models.Chat | None:
+async def claim_user(
+    chat_id: str, user_id: str, author_display_name: str | None = None
+) -> models.Chat | None:
     if store.use_postgres():
         from store import db
 
         row = await (await db.pool()).fetchrow(
-            "UPDATE hatchery_chats SET data = jsonb_set(data, '{user_id}', to_jsonb($2::text)) "
+            "UPDATE hatchery_chats SET data = data || "
+            "jsonb_build_object('user_id', $2::text, 'author_display_name', $3::text) "
             "WHERE id = $1 AND (data->>'user_id' IS NULL) RETURNING data",
             chat_id,
             user_id,
+            author_display_name,
         )
         if row is not None:
             return _chat(row["data"])
@@ -144,6 +150,7 @@ async def claim_user(chat_id: str, user_id: str) -> models.Chat | None:
             return None
         if chat.user_id is None:
             chat.user_id = user_id
+            chat.author_display_name = author_display_name
             _write_chat(chat)
         return chat
 
@@ -247,6 +254,7 @@ async def claim(
     title: str,
     state: dict,
     user_id: str | None = None,
+    author_display_name: str | None = None,
     legacy_token: str | None = None,
 ) -> tuple[models.Chat, bool]:
     """Atomically map a channel token to its owning chat.
@@ -259,6 +267,7 @@ async def claim(
     candidate = models.Chat(
         id=f"chat_{uuid.uuid4().hex[:12]}",
         user_id=user_id,
+        author_display_name=author_display_name,
         space_id=space_id,
         title=title,
         trigger=token,
@@ -295,10 +304,12 @@ async def claim(
                 identity_matches = _binding_identity_matches(saved_state, state)
                 if user_id is not None and chat.user_id is None and identity_matches:
                     claimed = await conn.fetchrow(
-                        "UPDATE hatchery_chats SET data = jsonb_set(data, '{user_id}', to_jsonb($2::text)) "
+                        "UPDATE hatchery_chats SET data = data || "
+                        "jsonb_build_object('user_id', $2::text, 'author_display_name', $3::text) "
                         "WHERE id = $1 RETURNING data",
                         chat.id,
                         user_id,
+                        author_display_name,
                     )
                     chat = _chat(claimed["data"])
                 if user_id is None or chat.user_id == user_id:
@@ -363,6 +374,7 @@ async def claim(
                 identity_matches = _binding_identity_matches(existing.get("state", {}), state)
                 if user_id is not None and owner.user_id is None and identity_matches:
                     owner.user_id = user_id
+                    owner.author_display_name = author_display_name
                     _write_chat(owner)
                 if user_id is None or owner.user_id == user_id:
                     existing["state"] = {**existing.get("state", {}), **state}

@@ -34,6 +34,7 @@ import {
   type User,
   type VercelCLIConnection,
 } from "@/lib/api";
+import { chatSidebarText } from "@/lib/chat-sidebar";
 import type { ChatUIMessage } from "@/lib/messages";
 import { ChatView } from "@/components/chat";
 import { SandboxForm } from "@/components/sandbox-form";
@@ -148,7 +149,7 @@ function ChatSidebarItem({
   onArchiveChange: (chat: Chat, archived: boolean) => void;
 }) {
   const archived = chat.archived_at !== null;
-  const name = chat.topic ?? (chat.title === "new chat" ? "…" : chat.title);
+  const text = chatSidebarText(chat);
   return (
     <SidebarMenuItem>
       <SidebarMenuButton
@@ -156,18 +157,23 @@ function ChatSidebarItem({
         isActive={selected}
         aria-current={selected ? "page" : undefined}
         render={<Link href={`/chats/${encodeURIComponent(chat.id)}`} />}
-        tooltip={chat.topic ?? chat.title}
+        tooltip={text.label}
+        aria-label={text.label}
       >
         <span
           className="absolute inset-y-1 left-0 w-0.5 rounded-full"
           style={{ backgroundColor: spaceColor ?? "var(--muted-foreground)" }}
         />
         <ChatOriginIcon trigger={chat.trigger} />
-        <span className="truncate">{name}</span>
+        <span className="truncate">
+          {text.author ? <span className="font-medium">{text.author}</span> : null}
+          {text.author && !text.fragment.startsWith("'") ? " " : null}
+          {text.fragment}
+        </span>
       </SidebarMenuButton>
       <SidebarMenuAction
         showOnHover
-        aria-label={`${archived ? "Unarchive" : "Archive"} ${name}`}
+        aria-label={`${archived ? "Unarchive" : "Archive"} ${text.label}`}
         title={archived ? "Unarchive chat" : "Archive chat"}
         onClick={() => onArchiveChange(chat, !archived)}
       >

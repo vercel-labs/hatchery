@@ -12,7 +12,7 @@ async def test_generate_allows_structured_output(monkeypatch):
     seen = {}
 
     class Run:
-        output = topic.Topic(topic="Improve sidebar chats")
+        output = topic.Topic(topic="Wants to rewire Slack!!!")
 
         async def __aenter__(self):
             return self
@@ -39,7 +39,11 @@ async def test_generate_allows_structured_output(monkeypatch):
 
     generated = await topic.generate("Please improve chat names")
 
-    assert generated == "Improve sidebar chats"
+    assert generated == "wants to rewire"
+    assert len(generated) <= 20
+    assert "at most 20" in topic.SYSTEM
+    assert "'s cron jobs work" in topic.SYSTEM
+    assert "wants to rewire slack" in topic.SYSTEM
     assert seen["model"] == "openai/gpt-5.6-luna"
     assert seen["output_type"] is topic.Topic
-    assert seen["params"].output.max_tokens == 100
+    assert seen["params"].output is None

@@ -1,13 +1,18 @@
-"""Generate a short sidebar topic from a chat's first request."""
+"""Generate a short sidebar title fragment from a chat's first request."""
+
+import re
 
 import ai
 import pydantic
 
 
 SYSTEM = """\
-Name this conversation from the user's first request. Use only a few plain words
-that describe the requested work. Do not use punctuation, labels, or a full
-sentence. Return only the requested structured output."""
+Write a lowercase title fragment for the conversation from the user's first request.
+It will be placed directly after the user's display name, so make it read naturally,
+for example "'s cron jobs work" or "wants to rewire slack". Use at most 20
+characters for the fragment itself, including spaces and apostrophes. Use only a few
+plain words and no punctuation except a leading possessive apostrophe when useful.
+Return only the requested structured output."""
 
 
 class Topic(pydantic.BaseModel):
@@ -26,9 +31,14 @@ async def generate(prompt: str) -> str:
             sampling={
                 ai.TemperatureSamplerParams: ai.TemperatureSamplerParams(temperature=0)
             },
-            output=ai.OutputParams(max_tokens=10 * 10),
         ),
     ) as result:
         async for _ in result:
             pass
-        return result.output.topic.strip()
+        fragment = result.output.topic.strip().lower()
+        fragment = re.sub(r"[^\w\s']+", "", fragment).replace("_", " ")
+        fragment = " ".join(fragment.split())
+        if len(fragment) <= 20:
+            return fragment
+        shortened = fragment[:20].rstrip()
+        return shortened.rsplit(" ", 1)[0] or shortened

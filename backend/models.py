@@ -31,6 +31,7 @@ class Space(pydantic.BaseModel):
 class Chat(pydantic.BaseModel):
     id: str  # "chat_<hex>"
     user_id: str | None = None
+    author_display_name: str | None = None
     space_id: str | None = None
     title: str
     topic: str | None = None

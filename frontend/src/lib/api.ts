@@ -79,6 +79,7 @@ export type SpaceWarning = {
 export type Chat = {
   id: string;
   user_id: string | null;
+  author_display_name?: string | null;
   space_id: string | null;
   title: string;
   topic: string | null;

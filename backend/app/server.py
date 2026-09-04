@@ -84,6 +84,7 @@ class _StoreHub:
                 user_id = await connections.auth_store.github_user(
                     str(inbound.state.get("sender_id", ""))
                 )
+            user = None
             if channel in {"slack", "github"}:
                 user = await connections.auth_store.get_user(user_id) if user_id else None
                 if not auth.allowed_user(user):
@@ -103,6 +104,7 @@ class _StoreHub:
                 title,
                 inbound.state,
                 user_id=user_id,
+                author_display_name=_user_display_name(user),
                 legacy_token=legacy_token,
             )
             if user_id is not None and chat.user_id != user_id:
@@ -165,6 +167,16 @@ class _StoreHub:
 
     async def dedupe(self, key: str) -> bool:
         return await chats.dedupe(key)
+
+
+def _user_display_name(user: dict | None) -> str | None:
+    if user is None:
+        return None
+    for field in ("name", "username", "email"):
+        value = user.get(field)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
 
 
 def _inbound_author(inbound: channels.Inbound) -> str:
@@ -242,7 +254,9 @@ async def browser_session(request: fastapi.Request, call_next):
     if match is not None and user is not None:
         chat = await chats.get(match.group(1))
         if chat is not None and chat.user_id is None and chat.trigger == "ui":
-            chat = await chats.claim_user(chat.id, user["id"])
+            chat = await chats.claim_user(
+                chat.id, user["id"], _user_display_name(user)
+            )
         if chat is not None and chat.user_id != user["id"]:
             return fastapi.responses.JSONResponse({"detail": "unknown chat"}, status_code=404)
     if path.startswith("/api/") and request.method not in {"GET", "HEAD", "OPTIONS"} and not auth.valid_origin(request):
@@ -502,7 +516,9 @@ async def list_chats(request: fastapi.Request) -> list[models.Chat]:
     if user is not None:
         for chat in await chats.list_all():
             if chat.user_id is None and chat.trigger == "ui":
-                chat = await chats.claim_user(chat.id, user["id"]) or chat
+                chat = await chats.claim_user(
+                    chat.id, user["id"], _user_display_name(user)
+                ) or chat
             if chat.user_id == user["id"]:
                 found.append(chat)
     for chat in found:
@@ -531,6 +547,7 @@ async def create_chat(request: CreateChatRequest, http_request: fastapi.Request)
         request.space_id,
         request.title,
         user_id=user["id"] if user is not None else None,
+        author_display_name=_user_display_name(user),
     )
 
 
