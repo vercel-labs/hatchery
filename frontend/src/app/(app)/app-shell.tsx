@@ -169,16 +169,10 @@ function ChatSidebarItem({
           className="absolute inset-y-1 left-0 w-0.5 rounded-full"
           style={{ backgroundColor: spaceColor ?? "var(--muted-foreground)" }}
         />
-        <ChatOriginIcon trigger={chat.trigger} />
-        <span className="truncate">
-          {text.author ? <span className="font-medium">{text.author}</span> : null}
-          {text.author && !text.fragment.startsWith("'") ? " " : null}
-          {text.fragment}
-        </span>
         {attentionLabel && (
           <div
             className={cn(
-              "ml-auto size-2 shrink-0 rounded-full",
+              "size-2 shrink-0 rounded-full",
               chat.attention_reason === "result_available"
                 ? "bg-green-500"
                 : "bg-yellow-500",
@@ -187,6 +181,12 @@ function ChatSidebarItem({
             aria-label={attentionLabel}
           />
         )}
+        <ChatOriginIcon trigger={chat.trigger} />
+        <span className="truncate">
+          {text.author ? <span className="font-medium">{text.author}</span> : null}
+          {text.author && !text.fragment.startsWith("'") ? " " : null}
+          {text.fragment}
+        </span>
       </SidebarMenuButton>
       <SidebarMenuAction
         showOnHover
