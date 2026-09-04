@@ -1,6 +1,8 @@
+"use client";
+
 import { getToolName } from "ai";
 import { BanIcon, CheckIcon, ShieldAlertIcon, XIcon } from "lucide-react";
-import type { ReactNode } from "react";
+import { type ReactNode, useLayoutEffect, useRef, useState } from "react";
 
 import {
   toolPayload,
@@ -40,6 +42,51 @@ function status(part: ChatToolPart): { icon: ReactNode; label: string } {
 
 const INLINE_KEY_LENGTH = 5;
 
+function ScalarEntry({ name, value }: { name: string; value: ToolPayloadValue }) {
+  const container = useRef<HTMLSpanElement>(null);
+  const measurement = useRef<HTMLSpanElement>(null);
+  const [block, setBlock] = useState(false);
+
+  useLayoutEffect(() => {
+    const element = container.current;
+    const content = measurement.current;
+    if (name.length <= INLINE_KEY_LENGTH || !element || !content) return;
+
+    const update = () => setBlock(content.scrollWidth > element.clientWidth);
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [name]);
+
+  return (
+    <span className="relative block min-w-0" ref={container}>
+      {name.length > INLINE_KEY_LENGTH && (
+        <span
+          aria-hidden="true"
+          className="pointer-events-none absolute invisible whitespace-nowrap"
+          ref={measurement}
+        >
+          {name}: {value.type === "scalar" ? value.value : ""}
+        </span>
+      )}
+      {block ? (
+        <>
+          <span className="block">{name}:</span>
+          <span className="block min-w-0 pl-[2ch]">
+            <Payload value={value} />
+          </span>
+        </>
+      ) : (
+        <span className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] gap-x-[1ch]">
+          <span>{name}:</span>
+          <Payload value={value} />
+        </span>
+      )}
+    </span>
+  );
+}
+
 function Payload({ value }: { value: ToolPayloadValue }) {
   if (value.type === "scalar") {
     return <span className="min-w-0 break-words whitespace-pre-wrap">{value.value}</span>;
@@ -60,26 +107,18 @@ function Payload({ value }: { value: ToolPayloadValue }) {
 
   return (
     <span className="grid min-w-0 gap-y-0.5">
-      {value.entries.map(([key, item]) => {
-        const inline = item.type === "scalar" && key.length <= INLINE_KEY_LENGTH;
-
-        return inline ? (
-          <span
-            className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] gap-x-[1ch]"
-            key={key}
-          >
-            <span>{key}:</span>
-            <Payload value={item} />
-          </span>
+      {value.entries.map(([key, item]) =>
+        item.type === "scalar" ? (
+          <ScalarEntry key={key} name={key} value={item} />
         ) : (
           <span className="min-w-0" key={key}>
             <span className="block">{key}:</span>
-            <span className="block min-w-0 pl-[4ch]">
+            <span className="block min-w-0 pl-[2ch]">
               <Payload value={item} />
             </span>
           </span>
-        );
-      })}
+        ),
+      )}
     </span>
   );
 }
