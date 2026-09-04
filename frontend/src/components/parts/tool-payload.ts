@@ -1,5 +1,7 @@
 type JsonObject = Record<string, unknown>;
 
+const MAX_INLINE_TEXT_LENGTH = 72;
+
 function visible(value: unknown): boolean {
   if (value == null) return false;
   if (Array.isArray(value)) return value.some(visible);
@@ -77,7 +79,8 @@ function renderObject(object: JsonObject, indent: number): string[] {
     }
 
     const lines = scalarLines(value);
-    if (lines.length <= 1) return [`${prefix}${key}: ${lines[0] ?? ""}`];
+    const inline = lines.length === 1 && lines[0].length <= MAX_INLINE_TEXT_LENGTH;
+    if (inline) return [`${prefix}${key}: ${lines[0]}`];
     return [
       `${prefix}${key}:`,
       ...lines.map((line) =>
