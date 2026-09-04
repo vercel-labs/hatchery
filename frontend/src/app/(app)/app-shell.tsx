@@ -123,12 +123,6 @@ function Dot({ color }: { color: string | undefined }) {
   );
 }
 
-function spaceStripeColor(spaceId: string | null) {
-  if (!spaceId) return "var(--muted-foreground)";
-  const hue = [...spaceId].reduce((value, char) => value * 31 + char.charCodeAt(0), 0);
-  return `hsl(${Math.abs(hue) % 360} 70% 50%)`;
-}
-
 function ChatOriginIcon({ trigger }: { trigger: string }) {
   const path = trigger.startsWith("slack:")
     ? "M3.427 10.079c0 .92-.743 1.663-1.663 1.663S.1 10.998.1 10.079c0-.92.743-1.663 1.663-1.663h1.663zm.831 0c0-.92.744-1.663 1.663-1.663.92 0 1.663.743 1.663 1.663v4.157c0 .92-.743 1.663-1.663 1.663s-1.663-.743-1.663-1.663zM5.921 3.402c-.92 0-1.663-.744-1.663-1.663 0-.92.744-1.663 1.663-1.663.92 0 1.663.743 1.663 1.663v1.663zm0 .844c.92 0 1.663.743 1.663 1.663s-.743 1.663-1.663 1.663h-4.17c-.92 0-1.663-.744-1.663-1.663 0-.92.743-1.663 1.663-1.663zM12.586 5.909c0-.92.743-1.663 1.663-1.663s1.663.743 1.663 1.663-.744 1.663-1.663 1.663h-1.663zm-.832 0c0 .92-.743 1.663-1.663 1.663s-1.663-.744-1.663-1.663v-4.17c0-.92.744-1.663 1.663-1.663.92 0 1.663.743 1.663 1.663zM10.091 12.573c.92 0 1.663.743 1.663 1.663s-.743 1.663-1.663 1.663-1.663-.743-1.663-1.663v-1.663zm0-.831c-.92 0-1.663-.744-1.663-1.663 0-.92.744-1.663 1.663-1.663h4.17c.92 0 1.663.743 1.663 1.663s-.743 1.663-1.663 1.663z"
@@ -144,10 +138,12 @@ function ChatOriginIcon({ trigger }: { trigger: string }) {
 
 function ChatSidebarItem({
   chat,
+  spaceColor,
   selected,
   onArchiveChange,
 }: {
   chat: Chat;
+  spaceColor: string | undefined;
   selected: boolean;
   onArchiveChange: (chat: Chat, archived: boolean) => void;
 }) {
@@ -164,15 +160,7 @@ function ChatSidebarItem({
       >
         <span
           className="absolute inset-y-1 left-0 w-0.5 rounded-full"
-          style={{ backgroundColor: spaceStripeColor(chat.space_id) }}
-        />
-        <span
-          className={
-            chat.status === "running"
-              ? "size-2 shrink-0 rounded-full bg-blue-500"
-              : "size-2 shrink-0 rounded-full bg-zinc-400"
-          }
-          title={chat.status === "running" ? "Running" : "Idle"}
+          style={{ backgroundColor: spaceColor ?? "var(--muted-foreground)" }}
         />
         <ChatOriginIcon trigger={chat.trigger} />
         <span className="truncate">{name}</span>
@@ -548,6 +536,7 @@ export function AppShell() {
                       <ChatSidebarItem
                         key={chat.id}
                         chat={chat}
+                        spaceColor={colorOf(chat.space_id)}
                         selected={selectedChat?.id === chat.id}
                         onArchiveChange={(item, archived) =>
                           void setChatArchived(item, archived)
@@ -612,6 +601,7 @@ export function AppShell() {
                       : spaces.map((space) => (
                           <SidebarMenuItem key={space.id}>
                             <SidebarMenuButton
+                              className="relative pl-3"
                               isActive={selectedSpace?.id === space.id}
                               onClick={() => setSortSpaceId(space.id)}
                               render={
@@ -619,7 +609,10 @@ export function AppShell() {
                               }
                               tooltip={space.name}
                             >
-                              <Dot color={space.color} />
+                              <span
+                                className="absolute inset-y-1 left-0 w-1 rounded-full"
+                                style={{ backgroundColor: space.color }}
+                              />
                               <span className="truncate">{space.name}</span>
                             </SidebarMenuButton>
                             <SidebarMenuAction
@@ -653,6 +646,7 @@ export function AppShell() {
                           <ChatSidebarItem
                             key={chat.id}
                             chat={chat}
+                            spaceColor={colorOf(chat.space_id)}
                             selected={selectedChat?.id === chat.id}
                             onArchiveChange={(item, archived) =>
                               void setChatArchived(item, archived)
