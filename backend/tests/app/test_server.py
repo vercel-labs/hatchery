@@ -70,14 +70,20 @@ async def test_websocket_auth_rejects_missing_session(monkeypatch):
     assert ws.closed == (4401, "sign in required")
 
 
-async def test_legacy_chat_is_claimed_on_direct_access():
+async def test_legacy_chat_is_claimed_on_direct_access(monkeypatch):
     chat = await chats.create(None, "legacy")
 
+    async def current_user(_request):
+        return {"id": "user_test", "email": "test@vercel.com"}
+
+    monkeypatch.setattr(server.auth, "current_user", current_user)
     async with client() as c:
         response = await c.get(f"/api/chats/{chat.id}/messages")
 
     assert response.status_code == 200
-    assert (await chats.get(chat.id)).user_id == "user_test"
+    claimed = await chats.get(chat.id)
+    assert claimed is not None and claimed.user_id == "user_test"
+    assert claimed.author_display_name == "test@vercel.com"
 
 
 async def test_browser_does_not_claim_unowned_channel_chat():
@@ -355,13 +361,24 @@ async def test_space_resources_update_rejects_unknown_space_and_invalid_repo():
     assert invalid.status_code == 422
 
 
-async def test_chat_create_and_list():
+async def test_chat_create_and_list(monkeypatch):
+    async def current_user(_request):
+        return {
+            "id": "user_test",
+            "name": "Ada Lovelace",
+            "username": "ada",
+            "email": "test@vercel.com",
+        }
+
+    monkeypatch.setattr(server.auth, "current_user", current_user)
     async with client() as c:
         created = (await c.post("/api/chats", json={})).json()
         assert created["space_id"] is None
         assert created["title"] == "new chat"
+        assert created["author_display_name"] == "Ada Lovelace"
         listed = (await c.get("/api/chats")).json()
     assert [x["id"] for x in listed] == [created["id"]]
+    assert listed[0]["author_display_name"] == "Ada Lovelace"
 
 
 async def test_chat_archive_and_unarchive():
@@ -673,6 +690,7 @@ async def test_hub_lands_inbound_in_one_chat(monkeypatch):
     [chat] = await chats.list_all()
     assert chat.trigger == "slack:T1:C1:1.0"
     assert chat.title == "a thread"
+    assert chat.author_display_name == "test@vercel.com"
     stored = await events.read(chat.id, "messages")
     assert len(stored) == 2
     assert delivered == [
