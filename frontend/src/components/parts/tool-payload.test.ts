@@ -85,7 +85,9 @@ test("places long scalar values beneath their keys", () => {
     `repos:
   - vercel-labs/hatchery (default branch)
 setup_script:
-  cd /vercel/hatchery && (command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh) && vercel link --yes --project hatchery --scope vercel-internal-playground
+  cd /vercel/hatchery && (command -v uv >/dev/null || curl -LsSf
+  https://astral.sh/uv/install.sh | sh) && vercel link --yes --project
+  hatchery --scope vercel-internal-playground
 title: Render dispatcher tool JSON neatly
 size: big`,
   );
@@ -96,7 +98,8 @@ size: big`,
         "This is a deliberately long general value that should be visually separated from its field name.",
     }),
     `message:
-  This is a deliberately long general value that should be visually separated from its field name.`,
+  This is a deliberately long general value that should be visually
+  separated from its field name.`,
   );
 });
 

@@ -27,6 +27,24 @@ function scalarLines(value: unknown): string[] {
   return textLines(typeof value === "string" ? value : String(value));
 }
 
+function wrapLine(line: string, width: number): string[] {
+  if (line.length <= width || !line.trim()) return [line];
+
+  const leading = line.match(/^\s*/)?.[0] ?? "";
+  const wrapped: string[] = [];
+  let remaining = line;
+
+  while (remaining.length > width) {
+    let breakAt = remaining.lastIndexOf(" ", width);
+    if (breakAt <= leading.length) breakAt = remaining.indexOf(" ", width);
+    if (breakAt < 0) break;
+    wrapped.push(remaining.slice(0, breakAt).trimEnd());
+    remaining = `${leading}${remaining.slice(breakAt + 1).trimStart()}`;
+  }
+
+  return [...wrapped, remaining];
+}
+
 function repoValues(repos: unknown[], object: JsonObject): unknown[] {
   const branch = typeof object.branch === "string" ? object.branch.trim() : "";
   const gitSha = typeof object.git_sha === "string" ? object.git_sha.trim() : "";
@@ -81,9 +99,10 @@ function renderObject(object: JsonObject, indent: number): string[] {
     const lines = scalarLines(value);
     const inline = lines.length === 1 && lines[0].length <= MAX_INLINE_TEXT_LENGTH;
     if (inline) return [`${prefix}${key}: ${lines[0]}`];
+    const wrapped = lines.flatMap((line) => wrapLine(line, MAX_INLINE_TEXT_LENGTH));
     return [
       `${prefix}${key}:`,
-      ...lines.map((line) =>
+      ...wrapped.map((line) =>
         line ? `${" ".repeat(indent + 2)}${line}` : "",
       ),
     ];
