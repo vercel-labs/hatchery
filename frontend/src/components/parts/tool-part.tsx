@@ -38,9 +38,11 @@ function status(part: ChatToolPart): { icon: ReactNode; label: string } {
   }
 }
 
+const INLINE_KEY_LENGTH = 5;
+
 function Payload({ value }: { value: ToolPayloadValue }) {
   if (value.type === "scalar") {
-    return <span className="min-w-0 break-all whitespace-pre-wrap">{value.value}</span>;
+    return <span className="min-w-0 break-words whitespace-pre-wrap">{value.value}</span>;
   }
 
   if (value.type === "array") {
@@ -58,8 +60,10 @@ function Payload({ value }: { value: ToolPayloadValue }) {
 
   return (
     <span className="grid min-w-0 gap-y-0.5">
-      {value.entries.map(([key, item]) =>
-        item.type === "scalar" ? (
+      {value.entries.map(([key, item]) => {
+        const inline = item.type === "scalar" && key.length <= INLINE_KEY_LENGTH;
+
+        return inline ? (
           <span
             className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] gap-x-[1ch]"
             key={key}
@@ -70,12 +74,12 @@ function Payload({ value }: { value: ToolPayloadValue }) {
         ) : (
           <span className="min-w-0" key={key}>
             <span className="block">{key}:</span>
-            <span className="block min-w-0 pl-[2ch]">
+            <span className="block min-w-0 pl-[4ch]">
               <Payload value={item} />
             </span>
           </span>
-        ),
-      )}
+        );
+      })}
     </span>
   );
 }
