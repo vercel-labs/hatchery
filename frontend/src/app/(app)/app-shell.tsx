@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
@@ -355,13 +355,23 @@ export function AppShell() {
     if (sortSpaceId === space.id) setSortSpaceId(null);
   };
 
-  const refreshChats = useCallback(() => {
-    apiFetch("/api/chats")
-      .then((res) => (res.ok ? res.json() : null))
-      .then((found: Chat[] | null) => {
+  const refreshingChats = useRef(false);
+  const refreshChatsAgain = useRef(false);
+  const refreshChats = useCallback(async () => {
+    if (refreshingChats.current) {
+      refreshChatsAgain.current = true;
+      return;
+    }
+    refreshingChats.current = true;
+    do {
+      refreshChatsAgain.current = false;
+      try {
+        const response = await apiFetch("/api/chats");
+        const found: Chat[] | null = response.ok ? await response.json() : null;
         if (found) setChats(found);
-      })
-      .catch(() => {});
+      } catch {}
+    } while (refreshChatsAgain.current);
+    refreshingChats.current = false;
   }, []);
 
   const createChat = async () => {
@@ -1472,15 +1482,27 @@ function LiveChat({
   const [showTerminal, setShowTerminal] = useState(false);
   const [showSandboxForm, setShowSandboxForm] = useState(false);
   const [preferredSandboxId, setPreferredSandboxId] = useState<string>();
+  const loadingSandboxes = useRef(false);
+  const reloadSandboxes = useRef(false);
 
-  const loadSandboxes = useCallback(() => {
-    apiFetch(`/api/chats/${chat.id}/sandboxes`)
-      .then((res) => (res.ok ? res.json() : []))
-      .then((found: SandboxWorkspace[]) => {
+  const loadSandboxes = useCallback(async () => {
+    if (loadingSandboxes.current) {
+      reloadSandboxes.current = true;
+      return;
+    }
+    loadingSandboxes.current = true;
+    do {
+      reloadSandboxes.current = false;
+      try {
+        const response = await apiFetch(`/api/chats/${chat.id}/sandboxes`);
+        const found: SandboxWorkspace[] = response.ok ? await response.json() : [];
         setSandboxes(found);
         if (found.length) setShowTerminal(true);
-      })
-      .catch(() => setSandboxes([]));
+      } catch {
+        setSandboxes([]);
+      }
+    } while (reloadSandboxes.current);
+    loadingSandboxes.current = false;
   }, [chat.id]);
 
   useEffect(() => {
@@ -1488,7 +1510,8 @@ function LiveChat({
       .then((res) => (res.ok ? res.json() : []))
       .then(setInitialMessages)
       .catch(() => setInitialMessages([]));
-    loadSandboxes();
+    const frame = requestAnimationFrame(loadSandboxes);
+    return () => cancelAnimationFrame(frame);
   }, [chat.id, loadSandboxes]);
 
   useEffect(() => {
@@ -1500,11 +1523,18 @@ function LiveChat({
       const event = JSON.parse(message.data) as {
         type?: string;
         generation?: number;
+        state?: string;
       };
-      if (event.type === "chat.changed" || event.type === "task.changed") {
+      if (event.type === "chat.changed") {
         onChatChanged();
       }
-      if (event.type === "task.changed" || event.type === "sandbox.changed") {
+      if (
+        event.type === "sandbox.changed" ||
+        (event.type === "task.changed" &&
+          ["pending", "attention", "complete", "errored", "cancelled"].includes(
+            event.state ?? "",
+          ))
+      ) {
         loadSandboxes();
       }
       if (event.type === "messages.changed") {
