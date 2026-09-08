@@ -1,6 +1,7 @@
 """The dispatcher coordinates coding work in Vercel Sandboxes."""
 
 import typing
+import uuid
 
 import ai
 
@@ -26,7 +27,18 @@ subagent when appropriate. Do not call check_subagent for information already
 included in the result. Call require_attention with result_available when giving
 the human a final result that needs review, or blocked when work cannot continue
 without human input. Do not call it while routine follow-up work continues. Be
-terse and concrete."""
+terse and concrete.
+
+Read notification instructions in the space description and job prompt as prose;
+explicit job-specific instructions override the space default. When asked to
+notify a destination or people, search with find_channels and find_people, then
+select unambiguous actual candidates. Use only an exact destination returned by
+find_channels and Hatchery person IDs returned by find_people in send_message.
+Never invent destinations or handles. If candidates are missing or ambiguous,
+ask for clarification and call require_attention with blocked rather than guess.
+These are one-off sends: they create no bindings and do not establish automatic
+two-way routing. Sending or mentioning someone does not guarantee a notification.
+If delivery is uncertain, do not retry; report the uncertainty."""
 
 
 def system_prompt(space: models.Space) -> str:
@@ -57,7 +69,38 @@ def model() -> ai.Model:
 
 def agent_for(chat: dict) -> ai.Agent:
     """Build worker tools scoped to one chat."""
+    from channels import destinations
+
     chat_id = chat["id"]
+    delivery_key = str(uuid.uuid4())
+
+    @ai.tool
+    async def find_channels(
+        provider: typing.Literal["slack", "github"], query: str,
+    ) -> list[dict]:
+        """Find Slack bot-member channels by name/ID, or GitHub issue/PR candidates
+        by title, owner/repo#number, or URL within this space's repositories.
+        """
+        return await destinations.find_channels(chat_id, provider, query)
+
+    @ai.tool
+    async def find_people(query: str) -> list[dict]:
+        """Find linked people by Hatchery name or Slack/GitHub handle.
+        Returns Hatchery IDs to use in send_message's people argument.
+        """
+        return await destinations.find_people(chat_id, query)
+
+    @ai.tool
+    async def send_message(
+        provider: typing.Literal["slack", "github"], destination: str, text: str,
+        people: list[str] | None = None,
+    ) -> dict:
+        """Send only to an exact destination from find_channels, with people IDs
+        from find_people. One-off send, no bindings or guaranteed notification.
+        """
+        return await destinations.send_message(
+            chat_id, provider, destination, text, people, delivery_key=delivery_key,
+        )
 
     @ai.tool
     async def create_sandbox(
@@ -138,5 +181,8 @@ def agent_for(chat: dict) -> ai.Agent:
             message_subagent,
             check_subagent,
             require_attention,
+            find_channels,
+            find_people,
+            send_message,
         ]
     )

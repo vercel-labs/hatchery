@@ -1,3 +1,5 @@
+import uuid
+
 import pytest
 
 import models
@@ -29,6 +31,79 @@ def test_system_prompt_describes_worker_flow():
     assert "vercel/vercel-py" in prompt
 
 
+def test_system_prompt_describes_notification_policy():
+    prompt = dispatcher.system_prompt(space())
+    for policy in (
+        "space description and job prompt as prose",
+        "explicit job-specific instructions override the space default",
+        "search with find_channels and find_people",
+        "select unambiguous actual candidates",
+        "exact destination returned by find_channels",
+        "Hatchery person IDs returned by find_people",
+        "ask for clarification and call require_attention with blocked",
+        "one-off sends: they create no bindings",
+        "do not establish automatic two-way routing",
+        "does not guarantee a notification",
+        "If delivery is uncertain, do not retry",
+    ):
+        assert policy in " ".join(prompt.split())
+
+
+@pytest.mark.parametrize("provider", ["slack", "github"])
+@pytest.mark.parametrize("people", [None, ["person_1"]])
+async def test_destination_tools_are_chat_scoped(monkeypatch, provider, people):
+    from channels import destinations
+
+    calls = []
+    candidates = [{"destination": "exact_destination"}]
+    linked_people = [{"id": "person_1"}]
+
+    async def find_channels(chat_id, provider, query):
+        calls.append((chat_id, provider, query))
+        return candidates
+
+    async def find_people(chat_id, query):
+        calls.append((chat_id, query))
+        return linked_people
+
+    async def send_message(chat_id, provider, destination, text, people, *, delivery_key):
+        calls.append((chat_id, provider, destination, text, people, delivery_key))
+        return {"status": "sent"}
+
+    monkeypatch.setattr(destinations, "find_channels", find_channels)
+    monkeypatch.setattr(destinations, "find_people", find_people)
+    monkeypatch.setattr(destinations, "send_message", send_message)
+    agent = dispatcher.agent_for({"id": "chat_trusted"})
+    tools = {tool.name: tool for tool in agent.tools}
+
+    assert await tools["find_channels"].fn(provider, "release") == candidates
+    assert await tools["find_people"].fn("Alex") == linked_people
+    kwargs = {} if people is None else {"people": people}
+    for _ in range(2):
+        assert await tools["send_message"].fn(
+            provider, "exact_destination", "done", **kwargs,
+        ) == {"status": "sent"}
+
+    assert calls[:2] == [("chat_trusted", provider, "release"), ("chat_trusted", "Alex")]
+    assert calls[2][:-1] == ("chat_trusted", provider, "exact_destination", "done", people)
+    assert calls[2] == calls[3]
+    assert uuid.UUID(calls[2][-1]).version == 4
+    other = dispatcher.agent_for({"id": "chat_trusted"})
+    send = next(tool for tool in other.tools if tool.name == "send_message")
+    await send.fn(provider, "exact_destination", "done")
+    assert calls[-1][-1] != calls[2][-1]
+
+    for name, fields in (
+        ("find_channels", {"provider", "query"}),
+        ("find_people", {"query"}),
+        ("send_message", {"provider", "destination", "text", "people"}),
+    ):
+        properties = tools[name].tool.spec.params["properties"]
+        assert set(properties) == fields
+        if "provider" in fields:
+            assert properties["provider"]["enum"] == ["slack", "github"]
+
+
 async def test_worker_tools_are_chat_scoped(monkeypatch):
     seen = {}
 
@@ -43,6 +118,7 @@ async def test_worker_tools_are_chat_scoped(monkeypatch):
     assert set(tools) == {
         "create_sandbox", "list_sandboxes", "create_subagent",
         "message_subagent", "check_subagent", "require_attention",
+        "find_channels", "find_people", "send_message",
     }
     assert await tools["list_sandboxes"].fn() == []
     assert seen["chat_id"] == "chat_1"

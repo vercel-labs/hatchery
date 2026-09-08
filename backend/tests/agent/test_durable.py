@@ -36,6 +36,9 @@ async def test_durable_tools_keep_effects_non_retriable():
     assert durable.message_subagent_step.max_retries == 0
     assert durable.require_attention_step.max_retries == 0
     assert durable.deliver_replies.max_retries == 0
+    assert durable.find_channels_step.max_retries > 0
+    assert durable.find_people_step.max_retries > 0
+    assert durable.send_message_step.max_retries == 0
 
 
 async def test_custom_loop_uses_context_and_workflow_stream(monkeypatch):
@@ -88,6 +91,66 @@ async def test_tools_read_trusted_chat_id_from_current_agent(monkeypatch):
 
     assert calls == ["chat_1"]
     assert durable.list_sandboxes.tool.spec.params["properties"] == {}
+
+
+@pytest.mark.parametrize("provider", ["slack", "github"])
+@pytest.mark.parametrize("people", [None, ["person_1"]])
+async def test_destination_tools_forward_trusted_scope_through_steps(monkeypatch, provider, people):
+    from channels import destinations
+
+    calls = []
+    candidates = [{"destination": "exact_destination"}]
+    linked_people = [{"id": "person_1"}]
+
+    async def find_channels(chat_id, provider, query):
+        calls.append((chat_id, provider, query))
+        return candidates
+
+    async def find_people(chat_id, query):
+        calls.append((chat_id, query))
+        return linked_people
+
+    async def send_message(chat_id, provider, destination, text, people, *, delivery_key):
+        calls.append((chat_id, provider, destination, text, people, delivery_key))
+        return {"status": "sent"}
+
+    monkeypatch.setattr(destinations, "find_channels", find_channels)
+    monkeypatch.setattr(destinations, "find_people", find_people)
+    monkeypatch.setattr(destinations, "send_message", send_message)
+    for name in ("find_channels_step", "find_people_step", "send_message_step"):
+        monkeypatch.setattr(durable, name, getattr(durable, name).func)
+
+    class Writer:
+        async def write(self, value):
+            pass
+
+    agent = durable.DurableDispatcher("chat_trusted", Writer(), turn_id="turn_stable")
+    tools = {tool.name: tool for tool in agent.tools}
+    token = durable.current_agent.set(agent)
+    try:
+        assert await tools["find_channels"].fn(provider, "release") == candidates
+        assert await tools["find_people"].fn("Alex") == linked_people
+        kwargs = {} if people is None else {"people": people}
+        assert await tools["send_message"].fn(
+            provider, "exact_destination", "done", **kwargs,
+        ) == {"status": "sent"}
+    finally:
+        durable.current_agent.reset(token)
+
+    assert calls == [
+        ("chat_trusted", provider, "release"),
+        ("chat_trusted", "Alex"),
+        ("chat_trusted", provider, "exact_destination", "done", people, "turn_stable"),
+    ]
+    for name, fields in (
+        ("find_channels", {"provider", "query"}),
+        ("find_people", {"query"}),
+        ("send_message", {"provider", "destination", "text", "people"}),
+    ):
+        properties = tools[name].tool.spec.params["properties"]
+        assert set(properties) == fields
+        if "provider" in fields:
+            assert properties["provider"]["enum"] == ["slack", "github"]
 
 
 async def test_durable_require_attention_uses_trusted_chat_id(monkeypatch):
