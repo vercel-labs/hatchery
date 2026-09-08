@@ -1,5 +1,6 @@
 import uuid
 
+import httpx
 import pytest
 
 import models
@@ -102,6 +103,38 @@ async def test_destination_tools_are_chat_scoped(monkeypatch, provider, people):
         assert set(properties) == fields
         if "provider" in fields:
             assert properties["provider"]["enum"] == ["slack", "github"]
+
+
+@pytest.mark.parametrize("tool_name,returned", [
+    ("find_channels", False),
+    ("send_message", False),
+    ("send_message", True),
+])
+async def test_destination_scope_failures_raise_tool_errors(monkeypatch, tool_name, returned):
+    from channels import destinations
+
+    method = "users.conversations" if tool_name == "find_channels" else (
+        "chat.postMessage" if returned else "conversations.info"
+    )
+    error = destinations.SlackScopeRequired(method, {"needed": "channels:read"}, httpx.Headers())
+
+    async def service(*args, **kwargs):
+        if returned:
+            return error.result
+        raise error
+
+    monkeypatch.setattr(destinations, tool_name, service)
+    agent = dispatcher.agent_for({"id": "chat_1"})
+    tool = next(tool for tool in agent.tools if tool.name == tool_name)
+    args = ("slack", "release") if tool_name == "find_channels" else ("slack", "T1/C1", "done")
+    with pytest.raises(RuntimeError) as caught:
+        await tool.fn(*args)
+
+    if returned:
+        assert type(caught.value) is RuntimeError
+        assert str(caught.value) == error.result["detail"]
+    else:
+        assert caught.value is error
 
 
 async def test_worker_tools_are_chat_scoped(monkeypatch):

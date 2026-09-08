@@ -187,10 +187,13 @@ async def require_attention_step(
 @workflow.step
 async def find_channels_step(
     chat_id: str, provider: typing.Literal["slack", "github"], query: str,
-) -> list[dict]:
+) -> list[dict] | dict:
     from channels import destinations
 
-    return await destinations.find_channels(chat_id, provider, query)
+    try:
+        return await destinations.find_channels(chat_id, provider, query)
+    except destinations.SlackScopeRequired as error:
+        return error.result  # Do not retry a permission failure as a workflow fault.
 
 
 @workflow.step
@@ -207,9 +210,12 @@ async def send_message_step(
 ) -> dict:
     from channels import destinations
 
-    return await destinations.send_message(
-        chat_id, provider, destination, text, people, delivery_key=delivery_key,
-    )
+    try:
+        return await destinations.send_message(
+            chat_id, provider, destination, text, people, delivery_key=delivery_key,
+        )
+    except destinations.SlackScopeRequired as error:
+        return error.result
 
 
 current_agent: contextvars.ContextVar["DurableDispatcher"] = contextvars.ContextVar(
@@ -296,7 +302,10 @@ async def find_channels(
     """Find Slack bot-member channels by name/ID, or GitHub issue/PR candidates
     by title, owner/repo#number, or URL within this space's repositories.
     """
-    return await find_channels_step(current_agent.get().chat_id, provider, query)
+    result = await find_channels_step(current_agent.get().chat_id, provider, query)
+    if isinstance(result, dict) and result.get("error") == "missing_scope":
+        raise RuntimeError(result["detail"])  # Tool error, outside the retryable step.
+    return result
 
 
 @ai.tool
@@ -316,9 +325,12 @@ async def send_message(
     from find_people. One-off send, no bindings or guaranteed notification.
     """
     agent = current_agent.get()
-    return await send_message_step(
+    result = await send_message_step(
         agent.chat_id, provider, destination, text, people, delivery_key=agent.turn_id,
     )
+    if result.get("error") == "missing_scope":
+        raise RuntimeError(result["detail"])
+    return result
 
 
 TOOLS = [
@@ -580,6 +592,13 @@ async def run_turn(turn: TurnInput) -> None:
                     async for _ in result:
                         pass
                     added = result.messages[len(prepared.history) :]
+            except Exception:
+                try:
+                    if collector.finished_spans:
+                        await ship_spans(collector.finished_spans)
+                except Exception:
+                    pass  # A telemetry failure must not replace the agent failure.
+                raise
             finally:
                 current_agent.reset(token)
             if collector.finished_spans:

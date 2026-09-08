@@ -38,7 +38,10 @@ Never invent destinations or handles. If candidates are missing or ambiguous,
 ask for clarification and call require_attention with blocked rather than guess.
 These are one-off sends: they create no bindings and do not establish automatic
 two-way routing. Sending or mentioning someone does not guarantee a notification.
-If delivery is uncertain, do not retry; report the uncertainty."""
+If delivery is uncertain, do not retry; report the uncertainty.
+If a tool returns missing_scope, report its connector, method, needed and provided
+scopes, and mark the chat blocked. Do not retry or interpret it as no matches.
+Do not invent scope details that the provider did not report."""
 
 
 def system_prompt(space: models.Space) -> str:
@@ -98,9 +101,12 @@ def agent_for(chat: dict) -> ai.Agent:
         """Send only to an exact destination from find_channels, with people IDs
         from find_people. One-off send, no bindings or guaranteed notification.
         """
-        return await destinations.send_message(
+        result = await destinations.send_message(
             chat_id, provider, destination, text, people, delivery_key=delivery_key,
         )
+        if result.get("error") == "missing_scope":
+            raise RuntimeError(result["detail"])
+        return result
 
     @ai.tool
     async def create_sandbox(

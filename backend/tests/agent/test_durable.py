@@ -1,8 +1,11 @@
 import ast
 import inspect
+import json
 import textwrap
+import types
 
 import ai
+import httpx
 import pytest
 
 from agent import durable
@@ -153,6 +156,123 @@ async def test_destination_tools_forward_trusted_scope_through_steps(monkeypatch
             assert properties["provider"]["enum"] == ["slack", "github"]
 
 
+@pytest.mark.parametrize("tool_name", ["find_channels", "send_message"])
+@pytest.mark.parametrize("reported", [False, True])
+async def test_scope_failure_returns_from_step_but_raises_from_tool(monkeypatch, tool_name, reported):
+    from channels import destinations
+
+    monkeypatch.setenv("SLACK_CONNECTOR", "slack_test")
+    body = {"needed": "groups:read,channels:read", "provided": "chat:write"} if reported else {}
+    headers = httpx.Headers({"x-accepted-oauth-scopes": "channels:read"} if reported else {})
+    method = "users.conversations" if tool_name == "find_channels" else "conversations.info"
+    error = destinations.SlackScopeRequired(method, body, headers)
+
+    async def service(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(destinations, tool_name, service)
+    step = getattr(durable, f"{tool_name}_step")
+    args = ("slack", "release") if tool_name == "find_channels" else ("slack", "T1/C1", "done")
+    step_args = args if tool_name == "find_channels" else (*args, None)
+    kwargs = {} if tool_name == "find_channels" else {"delivery_key": "turn_1"}
+    result = await step.func("chat_1", *step_args, **kwargs)
+
+    assert result == {
+        "status": "failed", "provider": "slack", "error": "missing_scope",
+        "method": method, "connector": "slack_test",
+        "needed": ["channels:read", "groups:read"] if reported else None,
+        "provided": ["chat:write"] if reported else None,
+        "accepted_scopes": ["channels:read"] if reported else None,
+        "detail": str(error),
+    }
+    monkeypatch.setattr(durable, f"{tool_name}_step", step.func)
+    agent = durable.DurableDispatcher("chat_1", None, turn_id="turn_1")
+    token = durable.current_agent.set(agent)
+    try:
+        with pytest.raises(RuntimeError) as caught:
+            await getattr(durable, tool_name).fn(*args)
+    finally:
+        durable.current_agent.reset(token)
+    assert type(caught.value) is RuntimeError
+    assert str(caught.value) == result["detail"]
+
+
+@pytest.mark.parametrize("tool_name,returned", [
+    ("find_channels", False),
+    ("send_message", False),
+    ("send_message", True),
+])
+async def test_scope_failure_reaches_model_once_and_agent_continues(monkeypatch, tool_name, returned):
+    from channels import destinations
+
+    method = "users.conversations" if tool_name == "find_channels" else (
+        "chat.postMessage" if returned else "conversations.info"
+    )
+    error = destinations.SlackScopeRequired(method, {"needed": "channels:read"}, httpx.Headers())
+    attempts = []
+    model_results = []
+    args = {"provider": "slack", "query": "release"} if tool_name == "find_channels" else {
+        "provider": "slack", "destination": "T1/C1", "text": "done",
+    }
+
+    async def service(*args, **kwargs):
+        attempts.append((args, kwargs))
+        if returned:
+            return error.result
+        raise error
+
+    async def model_step(context, writer):
+        if len(context.messages) == 1:
+            return ai.assistant_message(ai.messages.ToolCallPart(
+                tool_call_id="call_1", tool_name=tool_name, tool_args=json.dumps(args),
+            ))
+        model_results.extend(context.messages[-1].tool_results)
+        return ai.assistant_message("Permissions need updating; I can continue with other work.")
+
+    class Writer:
+        async def write(self, value):
+            pass
+
+    monkeypatch.setattr(destinations, tool_name, service)
+    monkeypatch.setattr(durable, "llm_step", model_step)
+    for name in (f"{tool_name}_step", "write_stream_event"):
+        monkeypatch.setattr(durable, name, getattr(durable, name).func)
+    agent = durable.DurableDispatcher("chat_1", Writer(), turn_id="turn_1")
+    token = durable.current_agent.set(agent)
+    try:
+        async with agent.run(ai.get_model("openai/test"), [ai.user_message("notify release")]) as run:
+            emitted = [event async for event in run]
+    finally:
+        durable.current_agent.reset(token)
+
+    assert len(attempts) == 1
+    assert len(model_results) == 1
+    result = model_results[0]
+    assert result.tool_call_id == "call_1"
+    assert result.tool_name == tool_name
+    assert result.is_error is True
+    assert error.result["detail"] in result.get_model_input()
+    tool_events = [event for event in emitted if isinstance(event, ai.events.ToolCallResult)]
+    assert len(tool_events) == 1
+    assert tool_events[0].message.tool_results == [result]
+    assert run.messages[-1].text == "Permissions need updating; I can continue with other work."
+
+
+async def test_find_channels_step_preserves_transient_exception(monkeypatch):
+    from channels import destinations
+
+    error = httpx.ReadTimeout("Slack temporarily unavailable")
+
+    async def find_channels(*args):
+        raise error
+
+    monkeypatch.setattr(destinations, "find_channels", find_channels)
+    assert durable.find_channels_step.max_retries > 0
+    with pytest.raises(httpx.ReadTimeout) as caught:
+        await durable.find_channels_step.func("chat_1", "slack", "release")
+    assert caught.value is error
+
+
 async def test_durable_require_attention_uses_trusted_chat_id(monkeypatch):
     calls = []
 
@@ -249,6 +369,84 @@ async def test_deliver_replies_finishes_worker_completion(monkeypatch):
     assert current.completion_message == "done"
     assert current.completion_delivered is True
     assert (await chats.get(chat.id)).status == "done"
+
+
+@pytest.mark.parametrize("shipping_fails", [False, True])
+async def test_run_turn_ships_real_failed_spans_and_preserves_error(monkeypatch, shipping_fails):
+    original = RuntimeError("agent loop failed")
+    shipped = []
+    live_spans = []
+    channel_events = []
+
+    class FailingAgent(ai.Agent):
+        async def loop(self, context):
+            yield ai.events.StreamEnd(message=ai.assistant_message("starting"))
+            async with ai.experimental_telemetry.span("failed work") as span:
+                live_spans.append(span)
+                raise original
+
+    class Writer:
+        closed = False
+
+        def __init__(self):
+            self.events = []
+
+        async def write(self, value):
+            self.events.append(value)
+
+        async def close(self):
+            self.closed = True
+
+    async def prepare(turn):
+        return durable.PreparedTurn(history=[ai.user_message("help")])
+
+    async def ship(spans):
+        shipped.append(spans)
+        if shipping_fails:
+            raise RuntimeError("telemetry export failed")
+
+    async def emit(*args):
+        channel_events.append(args)
+
+    writer = Writer()
+    agent = FailingAgent()
+    monkeypatch.setattr(durable, "DurableDispatcher", lambda *args: agent)
+    monkeypatch.setattr(durable.vercel.workflow, "get_writable", lambda: writer)
+    monkeypatch.setattr(durable.vercel.workflow, "get_workflow_metadata", lambda: types.SimpleNamespace(run_id="run_1"))
+    monkeypatch.setattr(durable, "prepare_turn", prepare)
+    monkeypatch.setattr(durable, "ship_spans", ship)
+    monkeypatch.setattr(durable, "emit_turn_event", emit)
+    for name in ("register_turn", "finish_turn", "write_lifecycle_event", "close_stream"):
+        monkeypatch.setattr(durable, name, getattr(durable, name).func)
+    turn = durable.TurnInput(chat_id="chat_1", turn_id="turn_1", origin="ui")
+    previous_agent = durable.current_agent.get(None)
+
+    # The real SDK task group wraps the loop error; export must not replace it.
+    with pytest.raises(ExceptionGroup) as caught:
+        await inspect.unwrap(durable.run_turn.func)(turn)
+
+    assert caught.value.exceptions == (original,)
+    assert durable.current_agent.get(None) is previous_agent
+    assert len(shipped) == 1
+    spans = shipped[0]
+    failed_work = next(span for span in spans if span.name == "failed work")
+    run_span = next(span for span in spans if span.data.kind == "run")
+    assert failed_work.id == live_spans[0].id
+    assert failed_work.parent_id == run_span.id
+    for span, error in ((failed_work, original), (run_span, caught.value)):
+        assert span.id
+        assert span.started_at is not None
+        assert span.ended_at >= span.started_at
+        assert span.error.type == type(error).__name__
+        assert span.error.message == str(error)
+    assert (await events.read("chat_1", "turns"))[-1][1] == {
+        "type": "turn.failed", "turn_id": "turn_1", "run_id": "run_1",
+        "error": str(caught.value),
+    }
+    assert writer.events[-1]["type"] == "turn.failed"
+    assert writer.events[-1]["error"] == str(caught.value)
+    assert channel_events[-1] == ("chat_1", "turn.failed", str(caught.value))
+    assert writer.closed is True
 
 
 async def test_active_turn_reconciles_failed_workflow(monkeypatch):

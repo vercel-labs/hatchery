@@ -312,6 +312,68 @@ async def test_missing_scope_and_permalink_failure_are_not_reported_as_success_a
     assert result["status"] == "failed"
 
 
+async def test_scope_error_preserves_provider_details_without_logging_credentials(directory, provider, monkeypatch, caplog):
+    chat, _ = directory
+    _, overrides = provider
+    monkeypatch.setenv("SLACK_CONNECTOR", "slack/hatchery")
+    overrides["users.conversations"] = {
+        "ok": False, "error": "missing_scope", "needed": "channels:read,groups:read",
+        "provided": "chat:write,channels:read", "token": "do-not-log-this-token",
+        "private_data": "do-not-log-this-either",
+    }
+    with pytest.raises(destinations.SlackScopeRequired) as caught:
+        await destinations.find_channels(chat.id, "slack", "general")
+    result = caught.value.result
+    assert result["connector"] == "slack/hatchery"
+    assert result["method"] == "users.conversations"
+    assert result["needed"] == ["channels:read", "groups:read"]
+    assert result["provided"] == ["channels:read", "chat:write"]
+    assert "needed=channels:read,groups:read" in str(caught.value)
+    assert "provided=channels:read,chat:write" in str(caught.value)
+    assert str(caught.value) in caplog.text
+    assert "do-not-log" not in caplog.text + json.dumps(result)
+
+
+@pytest.mark.parametrize("body,headers,needed,provided,accepted", [
+    ({"needed": "groups:read"}, {"x-oauth-scopes": "chat:write", "x-accepted-oauth-scopes": "channels:read,groups:read"},
+     ["groups:read"], ["chat:write"], ["channels:read", "groups:read"]),
+    ({"provided": None}, {"x-oauth-scopes": "chat:write"}, None, ["chat:write"], None),
+    ({}, {"x-accepted-oauth-scopes": "channels:read,groups:read"}, None, None, ["channels:read", "groups:read"]),
+    ({"provided": ""}, {"x-oauth-scopes": "chat:write"}, None, [], None),
+    ({}, {}, None, None, None),
+])
+async def test_scope_error_header_fallback_does_not_invent_missing_details(directory, provider, body, headers, needed, provided, accepted):
+    chat, _ = directory
+    _, overrides = provider
+    overrides["users.conversations"] = lambda request, form: httpx.Response(
+        200, json={"ok": False, "error": "missing_scope", **body}, headers=headers,
+    )
+    with pytest.raises(destinations.SlackScopeRequired) as caught:
+        await destinations.find_channels(chat.id, "slack", "general")
+    result = caught.value.result
+    assert result["needed"] == needed
+    assert result["provided"] == provided
+    assert result["accepted_scopes"] == accepted
+    if needed is None:
+        assert "needed=(not reported)" in result["detail"]
+
+
+async def test_send_scope_failure_keeps_details_in_durable_receipt(directory, provider):
+    chat, _ = directory
+    requests, overrides = provider
+    overrides["chat.postMessage"] = {
+        "ok": False, "error": "missing_scope", "needed": "chat:write", "provided": "channels:read",
+    }
+    result = await destinations.send_message(chat.id, "slack", "T1/C1", "Done", delivery_key="turn1")
+    assert result["status"] == "failed"
+    assert result["error"] == "missing_scope"
+    assert result["needed"] == ["chat:write"]
+    assert result["provided"] == ["channels:read"]
+    assert (await events.read(chat.id, "notifications"))[-1][1]["result"] == result
+    assert await destinations.send_message(chat.id, "slack", "T1/C1", "Done", delivery_key="turn1") == result
+    assert sum(path == "chat.postMessage" for path, _, _ in requests) == 1
+
+
 async def test_github_exact_and_title_search_are_space_scoped(directory, provider):
     chat, _ = directory
     requests, overrides = provider

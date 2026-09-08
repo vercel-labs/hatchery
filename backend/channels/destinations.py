@@ -32,6 +32,36 @@ class _UncertainDelivery(RuntimeError):
     pass
 
 
+class SlackScopeRequired(RuntimeError):
+    """A permanent permission failure with safe, provider-reported diagnostics."""
+
+    def __init__(self, method: str, body: dict, headers: httpx.Headers):
+        scopes = {}
+        descriptions = []
+        provided = body.get("provided")
+        for field, value in {
+            "needed": body.get("needed"),
+            "provided": provided if provided is not None else headers.get("x-oauth-scopes"),
+            "accepted_scopes": headers.get("x-accepted-oauth-scopes"),
+        }.items():
+            parsed = sorted(set(value.replace(",", " ").split())) if isinstance(value, str) else None
+            scopes[field] = parsed
+            label = "(not reported)" if parsed is None else ",".join(parsed) or "(none)"
+            descriptions.append(f"{field}={label}")
+        connector = os.environ.get("SLACK_CONNECTOR", "unconfigured")
+        details = "; ".join(descriptions)
+        message = (
+            f"Slack {method} failed: missing_scope (connector={connector}; {details}). "
+            "Check the Slack bot scopes in Vercel Connect and reauthorize the workspace installation. "
+            "Do not retry until permissions are updated."
+        )
+        super().__init__(message)
+        self.result = {
+            "status": "failed", "provider": "slack", "error": "missing_scope",
+            "method": method, "connector": connector, **scopes, "detail": message,
+        }
+
+
 def _rank(query: str, candidates: list[dict]) -> list[dict]:
     query = unicodedata.normalize("NFKC", query).strip().lstrip("@#").casefold()
     if not query:
@@ -96,6 +126,10 @@ async def _api(client: httpx.AsyncClient, method: str, path: str, **kwargs) -> d
         raise RuntimeError(f"provider request failed (HTTP {response.status_code}); check permissions or rate limits")
     body = response.json()
     if body.get("ok") is False:
+        if body.get("error") == "missing_scope":
+            error = SlackScopeRequired(path, body, response.headers)
+            log.warning("%s", error)
+            raise error
         if path == "chat.postMessage" and body.get("error") in {"internal_error", "fatal_error", "request_timeout"}:
             raise _UncertainDelivery("Slack may have accepted the message")
         raise RuntimeError(f"Slack {path} failed: {body.get('error', 'unknown_error')}")
@@ -354,6 +388,8 @@ async def send_message(
                           "message_id": str(posted["id"]), "url": posted["html_url"]}
         except (httpx.HTTPError, ValueError, KeyError, _UncertainDelivery):
             result = {"status": "unknown", "detail": "Provider acceptance is uncertain. Check the destination; do not resend blindly."}
+        except SlackScopeRequired as error:
+            result = error.result
         except RuntimeError as error:
             result = {"status": "failed", "detail": str(error)}
         await events.append(chat_id, "notifications", {"key": digest, "result": result})
