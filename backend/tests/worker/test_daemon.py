@@ -78,7 +78,7 @@ async def test_runtime_runs_interactive_fx_and_reuses_it_for_follow_up(monkeypat
     await runtime.handle({**base, "sequence": 1, "type": "task.input"})
     await asyncio.gather(*runtime.jobs)
 
-    assert commands == [(["fx"], {"cwd": str(tmp_path), "env": commands[0][1]["env"]})]
+    assert commands == [(["/opt/hatchery/bin/fx"], {"cwd": str(tmp_path), "env": commands[0][1]["env"]})]
     assert commands[0][1]["env"]["AI_GATEWAY_API_KEY"] == "gateway-key"
     assert json.loads((tmp_path / ".fx" / "settings.json").read_text()) == {
         "permission_mode": "yolo",
@@ -202,8 +202,8 @@ async def test_runtime_recovers_active_task_with_fx_resume(monkeypatch, tmp_path
 
 
 def test_fx_resume_is_only_used_for_relaunch():
-    assert main.Runtime.fx_command(resume=False) == ["fx"]
-    assert main.Runtime.fx_command(resume=True) == ["fx", "--resume", "last"]
+    assert main.Runtime.fx_command(resume=False) == ["/opt/hatchery/bin/fx"]
+    assert main.Runtime.fx_command(resume=True) == ["/opt/hatchery/bin/fx", "--resume", "last"]
 
 
 async def test_runtime_keeps_ordering_state_across_restart(tmp_path):
