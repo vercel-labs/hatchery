@@ -1,4 +1,4 @@
-"""Discover linked people and bot destinations; send one-off notifications.
+"""Discover linked people and destinations; send notifications or share threads.
 
 Descriptions stay plain text. Tools return candidates, never choose fuzzy matches.
 The default Connect installation is intentional: v1 does not route across tenants.
@@ -21,7 +21,7 @@ from vercel import connect
 import auth
 from channels import github
 from store import auth as auth_store
-from store import chats, events, spaces
+from store import chats, events, spaces, turns
 
 Provider = typing.Literal["slack", "github"]
 LIMIT = 10
@@ -280,11 +280,80 @@ async def find_people(chat_id: str, query: str) -> list[dict]:
     return found
 
 
+async def start_shared_thread(
+    chat_id: str, provider: Provider, destination: str, text: str,
+    people: list[str] | None = None, *, delivery_key: str,
+    tool_call_id: str | None = None, excluded_message_ids: list[str] | None = None,
+) -> dict:
+    """Post a root notification and attach its external conversation to this chat."""
+    return await send_message(
+        chat_id, provider, destination, text, people, delivery_key=delivery_key,
+        _sharing={"tool_call_id": tool_call_id, "excluded_message_ids": list(excluded_message_ids or [])},
+    )
+
+
+async def recover_shared_thread(token: str) -> chats.Binding | None:
+    """Repair an exact thread from a durable sent receipt, never from inbound data.
+
+    Inbound callers hold the destination lock before recovering and claiming.
+    Scanning chat receipts is intentional for this small application.
+    """
+    existing = await chats.binding(token)
+    if existing is not None:
+        return existing
+    match = None
+    for chat in await chats.list_all():
+        for _, receipt in reversed(await events.read(chat.id, "notifications")):
+            if receipt.get("result", {}).get("status") != "sent" or receipt.get("sharing", {}).get("token") != token:
+                continue
+            if match is not None:
+                raise ValueError("destination has conflicting sent receipts in different chats")
+            match = (chat.id, receipt)
+            break
+    if match is not None:
+        chat_id, receipt = match
+        await _finalize_sharing(chat_id, receipt["result"], receipt["sharing"])
+    return await chats.binding(token)
+
+
+async def _finalize_sharing(chat_id: str, result: dict, record: dict) -> dict:
+    # The sent receipt is already durable. Every following write can be repaired
+    # from it, even when the independent sharing record was never written.
+    state = record["state"]
+    lock_key = (
+        f"sharing:slack:{state['team_id']}:{state['channel_id']}"
+        if record["provider"] == "slack" else f"sharing:{record['token']}"
+    )
+    # Always destination/token -> chat, including recovery. Inbound releases its
+    # destination/token lock before taking the chat lock; never reverse this order.
+    async with turns.run(lock_key), turns.run(chat_id):
+        # A replay may have read the first receipt while permalink enrichment was
+        # still in progress. Prefer the newest durable version after waiting.
+        for _, receipt in reversed(await events.read(chat_id, "notifications")):
+            if (
+                receipt.get("sharing", {}).get("id") == record["id"]
+                and receipt["sharing"].get("token") == record["token"]
+                and receipt.get("result", {}).get("status") == "sent"
+            ):
+                result, record = receipt["result"], receipt["sharing"]
+                break
+        await chats.bind(record["token"], chat_id, record["provider"], record["state"])
+        if not any(saved.get("id") == record["id"] for _, saved in await events.read(chat_id, "sharing")):
+            await events.append(chat_id, "sharing", record)
+        if not any(
+            saved.get("type") == "messages.changed" and saved.get("sharing_id") == record["id"]
+            for _, saved in await events.read(chat_id, "ui")
+        ):
+            await events.append(chat_id, "ui", {"type": "messages.changed", "sharing_id": record["id"]})
+    return result
+
+
 async def send_message(
     chat_id: str, provider: Provider, destination: str, text: str,
     people: list[str] | None = None, *, delivery_key: str,
+    _sharing: dict | None = None,
 ) -> dict:
-    """Post once, with verified linked mentions; never bind or transfer a chat."""
+    """Post once with verified linked mentions; one-off unless sharing is requested."""
     user, space = await _context(chat_id)
     if not text.strip():
         raise ValueError("message cannot be empty")
@@ -296,13 +365,24 @@ async def send_message(
             raise ValueError("recipient must be an allowed linked Hatchery user")
         recipients.append(person)
     digest = hashlib.sha256(json.dumps(
-        [delivery_key, provider, destination, text, people], ensure_ascii=False,
+        [delivery_key, provider, destination, text, people] + (["shared"] if _sharing is not None else []),
+        ensure_ascii=False,
     ).encode()).hexdigest()
     # A provider may accept a request whose response is lost. Never blindly retry it.
-    for _, record in await events.read(chat_id, "notifications"):
+    for _, record in reversed(await events.read(chat_id, "notifications")):
         if record.get("key") == digest and "result" in record:
+            if record.get("sharing") and record["result"]["status"] == "sent":
+                return await _finalize_sharing(chat_id, record["result"], record["sharing"])
             return record["result"]
-    async with _client(provider) as client:
+    sharing = None
+    if _sharing is not None:
+        sharing = {
+            "id": f"sharing_{digest[:24]}", "provider": provider, "text": text,
+            "tool_call_id": _sharing["tool_call_id"],
+            "state": {"sharing_id": f"sharing_{digest[:24]}",
+                      "excluded_message_ids": _sharing["excluded_message_ids"]},
+        }
+    async with _client(provider) as client, contextlib.AsyncExitStack() as locks:
         mentions = []
         if provider == "slack":
             team = await _slack_team(client, user)
@@ -333,6 +413,11 @@ async def send_message(
             content = " ".join([*mentions, html.escape(text, quote=False)])
             if len(content) > 40_000:
                 raise ValueError("Slack message exceeds 40000 characters")
+            if sharing is not None:
+                sharing["label"] = f"#{channel.get('name', channel_id)}"
+                sharing["state"].update({
+                    "team_id": team, "channel_id": channel_id, "user_id": user["slack"]["user_id"],
+                })
             path = "chat.postMessage"
             params = {"data": {"channel": channel_id, "text": content, "parse": "none",
                                "unfurl_links": "false", "unfurl_media": "false"}}
@@ -342,7 +427,35 @@ async def send_message(
             if not reference or reference[0].casefold() not in repos:
                 raise ValueError("use owner/repo#number in this space's repositories")
             repo, number = reference
-            await _api(client, "GET", f"repos/{repo}/issues/{number}")
+            issue = await _api(client, "GET", f"repos/{repo}/issues/{number}")
+            if sharing is not None:
+                repository = await _api(client, "GET", f"repos/{repo}")
+                owner, name = repository["full_name"].split("/", 1)
+                kind = "pull" if issue.get("pull_request") else "issue"
+                token = f"github:repo:{repository['id']}:{kind}:{number}"
+                # Serialize competing outbound shares of the same issue, even
+                # across chats. The atomic bind remains the final collision guard.
+                await locks.enter_async_context(turns.run(f"sharing:{token}"))
+                existing = await recover_shared_thread(token)
+                if existing is not None and existing.chat_id != chat_id:
+                    raise ValueError("destination is already bound to another chat")
+                for _, receipt in reversed(await events.read(chat_id, "notifications")):
+                    if receipt.get("sharing", {}).get("token") == token and receipt.get("result", {}).get("status") == "sent":
+                        return await _finalize_sharing(chat_id, receipt["result"], receipt["sharing"])
+                if existing is not None:
+                    # This conversation was linked by inbound, not by this send.
+                    # Do not cut off its history or suppress delayed older replies.
+                    return {
+                        "status": "already_shared", "provider": provider, "destination": destination,
+                        "url": issue.get("html_url", f"https://github.com/{owner}/{name}/issues/{number}"),
+                        "detail": "This thread is already linked to this chat; no notification was sent.",
+                    }
+                sharing.update({"token": token, "label": f"{owner}/{name}#{number}"})
+                sharing["state"].update({
+                    "owner": owner, "repo": name, "repository_id": repository["id"],
+                    "kind": kind, "number": number, "root_comment_id": None,
+                    "sender_id": str((user.get("github") or {}).get("id", "")),
+                })
             for person in recipients:
                 identity = person.get("github") or {}
                 login = identity.get("login", "")
@@ -358,10 +471,38 @@ async def send_message(
                 raise ValueError("GitHub comment is too long")
             path = f"repos/{repo}/issues/{number}/comments"
             params = {"json": {"body": content}}
+        if sharing is not None:
+            if provider == "slack":
+                # Slack's root ts is only known after posting. Inbound claims use
+                # this channel lock too, so they cannot steal the post -> bind gap.
+                await locks.enter_async_context(turns.run(f"sharing:slack:{team}:{channel_id}"))
+            # A concurrent send may have completed while this call waited.
+            for _, receipt in reversed(await events.read(chat_id, "notifications")):
+                if receipt.get("key") == digest and "result" in receipt:
+                    if receipt.get("sharing") and receipt["result"]["status"] == "sent":
+                        return await _finalize_sharing(chat_id, receipt["result"], receipt["sharing"])
+                    return receipt["result"]
         if not await chats.dedupe(f"notification:{chat_id}:{digest}"):
             return {"status": "unknown", "detail": "Delivery already attempted. Check the destination; do not resend blindly."}
+        if sharing is not None:
+            # Freeze the boundary before posting, not when a receipt is replayed.
+            # Model context can lag behind persisted inbound messages. Retain its
+            # order, then append any newer messages and previous sharing roots.
+            async with turns.run(chat_id):
+                excluded = list(sharing["state"]["excluded_message_ids"])
+                for namespace in ("messages", "pending_messages"):
+                    excluded.extend(
+                        message["id"] for _, message in await events.read(chat_id, namespace) if message.get("id")
+                    )
+                excluded.extend(f"sharing:{saved['id']}" for _, saved in await events.read(chat_id, "sharing") if saved.get("id"))
+                excluded.extend(
+                    f"sharing:{receipt['sharing']['id']}"
+                    for _, receipt in await events.read(chat_id, "notifications")
+                    if receipt.get("sharing", {}).get("id") and receipt.get("result", {}).get("status") == "sent"
+                )
+                sharing["state"]["excluded_message_ids"] = list(dict.fromkeys(excluded))
         await events.append(chat_id, "notifications", {
-            "key": digest, "provider": provider, "destination": destination, "people": people,
+            "key": digest, "provider": provider, "destination": destination, "people": people, "text": content,
         })
         try:
             posted = await _api(client, "POST", path, **params)
@@ -369,13 +510,6 @@ async def send_message(
                 ts = posted["ts"]
                 result = {"status": "sent", "provider": provider, "destination": destination,
                           "message_id": ts, "url": f"https://app.slack.com/client/{team}/{channel_id}"}
-                try:
-                    link = await _api(client, "POST", "chat.getPermalink", data={
-                        "channel": channel_id, "message_ts": ts,
-                    })
-                    result["url"] = link["permalink"]
-                except (httpx.HTTPError, RuntimeError, ValueError, KeyError):
-                    pass  # The post succeeded even if permalink lookup did not.
             else:
                 result = {"status": "sent", "provider": provider, "destination": destination,
                           "message_id": str(posted["id"]), "url": posted["html_url"]}
@@ -385,5 +519,36 @@ async def send_message(
             result = error.result
         except RuntimeError as error:
             result = {"status": "failed", "detail": str(error)}
-        await events.append(chat_id, "notifications", {"key": digest, "result": result})
+        receipt = {"key": digest, "result": result, "text": content}
+        if sharing is not None and result["status"] == "sent":
+            sharing["state"]["start_message_id"] = result["message_id"]
+            if provider == "slack":
+                sharing["token"] = f"slack:{team}:{channel_id}:{result['message_id']}"
+                sharing["state"]["thread_ts"] = result["message_id"]
+            else:
+                sharing["state"]["comment_id"] = posted["id"]
+            sharing.update({"url": result["url"], "message_id": result["message_id"]})
+            result["sharing"] = {key: value for key, value in sharing.items() if key not in {"token", "state"}}
+            receipt["sharing"] = sharing
+        # Do not include local finalization in the provider exception handler:
+        # a storage/binding failure must never overwrite a known-sent receipt.
+        await events.append(chat_id, "notifications", receipt)
+        if provider == "slack" and result["status"] == "sent":
+            # Persist acceptance before the optional, potentially slow lookup.
+            # A crash here is recoverable using the fallback URL and frozen state.
+            try:
+                link = await _api(client, "POST", "chat.getPermalink", data={
+                    "channel": channel_id, "message_ts": result["message_id"],
+                })
+                permalink = link["permalink"]
+            except (httpx.HTTPError, RuntimeError, ValueError, KeyError):
+                permalink = result["url"]
+            if permalink != result["url"]:
+                result["url"] = permalink
+                if "sharing" in receipt:
+                    receipt["sharing"]["url"] = permalink
+                    result["sharing"]["url"] = permalink
+                await events.append(chat_id, "notifications", receipt)
+        if "sharing" in receipt:
+            return await _finalize_sharing(chat_id, result, receipt["sharing"])
         return result

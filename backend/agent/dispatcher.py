@@ -1,5 +1,6 @@
 """The dispatcher coordinates coding work in Vercel Sandboxes."""
 
+import contextvars
 import typing
 import uuid
 
@@ -33,11 +34,15 @@ Read notification instructions in the space description and job prompt as prose;
 explicit job-specific instructions override the space default. When asked to
 notify a destination or people, search with find_channels and find_people, then
 select unambiguous actual candidates. Use only an exact destination returned by
-find_channels and Hatchery person IDs returned by find_people in send_message.
-Never invent destinations or handles. If candidates are missing or ambiguous,
-ask for clarification and call require_attention with blocked rather than guess.
-These are one-off sends: they create no bindings and do not establish automatic
-two-way routing. Sending or mentioning someone does not guarantee a notification.
+find_channels and Hatchery person IDs returned by find_people in start_shared_thread
+or send_message. Never invent destinations or handles. If candidates are missing
+or ambiguous, ask for clarification and call require_attention with blocked rather
+than guess. By default, when asked to notify or share and continue the conversation,
+use start_shared_thread: it sends the notification and shares future replies with
+that destination, not earlier conversation text. If explicitly asked for a one-off,
+use send_message. These are one-off sends: they create no bindings and do not
+establish automatic two-way routing. Sending or mentioning someone does not
+guarantee a notification.
 If delivery is uncertain, do not retry; report the uncertainty.
 If a tool returns missing_scope, briefly report the needed scope and mark the
 chat blocked. Do not retry or interpret it as no matches.
@@ -76,6 +81,43 @@ def agent_for(chat: dict) -> ai.Agent:
 
     chat_id = chat["id"]
     delivery_key = str(uuid.uuid4())
+    share_scope: contextvars.ContextVar[tuple[str, list[str]]] = contextvars.ContextVar(
+        "share_scope"
+    )
+
+    class Dispatcher(ai.Agent):
+        async def loop(self, context: ai.Context):
+            from agent import durable
+
+            while context.keep_running():
+                # Finish the model message before executing tools so the sharing
+                # anchor (including text after the call) is durable and excluded.
+                async with ai.stream(context=context) as stream:
+                    async for event in stream:
+                        yield event
+                if stream.message is None:
+                    raise RuntimeError("model step returned no message")
+                context.add(stream.message)
+                await durable.commit_messages.func(chat_id, [stream.message])
+                async with ai.ToolRunner() as runner:
+                    for tool_call in context.resolve(stream.message.tool_calls):
+                        async def execute(call=tool_call):
+                            token = share_scope.set((
+                                call.id, [message.id for message in context.messages],
+                            ))
+                            try:
+                                result = await call()
+                                return ai.tool_result(result, exception=result.exception)
+                            finally:
+                                share_scope.reset(token)
+
+                        runner.schedule(execute)
+                    async for event in runner.events():
+                        yield event
+                    tool_message = runner.get_tool_message()
+                    context.add(tool_message)
+                    if tool_message is not None:
+                        await durable.commit_messages.func(chat_id, [tool_message])
 
     @ai.tool
     async def find_channels(
@@ -89,7 +131,7 @@ def agent_for(chat: dict) -> ai.Agent:
     @ai.tool
     async def find_people(query: str) -> list[dict]:
         """Find linked people by Hatchery name or Slack/GitHub handle.
-        Returns Hatchery IDs to use in send_message's people argument.
+        Returns Hatchery IDs for the people argument of either sharing or one-off sends.
         """
         return await destinations.find_people(chat_id, query)
 
@@ -106,6 +148,27 @@ def agent_for(chat: dict) -> ai.Agent:
         )
         if result.get("error") == "missing_scope":
             raise RuntimeError(result["detail"])
+        return result
+
+    @ai.tool
+    async def start_shared_thread(
+        provider: typing.Literal["slack", "github"], destination: str, text: str,
+        people: list[str] | None = None,
+    ) -> dict:
+        """Share and continue this conversation at an exact find_channels destination,
+        with Hatchery people IDs from find_people. Only future replies are shared.
+        """
+        from agent import durable
+
+        tool_call_id, excluded_message_ids = share_scope.get()
+        result = await destinations.start_shared_thread(
+            chat_id, provider, destination, text, people, delivery_key=delivery_key,
+            tool_call_id=tool_call_id, excluded_message_ids=excluded_message_ids,
+        )
+        if result.get("error") == "missing_scope":
+            raise RuntimeError(result["detail"])
+        if result.get("status") == "sent" and result.get("sharing"):
+            await durable.mirror_sharing.func(chat_id, result["sharing"]["id"])
         return result
 
     @ai.tool
@@ -179,7 +242,7 @@ def agent_for(chat: dict) -> ai.Agent:
         await events.append(chat_id, "ui", {"type": "chat.changed"})
         return {"reason": reason}
 
-    return ai.Agent(
+    return Dispatcher(
         tools=[
             create_sandbox,
             list_sandboxes,
@@ -190,5 +253,6 @@ def agent_for(chat: dict) -> ai.Agent:
             find_channels,
             find_people,
             send_message,
+            start_shared_thread,
         ]
     )

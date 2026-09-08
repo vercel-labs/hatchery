@@ -839,8 +839,10 @@ async def test_hub_lands_inbound_in_one_chat(monkeypatch):
     stored = await events.read(chat.id, "messages")
     assert len(stored) == 2
     assert delivered == [
+        (chat.id, channels.protocol.MESSAGE_RECEIVED),
         (chat.id, channels.protocol.SPACE_ASSIGNING),
         (chat.id, channels.protocol.SPACE_ASSIGNED),
+        (chat.id, channels.protocol.MESSAGE_RECEIVED),
     ]
     assert started == [
         (chat.id, "channel", None),
@@ -954,15 +956,19 @@ async def test_slack_hub_ignores_unconnected_sender(monkeypatch):
     assert await chats.list_all() == []
 
 
-async def test_slack_hub_rejects_takeover_without_appending_or_invoking(monkeypatch):
+async def test_slack_hub_accepts_linked_participant_without_changing_owner(monkeypatch):
     async def classify(prompt, metadata, candidates):
         return candidates[0]
 
-    owners = iter(["user_1", "user_2"])
+    async def slack_user(team_id, slack_user_id):
+        assert team_id == "T1"
+        return {"U1": "user_1", "U2": "user_2"}[slack_user_id]
 
-    async def slack_user(_team_id, _slack_user_id):
-        return next(owners)
+    async def get_user(user_id):
+        return {"id": user_id, "name": user_id, "email": f"{user_id}@vercel.com"}
 
+    monkeypatch.setenv("HATCHERY_ALLOWED_EMAILS", "user_1@vercel.com,user_2@vercel.com")
+    monkeypatch.setattr(server.connections.auth_store, "get_user", get_user)
     runs = []
 
     async def run(chat_id):
@@ -978,7 +984,7 @@ async def test_slack_hub_rejects_takeover_without_appending_or_invoking(monkeypa
     )
     second = channels.Inbound(
         token="C1:1.0",
-        text="takeover",
+        text="participant reply",
         state={"team_id": "T1", "user_id": "U2"},
     )
 
@@ -986,10 +992,14 @@ async def test_slack_hub_rejects_takeover_without_appending_or_invoking(monkeypa
     [chat] = await chats.list_all()
     await server.bot.hub.dispatch("slack", second)
 
-    assert chat.user_id == "user_1"
-    assert len(await events.read(chat.id, "messages")) == 1
-    assert runs == [chat.id]
+    [saved] = await chats.list_all()
+    assert (saved.id, saved.user_id, saved.author_display_name) == (chat.id, "user_1", "user_1")
+    stored = await server._transcript(chat.id)
+    assert [message.text for message in stored] == [first.text, second.text]
+    assert [message.provider_metadata["hatchery"]["author"] for message in stored] == ["user_1", "user_2"]
+    assert runs == [chat.id, chat.id]
     [binding] = await chats.bindings(chat.id)
+    assert binding.chat_id == chat.id
     assert binding.state["user_id"] == "U1"
 
 
@@ -1010,23 +1020,28 @@ async def test_hub_can_store_without_invoking_then_wake_without_persisting(monke
         channels.Inbound(
             token="C1:1.0",
             text="context",
-            state={"team_id": "T1", "user_id": "U1"},
+            state={"team_id": "T1", "user_id": "U1", "message_id": "1.1"},
             invoke=False,
         ),
     )
     [chat] = await chats.list_all()
+    assert runs == []
+    assert await events.read(chat.id, "inbox") == []
+    before = await events.read(chat.id, "messages")
     await hub.dispatch(
         "slack",
         channels.Inbound(
             token="C1:1.0",
             text="context",
-            state={"team_id": "T1", "user_id": "U1"},
+            state={"team_id": "T1", "user_id": "U1", "message_id": "1.1"},
             persist=False,
         ),
     )
 
     stored = await events.read(chat.id, "messages")
     assert len(stored) == 1
+    assert stored == before
+    assert await events.read(chat.id, "inbox") == [(0, {"message_id": stored[0][1]["id"]})]
     assert await events.read(chat.id, "ui") == [(0, {"type": "messages.changed"})]
     assert runs == [chat.id]
 
@@ -1073,7 +1088,7 @@ async def test_ambiguous_repo_classifies_then_runs_original_request(monkeypatch)
             "fix the docs",
             {
                 "origin": "github",
-                "author": "octocat",
+                "author": "test@vercel.com",
                 "repo": "vercel/repo",
                 "channel_state": {"kind": "issue", "sender": "octocat", "sender_id": "42"},
             },
@@ -1081,34 +1096,61 @@ async def test_ambiguous_repo_classifies_then_runs_original_request(monkeypatch)
         )
     ]
     assert [event.type for _, event in emitted] == [
+        channels.protocol.MESSAGE_RECEIVED,
         channels.protocol.SPACE_ASSIGNING,
         channels.protocol.SPACE_ASSIGNED,
     ]
+    [message] = await server._transcript(chat.id)
+    assert message.text == "fix the docs"
+    assert emitted[0][1].data == {
+        "message": message.text,
+        "message_id": message.id,
+        "origin": "github",
+        "author": "test@vercel.com",
+        "source_binding": "github:repo:1:issue:7",
+    }
     assert emitted[-1][1].data["space"]["name"] == "release"
     assert len(await events.read(chat.id, "messages")) == 1
     assert runs == [chat.id]
 
 
 async def test_inbound_turn_starts_durable_workflow(monkeypatch):
+    space = await server.spaces.default()
+    chat = await chats.create(space.id, "pending input", user_id="user_test")
+    message = ai.user_message("Please check this")
+    await events.append(chat.id, "messages", message.model_dump(mode="json"))
     started = []
 
     async def start_turn(chat_id, origin, task_id=None):
         started.append((chat_id, origin, task_id))
-        return "run_1"
+        return server.turns.ActiveTurn("turn_1", "run_1", origin, task_id, 0)
 
     monkeypatch.setattr(server.durable, "start_turn", start_turn)
-    await server._run_inbound_turn("chat_x")
+    # Stored context alone is not an invocation request.
+    await server._run_inbound_turn(chat.id)
+    assert started == []
+    await events.append(chat.id, "inbox", {"message_id": message.id})
+    await server._run_inbound_turn(chat.id)
 
-    assert started == [("chat_x", "channel", None)]
+    assert started == [(chat.id, "channel", None)]
 
 
 async def test_inbound_turn_surfaces_workflow_start_failure(monkeypatch):
+    space = await server.spaces.default()
+    chat = await chats.create(space.id, "pending input", user_id="user_test")
+    message = ai.user_message("Please check this")
+    await events.append(chat.id, "messages", message.model_dump(mode="json"))
+    await events.append(chat.id, "inbox", {"message_id": message.id})
+
     async def start_turn(chat_id, origin, task_id=None):
+        assert (chat_id, origin, task_id) == (chat.id, "channel", None)
         raise RuntimeError("workflow unavailable")
 
     monkeypatch.setattr(server.durable, "start_turn", start_turn)
     with pytest.raises(RuntimeError, match="workflow unavailable"):
-        await server._run_inbound_turn("chat_x")
+        await server._run_inbound_turn(chat.id)
+    assert await events.read(chat.id, "inbox") == [(0, {"message_id": message.id})]
+    assert await events.read(chat.id, "turns") == []
 
 
 async def test_hub_dedupe_is_durable():
@@ -1292,34 +1334,9 @@ async def test_ui_turn_is_mirrored_to_bound_channel(monkeypatch):
         async def on_event(self, event, state):
             self.delivered.append((event, state))
 
-    class FakeRun:
-        def __init__(self, history):
-            self.messages = [
-                *history,
-                ai.assistant_message("I will handle that."),
-                ai.assistant_message("answer from AI"),
-            ]
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            return None
-
-    class FakeAgent:
-        def run(self, model, history):
-            return FakeRun(history)
-
-    async def fake_sse(result):
-        yield 'data: {"type":"finish"}\n\n'
-
     channel = FakeChannel()
     previous = server.bot.channels.get("fake")
     server.bot.channels["fake"] = channel
-    monkeypatch.setattr(
-        server.dispatcher, "agent_for", lambda record: FakeAgent()
-    )
-    monkeypatch.setattr(server.ai.ui.ai_sdk, "to_sse", fake_sse)
 
     async def start_turn(chat_id, origin, task_id=None):
         return server.turns.ActiveTurn("turn_1", "run_1", origin, task_id, 0)
@@ -1331,8 +1348,11 @@ async def test_ui_turn_is_mirrored_to_bound_channel(monkeypatch):
     monkeypatch.setattr(server.agent_stream, "to_sse", durable_sse)
     try:
         space = await server.spaces.default()
-        chat, _ = await chats.claim("fake:thread", "fake", space.id, "thread", {"thread": "1"})
-        ui = ai.ui.ai_sdk.to_ui_messages([ai.user_message("continue in UI")])
+        chat, _ = await chats.claim(
+            "fake:thread", "fake", space.id, "thread", {"thread": "1"}, user_id="user_test",
+        )
+        message = ai.user_message("continue in UI")
+        ui = ai.ui.ai_sdk.to_ui_messages([message])
         async with client() as c:
             response = await c.post(
                 "/api/chat",
@@ -1348,7 +1368,9 @@ async def test_ui_turn_is_mirrored_to_bound_channel(monkeypatch):
         ]
         assert channel.delivered[0][0].data == {
             "message": "continue in UI",
+            "message_id": message.id,
             "origin": "ui",
+            "author": "test@vercel.com",
         }
         assert channel.delivered[0][1] == {"thread": "1"}
         stored = [
@@ -1358,6 +1380,11 @@ async def test_ui_turn_is_mirrored_to_bound_channel(monkeypatch):
         assert [(message.role, message.text) for message in stored] == [
             ("user", "continue in UI"),
         ]
+        assert stored[0].id == message.id
+        assert stored[0].provider_metadata == {
+            "hatchery": {"origin": "ui", "author": "test@vercel.com"},
+        }
+        assert (await chats.get(chat.id)).user_id == "user_test"
     finally:
         if previous is None:
             server.bot.channels.pop("fake", None)
@@ -2061,3 +2088,515 @@ async def test_dispatcher_turn_flushes_telemetry(monkeypatch):
         "done",
     ]
     flush.assert_called_once_with()
+
+
+@pytest.fixture
+async def shared_channels(monkeypatch, generated_topic, local_store):
+    """Real routing/storage/adapters; only remote services and models are replaced."""
+    import contextlib
+    import json
+    import types
+    import urllib.parse
+
+    from channels import destinations, github, slack
+
+    owner = {
+        "id": "user_test", "name": "Owner", "email": "test@vercel.com",
+        "slack": {"team_id": "T1", "user_id": "U1"},
+        "github": {"id": "41", "login": "owner"},
+    }
+    participant = {
+        "id": "user_second", "name": "Second Human", "email": "second@vercel.com",
+        "slack": {"team_id": "T1", "user_id": "U2"},
+        "github": {"id": "42", "login": "second"},
+    }
+    users = {user["id"]: user for user in (owner, participant)}
+    monkeypatch.setenv("HATCHERY_ALLOWED_EMAILS", "test@vercel.com,second@vercel.com")
+    monkeypatch.setattr(server.turns, "_locks", {})
+
+    async def get_user(user_id):
+        return users.get(user_id)
+
+    async def slack_user(team, user_id):
+        return next((user["id"] for user in users.values()
+                     if user["slack"] == {"team_id": team, "user_id": user_id}), None)
+
+    async def github_user(user_id):
+        return next((user["id"] for user in users.values()
+                     if user["github"]["id"] == user_id), None)
+
+    async def verify(_headers):
+        pass
+
+    async def token(*args, **kwargs):
+        return "test-provider-token"
+
+    def no_model(*args, **kwargs):
+        pytest.fail("shared integration tests must not invoke a live model")
+
+    monkeypatch.setattr(server.connections.auth_store, "get_user", get_user)
+    monkeypatch.setattr(server.connections.auth_store, "slack_user", slack_user)
+    monkeypatch.setattr(server.connections.auth_store, "github_user", github_user)
+    monkeypatch.setattr(slack.connect, "verify_connect_webhook", verify)
+    monkeypatch.setattr(slack.connect, "get_token", token)
+    monkeypatch.setattr(ai.Agent, "run", no_model)
+    monkeypatch.setattr(ai, "stream", no_model)
+
+    space = await server.spaces.create("Shared integration")
+    space.repos = ["acme/hatchery"]
+    await server.spaces.save(space)
+    chat = await chats.create(space.id, "Original UI chat", user_id=owner["id"],
+                              author_display_name=owner["name"])
+
+    async def classify(*args):
+        return space
+
+    monkeypatch.setattr(server.classifier, "classify", classify)
+    state = types.SimpleNamespace(
+        chat=chat, owner=owner, participant=participant, requests=[], overrides={},
+        history=[], decisions=[], invoke=True, starts=[], statuses={},
+        destinations=destinations, data_dir=local_store,
+    )
+
+    async def respond(request):
+        path = request.url.path.removeprefix("/api/").lstrip("/")
+        body = (json.loads(request.content) if "application/json" in request.headers.get("content-type", "")
+                else dict(urllib.parse.parse_qsl(request.content.decode())))
+        state.requests.append((path, body))
+        if path in state.overrides:
+            return await state.overrides[path](request, body)
+        if path == "chat.postMessage":
+            count = sum(path == saved_path for saved_path, _ in state.requests)
+            return httpx.Response(200, json={"ok": True, "ts": f"100.{count:06d}", "channel": body["channel"]})
+        responses = {
+            "auth.test": {"ok": True, "team_id": "T1", "user_id": "UBOT"},
+            "conversations.info": {"ok": True, "channel": {"id": "C1", "name": "shared", "is_member": True}},
+            "users.info": {"ok": True, "user": {"id": body.get("user"), "is_bot": False}},
+            "conversations.members": {"ok": True, "members": ["U1", "U2", "UBOT"]},
+            "conversations.replies": {"ok": True, "messages": state.history},
+            "chat.getPermalink": {"ok": True, "permalink": "https://acme.slack.com/archives/C1/p" + body.get("message_ts", "").replace(".", "")},
+            "assistant.threads.setStatus": {"ok": True},
+            "repos/acme/hatchery": {"id": 123, "full_name": "acme/hatchery"},
+            "repos/acme/hatchery/issues/7": {"number": 7, "html_url": "https://github.com/acme/hatchery/issues/7"},
+            "users/second": {"id": 42, "login": "second"},
+            "repos/acme/hatchery/issues/7/comments": {"id": 100, "html_url": "https://github.com/acme/hatchery/issues/7#issuecomment-100"},
+        }
+        assert path in responses, f"unexpected provider request: {request.method} {request.url}"
+        return httpx.Response(200, json=responses[path])
+
+    transport = httpx.MockTransport(respond)
+
+    @contextlib.asynccontextmanager
+    async def provider_client(provider):
+        base = "https://slack.com/api/" if provider == "slack" else "https://api.github.com/"
+        async with httpx.AsyncClient(base_url=base, transport=transport) as http:
+            yield http
+
+    monkeypatch.setattr(destinations, "_client", provider_client)
+    slack_adapter = slack.channel(connector="slack/test", transport=transport)
+    github_adapter = github.channel(connector="github/test", bot_name="hatchery", transport=transport)
+    monkeypatch.setitem(server.bot.channels, "slack", slack_adapter)
+    monkeypatch.setitem(server.bot.channels, "github", github_adapter)
+
+    async def should_invoke(transcript, newest_ts, bot_user_ids):
+        state.decisions.append((transcript, newest_ts, bot_user_ids))
+        return state.invoke
+
+    monkeypatch.setattr(slack_adapter, "_should_invoke", should_invoke)
+
+    class Run:
+        def __init__(self, run_id):
+            self.run_id = run_id
+
+        async def status(self):
+            return state.statuses[self.run_id]
+
+    async def start(workflow, turn):
+        assert workflow is server.durable.run_turn
+        state.starts.append(turn)
+        run_id = f"run_shared_{len(state.starts)}"
+        state.statuses[run_id] = "running"
+        return Run(run_id)
+
+    monkeypatch.setattr(server.vercel.workflow, "start", start)
+    monkeypatch.setattr(server.vercel.workflow, "Run", Run)
+
+    async def slack_message(root, ts="101.000001", text="hatchery, can you check &amp; confirm?", mention=False):
+        payload = {
+            "type": "event_callback", "team_id": "T1", "event_id": f"event_{ts}",
+            "authorizations": [{"user_id": "UBOT"}],
+            "event": {"type": "app_mention" if mention else "message", "channel": "C1",
+                      "channel_type": "channel", "thread_ts": root, "ts": ts,
+                      "user": "U2", "text": text},
+        }
+        async with client() as http:
+            response = await http.post("/channels/v1/slack", json=payload)
+        assert response.status_code == 200
+
+    async def github_comment(comment_id=101, text="I checked this; no action needed."):
+        payload = {
+            "action": "created", "repository": {"id": 123, "full_name": "acme/hatchery"},
+            "issue": {"number": 7},
+            "comment": {"id": comment_id, "body": text,
+                        "html_url": f"https://github.com/acme/hatchery/issues/7#issuecomment-{comment_id}",
+                        "user": {"id": 42, "login": "second", "type": "User"}},
+        }
+        async with client() as http:
+            response = await http.post("/channels/v1/github", json=payload,
+                                       headers={"x-github-event": "issue_comment"})
+        assert response.status_code == 200
+
+    state.slack_message = slack_message
+    state.github_comment = github_comment
+    try:
+        yield state
+    finally:
+        await slack_adapter._client.aclose()
+        await github_adapter._client.aclose()
+
+
+async def test_shared_notification_slack_participant_replay_and_private_browser(shared_channels, monkeypatch):
+    shared = shared_channels
+    chat = shared.chat
+    private = ai.user_message("Private context before sharing")
+    await events.append(chat.id, "messages", private.model_dump(mode="json"))
+    notification = await shared.destinations.send_message(
+        chat.id, "slack", "T1/C1", "One-off notification", ["user_second"], delivery_key="notify",
+    )
+    assert notification["status"] == "sent"
+    assert await chats.bindings(chat.id) == []
+    assert await events.read(chat.id, "sharing") == []
+
+    root = await shared.destinations.start_shared_thread(
+        chat.id, "slack", "T1/C1", "Discuss the result", ["user_second"],
+        delivery_key="share-slack", tool_call_id="call_slack", excluded_message_ids=[private.id],
+    )
+    github_root = await shared.destinations.start_shared_thread(
+        chat.id, "github", "acme/hatchery#7", "Continue here", delivery_key="share-github",
+        tool_call_id="call_github",
+    )
+    assert root["status"] == github_root["status"] == "sent"
+    slack_token = f"slack:T1:C1:{root['message_id']}"
+    assert (await chats.binding(slack_token)).chat_id == chat.id
+    assert (await chats.binding(slack_token)).state["excluded_message_ids"] == [private.id]
+    await server._mirror_sharing(chat.id, root["sharing"]["id"])
+    await server._mirror_sharing(chat.id, github_root["sharing"]["id"])
+    shared.requests.clear()
+
+    # Untagged, bound human reply: the actual adapter persists first, then its
+    # classifier dispatches the very same source with persist=False to wake it.
+    await shared.slack_message(root["message_id"])
+    active = await server.turns.active(chat.id)
+    assert active is not None and active.origin == "channel"
+    prepared = await server.durable.prepare_turn.func(shared.starts[0])
+    await server.durable.finish_turn.func(shared.starts[0], active.run_id, "completed")
+    await shared.slack_message(root["message_id"])
+    await server.durable.drain_inbound.func(chat.id)
+
+    stored = await server._transcript(chat.id)
+    assert len(stored) == 2
+    human = stored[-1]
+    assert prepared.history[-1].id == human.id
+    assert human.provider_metadata["hatchery"] == {
+        "origin": "slack", "author": "Second Human",
+        "display_text": "hatchery, can you check & confirm?", "source_binding": slack_token,
+    }
+    assert "<slack_message" in human.text
+    assert len(shared.decisions) == 2
+    assert len(shared.starts) == 1
+    assert shared.starts[0].chat_id == chat.id
+    assert [data for _, data in await events.read(chat.id, "inbox")] == [{"message_id": human.id}]
+    assert await server.turns.active(chat.id) is None
+    assert {item.id for item in await chats.list_all()} == {chat.id}
+    saved = await chats.get(chat.id)
+    assert (saved.user_id, saved.author_display_name, saved.trigger) == ("user_test", "Owner", "ui")
+    assert not any(path == "chat.postMessage" for path, _ in shared.requests)
+    mirrored = [body["body"] for path, body in shared.requests if path.endswith("/comments")]
+    assert mirrored == ["Second Human · via Slack\n\nhatchery, can you check & confirm?\n\n<!-- chat:github -->"]
+
+    async with client() as http:
+        transcript = await http.get(f"/api/chats/{chat.id}/messages")
+        sharing = await http.get(f"/api/chats/{chat.id}/sharing")
+    assert transcript.status_code == sharing.status_code == 200
+    visible = next(message for message in transcript.json() if message["id"] == human.id)
+    assert visible["metadata"] == {"origin": "slack", "author": "Second Human"}
+    assert [part["text"] for part in visible["parts"] if part["type"] == "text"] == ["hatchery, can you check & confirm?"]
+    public_fields = {"id", "provider", "label", "url", "text", "tool_call_id", "message_id"}
+    records = [record for _, record in await events.read(chat.id, "sharing")]
+    assert len(records) == 2
+    assert sharing.json() == [{key: record[key] for key in public_fields} for record in records]
+    assert all(set(record) == public_fields for record in sharing.json())
+    assert {record["id"] for record in sharing.json()} == {root["sharing"]["id"], github_root["sharing"]["id"]}
+
+    async def second_browser(_request):
+        return shared.participant
+
+    monkeypatch.setattr(server.auth, "current_user", second_browser)
+    async with client() as http:
+        for route in ("messages", "sharing"):
+            response = await http.get(f"/api/chats/{chat.id}/{route}")
+            assert response.status_code == 404
+            assert response.json() == {"detail": "unknown chat"}
+        assert (await http.get("/api/chats")).json() == []
+    assert (await chats.get(chat.id)).user_id == "user_test"
+
+
+async def test_shared_busy_inbox_prepare_finish_and_drain_once(shared_channels, monkeypatch):
+    shared = shared_channels
+    root = await shared.destinations.start_shared_thread(
+        shared.chat.id, "slack", "T1/C1", "Discuss", delivery_key="busy-root",
+    )
+    await shared.slack_message(root["message_id"], text="<@UBOT> first request", mention=True)
+    first = await server.turns.active(shared.chat.id)
+    assert first is not None
+    first_input = shared.starts[0]
+    prepared = await server.durable.prepare_turn.func(first_input)
+    first_message = prepared.history[-1]
+    working = ai.assistant_message("Working on the first request", ai.messages.ToolCallPart(
+        tool_call_id="busy_call", tool_name="check_subagent", tool_args="{}",
+    ))
+    await server.durable.commit_messages.func(shared.chat.id, [working])
+
+    await shared.slack_message(root["message_id"], ts="102.000001", text="<@UBOT> next request", mention=True)
+    await shared.slack_message(root["message_id"], ts="102.000001", text="<@UBOT> next request", mention=True)
+    assert len(shared.starts) == 1
+    assert await server.turns.active(shared.chat.id) == first
+    messages = await server._transcript(shared.chat.id)
+    assert [message.id for message in messages] == [first_message.id, working.id]
+    pending = [data for _, data in await events.read(shared.chat.id, "pending_messages")]
+    assert len(pending) == 1
+    inbox = [data["message_id"] for _, data in await events.read(shared.chat.id, "inbox")]
+    assert inbox == [first_message.id, pending[0]["id"]]
+    ui_messages = await server.chat_messages(shared.chat.id)
+    assert ui_messages[-1].id == pending[0]["id"]
+    records = [data for _, data in await events.read(shared.chat.id, "turns") if data["type"] == "turn.prepared"]
+    assert records == [{"type": "turn.prepared", "turn_id": first.turn_id, "message_ids": [first_message.id]}]
+    result = ai.tool_message(tool_call_id="busy_call", tool_name="check_subagent", result="done")
+    answer = ai.assistant_message("First request done")
+    await server.durable.commit_messages.func(shared.chat.id, [result, answer])
+    assert [message.role for message in await server._transcript(shared.chat.id)] == ["user", "assistant", "tool", "assistant"]
+
+    await server.durable.finish_turn.func(first_input, first.run_id, "completed")
+    await asyncio.gather(server.durable.drain_inbound.func(shared.chat.id),
+                         server.durable.drain_inbound.func(shared.chat.id))
+    assert len(shared.starts) == 2
+    second = await server.turns.active(shared.chat.id)
+    assert second is not None and second.turn_id != first.turn_id
+    assert shared.starts[1].chat_id == shared.chat.id
+    prepared_next = await server.durable.prepare_turn.func(shared.starts[1])
+    assert [message.id for message in prepared_next.history if message.role == "user"] == inbox
+    # Step replay must not consume future input or add a second prepared record.
+    await server.durable.prepare_turn.func(shared.starts[1])
+    records = [data for _, data in await events.read(shared.chat.id, "turns") if data["type"] == "turn.prepared"]
+    assert len(records) == 2
+    assert records[1]["message_ids"] == inbox
+    assert [message.role for message in prepared_next.history] == ["system", "user", "assistant", "tool", "assistant", "user"]
+    calls = []
+
+    async def model_step(context, writer):
+        calls.append(context.messages[-1].id)
+        return ai.assistant_message("Next request answered")
+
+    monkeypatch.setattr(server.durable, "llm_step", model_step)
+    monkeypatch.setattr(server.durable, "commit_messages", server.durable.commit_messages.func)
+    context = ai.Context(model=ai.get_model("openai/test"), messages=prepared_next.history, tools=[])
+    agent = server.durable.DurableDispatcher(shared.chat.id, None, second.turn_id)
+    async for _ in agent.loop(context):
+        pass
+    assert calls == [pending[0]["id"]]
+    assert context.messages[-1].text == "Next request answered"
+    await server.durable.finish_turn.func(shared.starts[1], second.run_id, "completed")
+    await server.durable.drain_inbound.func(shared.chat.id)
+    await shared.slack_message(root["message_id"], ts="102.000001", text="<@UBOT> next request", mention=True)
+    assert len(shared.starts) == 2
+    assert await server.turns.active(shared.chat.id) is None
+
+
+async def test_shared_github_unmentioned_comment_mirrors_and_filters_delayed(shared_channels):
+    shared = shared_channels
+    slack_root = await shared.destinations.start_shared_thread(
+        shared.chat.id, "slack", "T1/C1", "Discuss", delivery_key="github-slack",
+    )
+    github_root = await shared.destinations.start_shared_thread(
+        shared.chat.id, "github", "acme/hatchery#7", "Discuss", delivery_key="github-root",
+    )
+    assert github_root["message_id"] == "100"
+    shared.requests.clear()
+    await shared.github_comment()
+    await shared.github_comment()
+    # A delayed mention predates the outbound sharing root and must not wake.
+    await shared.github_comment(99, "@hatchery old request")
+    await shared.github_comment(100, "@hatchery boundary request")
+    stored = await server._transcript(shared.chat.id)
+    assert len(stored) == 1
+    assert stored[0].provider_metadata["hatchery"] == {
+        "origin": "github", "author": "Second Human",
+        "display_text": "I checked this; no action needed.",
+        "source_binding": "github:repo:123:issue:7",
+    }
+    assert shared.starts == []
+    assert await events.read(shared.chat.id, "inbox") == []
+    assert shared.requests == [("chat.postMessage", {
+        "channel": "C1", "thread_ts": slack_root["message_id"],
+        "text": "Second Human · via GitHub\n\nI checked this; no action needed.",
+    })]
+    assert (await chats.binding("github:repo:123:issue:7")).chat_id == shared.chat.id
+    assert (await chats.get(shared.chat.id)).user_id == "user_test"
+    async with client() as http:
+        response = await http.get(f"/api/chats/{shared.chat.id}/messages")
+    assert response.status_code == 200
+    assert response.json()[0]["metadata"] == {"origin": "github", "author": "Second Human"}
+    assert [part["text"] for part in response.json()[0]["parts"] if part["type"] == "text"] == ["I checked this; no action needed."]
+
+
+async def test_shared_slack_channel_lock_closes_provider_acceptance_binding_race(shared_channels):
+    import contextvars
+
+    shared = shared_channels
+    accepted = asyncio.Event()
+    release = asyncio.Event()
+    entered = asyncio.Event()
+
+    async def pause_permalink(_request, _body):
+        # The root has been accepted and its sent receipt saved, but bind has
+        # not happened. This is a real HTTP seam, not a mocked store operation.
+        accepted.set()
+        await release.wait()
+        return httpx.Response(200, json={"ok": True, "permalink": "https://acme.slack.com/archives/C1/p100000001"})
+
+    shared.overrides["chat.getPermalink"] = pause_permalink
+    outbound = asyncio.create_task(shared.destinations.start_shared_thread(
+        shared.chat.id, "slack", "T1/C1", "Discuss", delivery_key="race-root",
+    ))
+    inbound = None
+    try:
+        await asyncio.wait_for(accepted.wait(), 2)
+        receipt = next(data for _, data in await events.read(shared.chat.id, "notifications")
+                       if data.get("result", {}).get("status") == "sent")
+        root_ts = receipt["result"]["message_id"]
+        source = f"slack:T1:C1:{root_ts}"
+        assert await chats.binding(source) is None
+        assert server.turns._locks["sharing:slack:T1:C1"].locked()
+
+        async def reply():
+            assert server.turns._held.get() == frozenset()
+            entered.set()
+            await shared.slack_message(root_ts, text="<@UBOT> quick reply", mention=True)
+
+        # Explicitly independent: creating this inside the provider callback
+        # with inherited context would make the reentrant lock bypass itself.
+        inbound = asyncio.create_task(reply(), context=contextvars.Context())
+        await asyncio.wait_for(entered.wait(), 2)
+        done, _ = await asyncio.wait({inbound}, timeout=0.1)
+        waited = not done
+        binding_while_paused = await chats.binding(source)
+        chats_while_paused = {chat.id for chat in await chats.list_all()}
+    finally:
+        release.set()
+        tasks = [outbound, *([inbound] if inbound is not None else [])]
+        try:
+            results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 2)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    assert waited, f"inbound bypassed the outbound channel lock: {results!r}"
+    assert binding_while_paused is None
+    assert chats_while_paused == {shared.chat.id}
+    assert not any(isinstance(result, BaseException) for result in results), results
+    assert (await chats.binding(source)).chat_id == shared.chat.id
+    assert {chat.id for chat in await chats.list_all()} == {shared.chat.id}
+    assert (await chats.get(shared.chat.id)).user_id == "user_test"
+    assert len(await server._transcript(shared.chat.id)) == 1
+    assert len(shared.starts) == 1 and shared.starts[0].chat_id == shared.chat.id
+    assert sum(path == "chat.postMessage" for path, _ in shared.requests) == 1
+
+
+async def test_shared_failed_delivery_receipt_replay_blocks_without_duplicate_post(shared_channels):
+    shared = shared_channels
+    slack_root = await shared.destinations.start_shared_thread(
+        shared.chat.id, "slack", "T1/C1", "Discuss", delivery_key="failed-slack",
+    )
+    await shared.destinations.start_shared_thread(
+        shared.chat.id, "github", "acme/hatchery#7", "Discuss", delivery_key="failed-github",
+    )
+    shared.requests.clear()
+
+    async def accepted_but_lost(request, _body):
+        raise httpx.ReadTimeout("provider accepted the comment but response was lost", request=request)
+
+    shared.overrides["repos/acme/hatchery/issues/7/comments"] = accepted_but_lost
+    shared.invoke = False
+    await shared.slack_message(slack_root["message_id"], text="Here is my update.")
+    await shared.slack_message(slack_root["message_id"], text="Here is my update.")
+    assert len(await server._transcript(shared.chat.id)) == 1
+    assert shared.starts == []
+    assert len(shared.requests) == 3  # two history reads, one attempted mirror
+    posts = [body for path, body in shared.requests if path.endswith("/comments")]
+    assert posts == [{"body": "Second Human · via Slack\n\nHere is my update.\n\n<!-- chat:github -->"}]
+    assert not any(path == "chat.postMessage" for path, _ in shared.requests)
+    receipts = [data for _, data in await events.read(shared.chat.id, "deliveries")]
+    assert [receipt["status"] for receipt in receipts] == ["pending", "unknown"]
+    assert receipts[0]["key"] == receipts[1]["key"]
+    assert receipts[0]["binding"] == "github:repo:123:issue:7"
+    assert (await chats.get(shared.chat.id)).attention_reason == "blocked"
+
+
+async def test_shared_inbound_repairs_sent_receipt_after_crash(shared_channels, monkeypatch):
+    shared = shared_channels
+
+    async def crash(*args):
+        raise RuntimeError("process stopped before binding")
+
+    with monkeypatch.context() as fault:
+        fault.setattr(shared.destinations, "_finalize_sharing", crash)
+        with pytest.raises(RuntimeError, match="before binding"):
+            await shared.destinations.start_shared_thread(
+                shared.chat.id, "slack", "T1/C1", "Discuss", delivery_key="crashed-root",
+            )
+    receipt = next(data for _, data in reversed(await events.read(shared.chat.id, "notifications")) if data.get("sharing"))
+    assert await chats.binding(receipt["sharing"]["token"]) is None
+    assert await events.read(shared.chat.id, "sharing") == []
+    await shared.slack_message(receipt["result"]["message_id"], text="<@UBOT> continue here", mention=True)
+    assert (await chats.binding(receipt["sharing"]["token"])).chat_id == shared.chat.id
+    assert [chat.id for chat in await chats.list_all()] == [shared.chat.id]
+    assert len(await events.read(shared.chat.id, "sharing")) == 1
+    assert len(await server._transcript(shared.chat.id)) == 1
+    assert len(shared.starts) == 1
+    assert sum(path == "chat.postMessage" for path, _ in shared.requests) == 1
+
+
+async def test_shared_ui_retry_repairs_delivery_using_trusted_text(shared_channels, monkeypatch):
+    shared = shared_channels
+    await shared.destinations.start_shared_thread(
+        shared.chat.id, "slack", "T1/C1", "Discuss", delivery_key="ui-retry-root",
+    )
+    saved = ai.user_message("The real user message")
+    saved.provider_metadata = {"hatchery": {"origin": "ui", "author": "Owner"}}
+    # Simulate a request that committed the input but stopped before mirroring.
+    await events.append(shared.chat.id, "messages", saved.model_dump(mode="json"))
+    tampered = ai.user_message("Do not forward this client-supplied history")
+    tampered.id = saved.id
+    ui = ai.ui.ai_sdk.to_ui_messages([tampered])
+
+    async def sse(*args):
+        yield 'data: {"type":"finish"}\n\n'
+
+    monkeypatch.setattr(server.agent_stream, "to_sse", sse)
+    shared.requests.clear()
+    async with client() as http:
+        for _ in range(2):
+            response = await http.post("/api/chat", json={
+                "chat_id": shared.chat.id,
+                "messages": [message.model_dump(mode="json") for message in ui],
+            })
+            assert response.status_code == 200
+            active = await server.turns.active(shared.chat.id)
+            await server.durable.finish_turn.func(shared.starts[-1], active.run_id, "completed")
+    posts = [body for path, body in shared.requests if path == "chat.postMessage"]
+    assert len(posts) == 1
+    assert posts[0]["text"].endswith("The real user message")
+    assert "client-supplied" not in posts[0]["text"]
+    assert [message.text for message in await server._transcript(shared.chat.id)] == [saved.text]

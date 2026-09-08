@@ -70,6 +70,10 @@ class Bus(typing.Protocol):
 
     async def dedupe(self, key: str) -> bool: ...
 
+    async def binding(self, token: str) -> dict | None:
+        """Existing thread's binding state; Slack tokens include the team ID."""
+        ...
+
 
 class Hub(typing.Protocol):
     """Where inbound messages land; the store/agent side implements this."""
@@ -77,6 +81,10 @@ class Hub(typing.Protocol):
     async def dispatch(self, channel: str, inbound: "Inbound") -> None: ...
 
     async def dedupe(self, key: str) -> bool: ...
+
+    async def binding(self, channel: str, token: str) -> dict | None:
+        """Look up binding state by the storage key f'{channel}:{token}'."""
+        ...
 
 
 class Channel(typing.Protocol):
@@ -86,10 +94,11 @@ class Channel(typing.Protocol):
         """Verify, gate, normalize; ack fast and defer dispatch via Ack.work."""
         ...
 
-    async def on_event(self, event: Event, state: dict) -> None:
-        """Deliver one stream event back to the platform.
+    async def on_event(self, event: Event, state: dict) -> dict | None:
+        """Deliver one stream event, returning provider response data when available.
 
         state is the binding's channel state (thread ids, issue numbers).
+        The hub excludes the source binding when mirroring human messages.
         """
         ...
 
@@ -135,6 +144,9 @@ class _Bus:
 
     async def dedupe(self, key: str) -> bool:
         return await self._hub.dedupe(f"{self._channel}:{key}")
+
+    async def binding(self, token: str) -> dict | None:
+        return await self._hub.binding(self._channel, token)
 
 
 async def _await(coro: typing.Coroutine) -> None:

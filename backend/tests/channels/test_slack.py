@@ -30,6 +30,12 @@ class FakeBus:
     def __init__(self) -> None:
         self.dispatched: list[channels.Inbound] = []
         self.seen: set[str] = set()
+        self.bindings: dict[str, dict] = {}
+        self.lookups: list[str] = []
+
+    async def binding(self, token: str) -> dict | None:
+        self.lookups.append(token)
+        return self.bindings.get(token)
 
     async def dispatch(self, inbound: channels.Inbound) -> None:
         self.dispatched.append(inbound)
@@ -99,7 +105,11 @@ async def test_app_mention_dispatches_with_thread_token_and_attribution():
     assert '<slack_message channel="C1"' in inbound.text
     assert 'sender="U1"' in inbound.text
     assert inbound.title == "slack: hello"
-    assert inbound.state == {"channel_id": "C1", "thread_ts": "100.1", "team_id": "T1", "user_id": "U1"}
+    assert inbound.state == {
+        "channel_id": "C1", "thread_ts": "100.1", "team_id": "T1", "user_id": "U1",
+        "message_id": "100.1", "display_text": "<@UBOT> hello", "author": "U1",
+    }
+    assert bus.lookups == ["T1:C1:100.1"]
 
 
 async def test_thread_reply_reuses_thread_root_token():
@@ -265,12 +275,13 @@ async def test_ignores_plain_channel_message_bots_and_self():
         assert bus.dispatched == [], event
 
 
-async def test_dedupes_event_id():
+async def test_retries_retain_source_id_for_server_dedupe():
     bus = FakeBus()
     await handled(forwarded(envelope(mention(), event_id="Ev1")), bus)
     await handled(forwarded(envelope(mention(), event_id="Ev1")), bus)
     await handled(forwarded(envelope(mention(), event_id="Ev2")), bus)
-    assert len(bus.dispatched) == 1  # the second event id still names the same Slack message
+    assert [inbound.state["message_id"] for inbound in bus.dispatched] == ["100.1"] * 3
+    assert bus.seen == set()
 
 
 def api_channel(calls: list) -> slack.SlackChannel:
@@ -340,40 +351,100 @@ async def test_intermediate_reply_becomes_opaque_status():
     assert params == {"channel_id": "C1", "thread_ts": "100.1", "status": "is working..."}
 
 
-async def test_ui_message_uses_slack_user_profile_with_ui_attribution():
+@pytest.mark.parametrize("origin,source", [("ui", "Hatchery UI"), ("slack", "Slack"), ("github", "GitHub")])
+async def test_human_message_uses_event_author_not_binding_identity(origin, source):
     calls: list[httpx.Request] = []
 
     def responder(request: httpx.Request) -> httpx.Response:
         calls.append(request)
-        if request.url.path == "/api/users.info":
-            return httpx.Response(
-                200,
-                json={
-                    "ok": True,
-                    "user": {"profile": {"display_name": "Andrey", "image_72": "https://img/andrey.png"}},
-                },
-            )
-        return httpx.Response(200, json={"ok": True})
+        return httpx.Response(200, json={"ok": True, "ts": "200.1"})
 
     channel = slack.channel(connector="slack/e2e-bot", transport=httpx.MockTransport(responder))
-    slack_state = {**state(), "team_id": "T1", "user_id": "U1"}
-    event = channels.event(channels.protocol.MESSAGE_RECEIVED, message="continue here", origin="ui")
-    await channel.on_event(event, slack_state)
-    await channel.on_event(event, slack_state)
+    slack_state = {**state(), "team_id": "T1", "user_id": "someone-else", "author": "Wrong Name"}
+    event = channels.event(channels.protocol.MESSAGE_RECEIVED, message="continue here", origin=origin, author="Andrey")
+    response = await channel.on_event(event, slack_state)
 
-    assert [request.url.path for request in calls] == [
-        "/api/users.info",
-        "/api/chat.postMessage",
-        "/api/chat.postMessage",
-    ]
-    params = dict(urllib.parse.parse_qsl(calls[1].read().decode()))
+    assert response == {"ok": True, "ts": "200.1"}
+    assert [request.url.path for request in calls] == ["/api/chat.postMessage"]
+    params = dict(urllib.parse.parse_qsl(calls[0].read().decode()))
     assert params == {
-        "channel": "C1",
-        "thread_ts": "100.1",
-        "text": "continue here",
-        "username": "Andrey · via Hatchery UI",
-        "icon_url": "https://img/andrey.png",
+        "channel": "C1", "thread_ts": "100.1",
+        "text": f"Andrey · via {source}\n\ncontinue here",
     }
+
+
+@pytest.mark.parametrize("bound", [True, False])
+async def test_bound_thread_syncs_all_pages_without_bot_subscription(monkeypatch, bound):
+    calls: list[httpx.Request] = []
+    reply = {
+        "type": "message", "channel_type": "channel", "channel": "C1",
+        "thread_ts": "1.0", "ts": "1.4", "user": "U2", "text": "thanks &amp; noted",
+    }
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        params = dict(urllib.parse.parse_qsl(request.read().decode()))
+        if "cursor" not in params:
+            return httpx.Response(200, json={
+                "ok": True,
+                "messages": [
+                    {"user": "UOTHERBOT", "bot_id": "B1", "text": "shared root", "ts": "1.0"},
+                    {"user": "U1", "text": "hello", "ts": "1.1"},
+                ],
+                "response_metadata": {"next_cursor": "page2"},
+            })
+        assert params["cursor"] == "page2"
+        return httpx.Response(200, json={
+            "ok": True,
+            "messages": [
+                {"user": "UOTHERBOT", "subtype": "bot_message", "text": "bot", "ts": "1.2"},
+                {"user": "U1", "subtype": "channel_join", "text": "joined", "ts": "1.3"},
+                reply,
+            ],
+            "response_metadata": {"next_cursor": ""},
+        })
+
+    channel = slack.channel(connector="slack/e2e-bot", transport=httpx.MockTransport(responder))
+
+    async def should_invoke(*args):
+        return False
+
+    monkeypatch.setattr(channel, "_should_invoke", should_invoke)
+    bus = FakeBus()
+    if bound:
+        bus.bindings["T1:C1:1.0"] = {}  # empty state is still an existing binding
+    else:
+        bus.bindings["T2:C1:1.0"] = {}  # another team must not grant access
+    ack = await channel.handle(forwarded(envelope(reply)), bus)
+    assert ack.work is not None
+    await ack.work
+    assert bus.lookups == ["T1:C1:1.0"]
+    assert len(calls) == 2
+    if not bound:
+        assert bus.dispatched == []
+        return
+    assert [message.state["message_id"] for message in bus.dispatched] == ["1.1", "1.4"]
+    assert all(message.token == "C1:1.0" and message.persist and not message.invoke for message in bus.dispatched)
+    assert bus.dispatched[-1].state["display_text"] == "thanks & noted"
+    assert bus.dispatched[-1].state["author"] == "U2"
+
+
+async def test_failed_persistence_does_not_burn_retry():
+    class FailingBus(FakeBus):
+        async def dispatch(self, inbound):
+            if not self.dispatched:
+                self.dispatched.append(inbound)
+                raise RuntimeError("store unavailable")
+            await super().dispatch(inbound)
+
+    bus = FailingBus()
+    webhook = forwarded(envelope(mention()))
+    with pytest.raises(RuntimeError, match="store unavailable"):
+        await handled(webhook, bus)
+    await handled(webhook, bus)
+    assert len(bus.dispatched) == 2
+    assert bus.dispatched[0].state["message_id"] == bus.dispatched[1].state["message_id"]
+    assert not bus.seen
 
 
 async def test_status_is_truncated():

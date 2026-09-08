@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import copy
 import json
@@ -7,12 +8,14 @@ import httpx
 import pytest
 
 from channels import destinations
-from store import chats, events, spaces
+from store import chats, events, spaces, turns
 
 
 @pytest.fixture
 async def directory(monkeypatch):
     monkeypatch.delenv("SLACK_CONNECTOR", raising=False)
+    # Each test has a fresh store and event loop; do not reuse contended locks.
+    monkeypatch.setattr(turns, "_locks", {})
     people = [
         {"id": "andrey", "name": "Andrey Buzin", "username": "andrey",
          "email": "andrey@example.com", "slack": {"team_id": "T1", "user_id": "U1", "user": "andrey-slack"},
@@ -60,6 +63,7 @@ def provider(monkeypatch):
             "conversations.members": {"ok": True, "members": ["U1", "U2", "UBOT"]},
             "chat.postMessage": {"ok": True, "ts": "100.123", "channel": "C1"},
             "chat.getPermalink": {"ok": True, "permalink": "https://acme.slack.com/archives/C1/p100000123"},
+            "repos/acme/hatchery": {"id": 123, "full_name": "acme/hatchery"},
             "repos/acme/hatchery/issues/7": {"number": 7, "title": "Fix notifications", "html_url": "https://github.com/acme/hatchery/issues/7"},
             "users/masquerader": {"id": 99, "login": "masquerader"},
             "users/janesmith": {"id": 43, "login": "janesmith"},
@@ -414,4 +418,601 @@ async def test_github_send_validates_linked_identity_and_space(directory, provid
     people[1]["github"]["login"] = "masquerader"
     with pytest.raises(ValueError, match="identity changed"):
         await destinations.send_message(chat.id, "github", "acme/hatchery#7", "Done", ["jane"], delivery_key="turn2")
+    assert sum(path.endswith("/comments") for path, _, _ in requests) == 1
+
+
+async def test_shared_slack_thread_has_independent_record_and_owner_binding(directory, provider):
+    chat, _ = directory
+    requests, _ = provider
+    result = await destinations.start_shared_thread(
+        chat.id, "slack", "T1/C1", "Done <!channel>", ["jane"], delivery_key="turn1",
+        tool_call_id="call1", excluded_message_ids=["private1"],
+    )
+    assert result["status"] == "sent"
+    sharing = result["sharing"]
+    assert sharing == {"id": sharing["id"], "provider": "slack", "label": "#hatchery-updates",
+                       "url": result["url"], "text": "Done <!channel>", "tool_call_id": "call1",
+                       "message_id": "100.123"}
+    binding = await chats.binding("slack:T1:C1:100.123")
+    assert binding.chat_id == chat.id
+    assert binding.state == {
+        "team_id": "T1", "channel_id": "C1", "thread_ts": "100.123", "user_id": "U1",
+        "sharing_id": sharing["id"], "excluded_message_ids": ["private1"], "start_message_id": "100.123",
+    }
+    assert await events.read(chat.id, "sharing") == [(0, {**sharing, "token": binding.token, "state": binding.state})]
+    assert await events.read(chat.id, "messages") == []
+    assert await events.read(chat.id, "ui") == [(0, {"type": "messages.changed", "sharing_id": sharing["id"]})]
+    receipt = (await events.read(chat.id, "notifications"))[-1][1]
+    assert receipt["text"] == "<@U2> Done &lt;!channel&gt;"
+    assert receipt["result"] == result
+    requests.clear()
+    assert await destinations.start_shared_thread(
+        chat.id, "slack", "T1/C1", "Done <!channel>", ["jane"], delivery_key="turn1",
+    ) == result
+    assert not requests
+    assert len(await events.read(chat.id, "sharing")) == 1
+    assert len(await events.read(chat.id, "ui")) == 1
+
+
+@pytest.mark.parametrize("kind", ["issue", "pull"])
+async def test_shared_github_uses_canonical_token_and_reuses_one_thread(directory, provider, kind):
+    chat, _ = directory
+    requests, overrides = provider
+    if kind == "pull":
+        overrides["repos/acme/hatchery/issues/7"] = {"number": 7, "pull_request": {"url": "pull"}}
+    result = await destinations.start_shared_thread(
+        chat.id, "github", "acme/hatchery#7", "Done", delivery_key="turn1", excluded_message_ids=["private"],
+    )
+    binding = await chats.binding(f"github:repo:123:{kind}:7")
+    assert binding.chat_id == chat.id
+    assert binding.state == {
+        "owner": "acme", "repo": "hatchery", "repository_id": 123, "kind": kind,
+        "number": 7, "root_comment_id": None, "comment_id": 99, "sender_id": "42",
+        "sharing_id": result["sharing"]["id"], "excluded_message_ids": ["private"], "start_message_id": "99",
+    }
+    assert result["sharing"]["label"] == "acme/hatchery#7"
+    assert await destinations.start_shared_thread(
+        chat.id, "github", "https://github.com/acme/hatchery/issues/7", "Share again", delivery_key="turn2",
+    ) == result
+    assert sum(path.endswith("/comments") for path, _, _ in requests) == 1
+    assert len(await events.read(chat.id, "sharing")) == 1
+
+
+async def test_existing_inbound_github_thread_keeps_its_original_boundary(directory, provider):
+    chat, _ = directory
+    requests, _ = provider
+    token = "github:repo:123:issue:7"
+    original = await chats.bind(token, chat.id, "github", {
+        "owner": "acme", "repo": "hatchery", "repository_id": 123, "kind": "issue",
+        "number": 7, "root_comment_id": None, "comment_id": 10, "sender_id": "42",
+    })
+    result = await destinations.start_shared_thread(
+        chat.id, "github", "acme/hatchery#7", "Share here", delivery_key="turn1",
+        excluded_message_ids=["private"],
+    )
+    assert result["status"] == "already_shared"
+    assert "sharing" not in result
+    assert await chats.binding(token) == original
+    assert not any(path.endswith("/comments") for path, _, _ in requests)
+    assert await events.read(chat.id, "notifications") == []
+    assert await events.read(chat.id, "sharing") == []
+
+
+async def test_shared_github_collision_rejected_before_post(directory, provider):
+    chat, _ = directory
+    requests, _ = provider
+    other = await chats.create(chat.space_id, "other", user_id="jane")
+    original = await chats.bind("github:repo:123:issue:7", other.id, "github", {"sender_id": "43"})
+    with pytest.raises(ValueError, match="already bound"):
+        await destinations.start_shared_thread(chat.id, "github", "acme/hatchery#7", "Done", delivery_key="turn1")
+    assert not any(path.endswith("/comments") for path, _, _ in requests)
+    assert await chats.binding(original.token) == original
+    assert await events.read(chat.id, "notifications") == []
+    assert await events.read(chat.id, "sharing") == []
+
+
+async def test_concurrent_github_shares_do_not_post_into_another_chat(directory, provider):
+    chat, _ = directory
+    requests, _ = provider
+    other = await chats.create(chat.space_id, "other", user_id="jane")
+    results = await asyncio.gather(
+        *(destinations.start_shared_thread(owner.id, "github", "acme/hatchery#7", "Done", delivery_key="turn1")
+          for owner in (chat, other)), return_exceptions=True,
+    )
+    assert sum(isinstance(result, ValueError) for result in results) == 1
+    assert sum(isinstance(result, dict) and result["status"] == "sent" for result in results) == 1
+    assert sum(path.endswith("/comments") for path, _, _ in requests) == 1
+
+
+@pytest.mark.parametrize("failure", ["binding", "sharing", "sharing_after_write", "ui"])
+@pytest.mark.parametrize("provider_name,destination", [("slack", "T1/C1"), ("github", "acme/hatchery#7")])
+async def test_shared_receipt_recovers_finalize_without_provider_calls(directory, provider, monkeypatch, failure, provider_name, destination):
+    chat, _ = directory
+    requests, _ = provider
+    append = events.append
+
+    async def fail_append(chat_id, ns, data):
+        if ns == failure or ns == "sharing" and failure == "sharing_after_write":
+            if failure == "sharing_after_write":
+                await append(chat_id, ns, data)
+            raise RuntimeError("storage unavailable")
+        return await append(chat_id, ns, data)
+
+    async def fail_bind(*args, **kwargs):
+        raise RuntimeError("binding unavailable")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(events, "append", fail_append)
+        if failure == "binding":
+            patch.setattr(chats, "bind", fail_bind)
+        with pytest.raises(RuntimeError, match="unavailable"):
+            await destinations.start_shared_thread(
+                chat.id, provider_name, destination, "Done", delivery_key="turn1", tool_call_id="call1",
+                excluded_message_ids=["private"],
+            )
+    receipt = (await events.read(chat.id, "notifications"))[-1][1]
+    assert receipt["result"]["status"] == "sent"
+    assert receipt["text"] == ("Done" if provider_name == "slack" else "Done\n\n<!-- chat:github -->")
+    if failure == "binding":
+        assert await chats.bindings(chat.id) == []
+    requests.clear()
+    result = await destinations.start_shared_thread(chat.id, provider_name, destination, "Done", delivery_key="turn1")
+    assert result == receipt["result"]
+    assert not requests
+    assert await events.read(chat.id, "sharing") == [(0, receipt["sharing"])]
+    binding = await chats.binding(receipt["sharing"]["token"])
+    assert binding.state == receipt["sharing"]["state"]
+    assert len(await events.read(chat.id, "ui")) == 1
+    # A subsequent replay must not overwrite mutable inbound state either.
+    inbound = {"comment_id": 200, **({"user_id": "U2"} if provider_name == "slack" else {"sender_id": "43"})}
+    await chats.claim(binding.token, provider_name, None, "reply", inbound,
+                      user_id="jane", allow_participants=True)
+    assert await destinations.start_shared_thread(chat.id, provider_name, destination, "Done", delivery_key="turn1") == result
+    assert (await chats.binding(binding.token)).state["comment_id"] == 200
+    if provider_name == "slack":
+        assert (await chats.binding(binding.token)).state["user_id"] == "U1"
+    else:
+        assert (await chats.binding(binding.token)).state["sender_id"] == "43"
+
+
+@pytest.mark.parametrize("provider_name,destination,path", [
+    ("slack", "T1/C1", "chat.postMessage"),
+    ("github", "acme/hatchery#7", "repos/acme/hatchery/issues/7/comments"),
+])
+async def test_uncertain_shared_delivery_has_no_binding_or_sharing(directory, provider, provider_name, destination, path):
+    chat, _ = directory
+    requests, overrides = provider
+
+    def fail(request, form):
+        raise httpx.ReadTimeout("lost response", request=request)
+
+    overrides[path] = fail
+    for _ in range(2):
+        result = await destinations.start_shared_thread(chat.id, provider_name, destination, "Done", delivery_key="turn1")
+        assert result["status"] == "unknown"
+        assert "sharing" not in result
+    assert sum(request_path == path for request_path, _, _ in requests) == 1
+    assert await chats.bindings(chat.id) == []
+    assert await events.read(chat.id, "sharing") == []
+    assert await events.read(chat.id, "ui") == []
+
+
+async def test_shared_lost_receipt_never_binds_or_reposts(directory, provider, monkeypatch):
+    chat, _ = directory
+    requests, _ = provider
+    append = events.append
+
+    async def fail_receipt(chat_id, ns, data):
+        if ns == "notifications" and "result" in data:
+            raise RuntimeError("lost receipt")
+        return await append(chat_id, ns, data)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(events, "append", fail_receipt)
+        with pytest.raises(RuntimeError, match="lost receipt"):
+            await destinations.start_shared_thread(chat.id, "slack", "T1/C1", "Done", delivery_key="turn1")
+    result = await destinations.start_shared_thread(chat.id, "slack", "T1/C1", "Done", delivery_key="turn1")
+    assert result["status"] == "unknown"
+    assert sum(path == "chat.postMessage" for path, _, _ in requests) == 1
+    assert await chats.bindings(chat.id) == []
+    assert await events.read(chat.id, "sharing") == []
+
+
+async def test_one_off_and_shared_deliveries_have_separate_receipts(directory, provider):
+    chat, _ = directory
+    requests, _ = provider
+    one_off = await destinations.send_message(chat.id, "slack", "T1/C1", "Done", delivery_key="turn1")
+    shared = await destinations.start_shared_thread(chat.id, "slack", "T1/C1", "Done", delivery_key="turn1")
+    assert "sharing" not in one_off and "sharing" in shared
+    assert sum(path == "chat.postMessage" for path, _, _ in requests) == 2
+    assert await destinations.send_message(chat.id, "slack", "T1/C1", "Done", delivery_key="turn1") == one_off
+
+
+async def test_slack_returned_thread_collision_keeps_sent_receipt_without_transfer(directory, provider):
+    chat, _ = directory
+    requests, _ = provider
+    other = await chats.create(None, "other", user_id="jane")
+    original = await chats.bind("slack:T1:C1:100.123", other.id, "slack", {"user_id": "U2"})
+    for _ in range(2):
+        with pytest.raises(ValueError, match="already bound"):
+            await destinations.start_shared_thread(chat.id, "slack", "T1/C1", "Done", delivery_key="turn1")
+    assert sum(path == "chat.postMessage" for path, _, _ in requests) == 1
+    assert (await events.read(chat.id, "notifications"))[-1][1]["result"]["status"] == "sent"
+    assert await chats.binding(original.token) == original
+    assert await events.read(chat.id, "sharing") == []
+
+
+async def test_shared_finalize_waits_for_chat_lock_after_saving_sent_receipt(directory, provider, monkeypatch):
+    chat, _ = directory
+    saved = asyncio.Event()
+    locked = asyncio.Event()
+    release = asyncio.Event()
+    append = events.append
+
+    async def observe_receipt(chat_id, ns, data):
+        index = await append(chat_id, ns, data)
+        if ns == "notifications" and "result" in data:
+            saved.set()
+            await locked.wait()
+        return index
+
+    async def hold_lock():
+        await saved.wait()  # Let the pre-post snapshot finish first.
+        async with turns.run(chat.id):
+            locked.set()
+            await release.wait()
+
+    monkeypatch.setattr(events, "append", observe_receipt)
+    # Separate tasks avoid inheriting turns.run's context-local reentrancy.
+    holder = asyncio.create_task(hold_lock())
+    sender = asyncio.create_task(destinations.start_shared_thread(
+        chat.id, "slack", "T1/C1", "Done", delivery_key="turn1",
+    ))
+    try:
+        await asyncio.wait_for(saved.wait(), 2)
+        assert not sender.done()
+        assert await chats.bindings(chat.id) == []
+        assert await events.read(chat.id, "sharing") == []
+    finally:
+        release.set()
+        await holder
+        result = await sender
+    assert result["status"] == "sent"
+    assert len(await chats.bindings(chat.id)) == 1
+    assert len(await events.read(chat.id, "sharing")) == 1
+
+
+async def test_slack_webhook_waits_for_post_and_binding_under_channel_lock(directory, provider, monkeypatch):
+    chat, _ = directory
+    posted, webhook_waiting, finish_post = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    api = destinations._api
+
+    async def pause_post(client, method, path, **kwargs):
+        result = await api(client, method, path, **kwargs)
+        if path == "chat.postMessage":
+            posted.set()
+            await finish_post.wait()
+        return result
+
+    async def webhook():
+        await posted.wait()
+        webhook_waiting.set()
+        async with turns.run("sharing:slack:T1:C1"), turns.run("sharing:slack:T1:C1:100.123"):
+            owner, created = await chats.claim(
+                "slack:T1:C1:100.123", "slack", None, "reply",
+                {"team_id": "T1", "channel_id": "C1", "thread_ts": "100.123", "user_id": "U2"},
+                user_id="jane", allow_participants=True,
+            )
+        async with turns.run(owner.id):
+            await events.append(owner.id, "messages", {"id": "future_reply"})
+        return owner, created
+
+    monkeypatch.setattr(destinations, "_api", pause_post)
+    # Both tasks start outside any lock context; no inherited reentrancy.
+    inbound = asyncio.create_task(webhook())
+    outbound = asyncio.create_task(destinations.start_shared_thread(
+        chat.id, "slack", "T1/C1", "Done", delivery_key="turn1",
+    ))
+    try:
+        await asyncio.wait_for(webhook_waiting.wait(), 2)
+        assert not inbound.done()
+        assert await chats.binding("slack:T1:C1:100.123") is None
+    finally:
+        finish_post.set()
+        result, (owner, created) = await asyncio.gather(outbound, inbound)
+    assert result["status"] == "sent"
+    assert not created and owner.id == chat.id and owner.user_id == "andrey"
+    assert len(await chats.list_all()) == 1
+    bound = await chats.binding("slack:T1:C1:100.123")
+    assert bound.state["user_id"] == "U1"
+    assert bound.state["start_message_id"] == "100.123"
+    assert "future_reply" not in bound.state["excluded_message_ids"]
+
+
+@pytest.mark.parametrize("crash", ["receipt", "permalink", "enriched_receipt"])
+async def test_slack_early_sent_receipt_recovers_frozen_boundary(directory, provider, monkeypatch, crash):
+    chat, _ = directory
+    requests, _ = provider
+    await events.append(chat.id, "messages", {"id": "context"})
+    await events.append(chat.id, "messages", {"id": "arrived_during_model"})
+    await events.append(chat.id, "sharing", {"id": "previous"})
+    # A previous root whose independent record has not yet been finalized also
+    # predates this destination and must not appear on a delayed fanout replay.
+    await events.append(chat.id, "notifications", {"result": {"status": "sent"}, "sharing": {"id": "pending"}})
+    append, api = events.append, destinations._api
+    snapshots = []
+
+    async def crash_append(chat_id, ns, data):
+        if ns == "notifications" and data.get("result", {}).get("status") == "sent":
+            snapshots.append(copy.deepcopy(data))
+            if crash == "enriched_receipt" and len(snapshots) == 2:
+                raise RuntimeError("receipt unavailable")
+        index = await append(chat_id, ns, data)
+        if crash == "receipt" and ns == "notifications" and "result" in data:
+            raise RuntimeError("crashed after receipt")
+        return index
+
+    async def crash_permalink(client, method, path, **kwargs):
+        if path == "chat.getPermalink":
+            receipt = (await events.read(chat.id, "notifications"))[-1][1]
+            assert receipt["result"]["status"] == "sent"
+            assert receipt["sharing"]["state"]["start_message_id"] == "100.123"
+            assert await chats.bindings(chat.id) == []
+            if crash == "permalink":
+                raise asyncio.CancelledError()
+        return await api(client, method, path, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(events, "append", crash_append)
+        patch.setattr(destinations, "_api", crash_permalink)
+        with pytest.raises(asyncio.CancelledError if crash == "permalink" else RuntimeError):
+            await destinations.start_shared_thread(
+                chat.id, "slack", "T1/C1", "Done", ["jane"], delivery_key="turn1",
+                excluded_message_ids=["model_only", "context", "model_only"],
+            )
+    expected = ["model_only", "context", "arrived_during_model", "sharing:previous", "sharing:pending"]
+    receipt = (await events.read(chat.id, "notifications"))[-1][1]
+    assert receipt["sharing"]["state"]["excluded_message_ids"] == expected
+    assert receipt["text"] == "<@U2> Done"
+    assert receipt["result"]["url"] == "https://app.slack.com/client/T1/C1"
+    assert await chats.bindings(chat.id) == []
+    assert sum(path == "chat.postMessage" for path, _, _ in requests) == 1
+    await events.append(chat.id, "messages", {"id": "future_reply"})
+    await events.append(chat.id, "sharing", {"id": "future_share"})
+    requests.clear()
+    result = await destinations.start_shared_thread(
+        chat.id, "slack", "T1/C1", "Done", ["jane"], delivery_key="turn1", excluded_message_ids=["future_reply"],
+    )
+    assert result == receipt["result"]
+    assert not requests
+    assert (await chats.binding("slack:T1:C1:100.123")).state["excluded_message_ids"] == expected
+    records = await events.read(chat.id, "sharing")
+    assert records[-1][1] == receipt["sharing"]
+
+
+async def test_github_exclusion_snapshot_precedes_post_not_finalize(directory, provider, monkeypatch):
+    chat, _ = directory
+    await events.append(chat.id, "messages", {"id": "persisted_before_post"})
+    await events.append(chat.id, "sharing", {"id": "previous"})
+    api = destinations._api
+
+    async def inbound_during_post(client, method, path, **kwargs):
+        if path.endswith("/comments") and method == "POST":
+            # Different inbound destinations may continue while this API awaits.
+            async with turns.run(chat.id):
+                await events.append(chat.id, "messages", {"id": "future_reply"})
+        return await api(client, method, path, **kwargs)
+
+    monkeypatch.setattr(destinations, "_api", inbound_during_post)
+    result = await destinations.start_shared_thread(
+        chat.id, "github", "acme/hatchery#7", "Done", delivery_key="turn1",
+        excluded_message_ids=["context"],
+    )
+    binding = await chats.binding("github:repo:123:issue:7")
+    assert binding.state["excluded_message_ids"] == ["context", "persisted_before_post", "sharing:previous"]
+    assert binding.state["start_message_id"] == result["message_id"] == "99"
+
+
+@pytest.mark.parametrize("pause_path", ["chat.postMessage", "chat.getPermalink"])
+async def test_concurrent_slack_replay_uses_enriched_receipt(directory, provider, monkeypatch, pause_path):
+    chat, _ = directory
+    requests, _ = provider
+    lookup, finish_lookup, replay_read = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    api, read = destinations._api, events.read
+
+    async def pause_permalink(client, method, path, **kwargs):
+        if path == pause_path:
+            lookup.set()
+            await finish_lookup.wait()
+        return await api(client, method, path, **kwargs)
+
+    async def observe_read(chat_id, ns, *args):
+        records = await read(chat_id, ns, *args)
+        if ns == "notifications" and lookup.is_set():
+            replay_read.set()
+        return records
+
+    async def replay():
+        await lookup.wait()
+        return await destinations.start_shared_thread(chat.id, "slack", "T1/C1", "Done", delivery_key="turn1")
+
+    monkeypatch.setattr(destinations, "_api", pause_permalink)
+    monkeypatch.setattr(events, "read", observe_read)
+    repeated = asyncio.create_task(replay())
+    original = asyncio.create_task(destinations.start_shared_thread(
+        chat.id, "slack", "T1/C1", "Done", delivery_key="turn1",
+    ))
+    try:
+        await asyncio.wait_for(replay_read.wait(), 2)
+        assert not repeated.done()
+    finally:
+        finish_lookup.set()
+        first, second = await asyncio.gather(original, repeated)
+    assert first == second
+    assert first["url"].endswith("p100000123")
+    assert sum(path == "chat.postMessage" for path, _, _ in requests) == 1
+    assert len(await events.read(chat.id, "sharing")) == 1
+
+
+@pytest.mark.parametrize("provider_name,destination,token,lock_key", [
+    ("slack", "T1/C1", "slack:T1:C1:100.123", "sharing:slack:T1:C1"),
+    ("github", "acme/hatchery#7", "github:repo:123:issue:7", "sharing:github:repo:123:issue:7"),
+])
+async def test_inbound_recovers_sent_thread_and_frozen_pending_boundary(
+    directory, provider, monkeypatch, provider_name, destination, token, lock_key,
+):
+    chat, _ = directory
+    requests, _ = provider
+    await chats.create(None, "unrelated newer chat", user_id="jane")
+    await events.append(chat.id, "messages", {"id": "persisted"})
+    await events.append(chat.id, "pending_messages", {"id": "context"})
+    await events.append(chat.id, "pending_messages", {"id": "queued_before_share"})
+    await events.append(chat.id, "sharing", {"id": "previous"})
+    append = events.append
+
+    async def crash_after_receipt(chat_id, namespace, data):
+        index = await append(chat_id, namespace, data)
+        if namespace == "notifications" and data.get("result", {}).get("status") == "sent":
+            raise RuntimeError("crash before binding")
+        return index
+
+    with monkeypatch.context() as patch:
+        patch.setattr(events, "append", crash_after_receipt)
+        with pytest.raises(RuntimeError, match="crash before binding"):
+            await destinations.start_shared_thread(
+                chat.id, provider_name, destination, "Done", delivery_key="turn1",
+                excluded_message_ids=["context", "model_only", "context"],
+            )
+    receipt = (await events.read(chat.id, "notifications"))[-1][1]
+    expected = ["context", "model_only", "persisted", "queued_before_share", "sharing:previous"]
+    assert receipt["sharing"]["state"]["excluded_message_ids"] == expected
+    assert await chats.binding(token) is None
+    assert sum(path == "chat.postMessage" or path.endswith("/comments") for path, _, _ in requests) == 1
+    requests.clear()
+    # New messages must not be folded into the old boundary during recovery.
+    await events.append(chat.id, "messages", {"id": "future_message"})
+    await events.append(chat.id, "pending_messages", {"id": "future_pending"})
+    await events.append(chat.id, "sharing", {"id": "future_sharing"})
+    assert await destinations.recover_shared_thread(token + ":wrong") is None
+    assert await chats.binding(token) is None
+    async with turns.run(lock_key):
+        recovered = await destinations.recover_shared_thread(token)
+        assert recovered.chat_id == chat.id
+        claimed, created = await chats.claim(
+            token, provider_name, None, "participant reply", {"comment_id": 200},
+            user_id="jane", allow_participants=True,
+        )
+    assert not created and claimed.id == chat.id and claimed.user_id == "andrey"
+    assert len(await chats.list_all()) == 2  # No separate inbound chat.
+    assert recovered.state == receipt["sharing"]["state"]
+    assert recovered.state["excluded_message_ids"] == expected
+    assert f"sharing:{receipt['sharing']['id']}" not in recovered.state["excluded_message_ids"]
+    assert (await events.read(chat.id, "sharing"))[-1][1] == receipt["sharing"]
+    assert len(await events.read(chat.id, "ui")) == 1
+    assert await destinations.recover_shared_thread(token) == await chats.binding(token)
+    assert await destinations.start_shared_thread(
+        chat.id, provider_name, destination, "Done", delivery_key="turn1",
+    ) == receipt["result"]
+    assert (await chats.binding(token)).state["excluded_message_ids"] == expected
+    assert len(await events.read(chat.id, "sharing")) == 3
+    assert len(await events.read(chat.id, "ui")) == 1
+    assert not requests
+
+
+@pytest.mark.parametrize("status", [None, "unknown", "failed", "one_off"])
+async def test_recovery_requires_exact_known_sent_sharing_receipt(directory, provider, status):
+    chat, _ = directory
+    requests, _ = provider
+    token = "slack:T1:C1:100.123"
+    receipt = {"sharing": {"token": token}}
+    if status == "one_off":
+        receipt = {"result": {"status": "sent", "destination": token}}
+    elif status is not None:
+        receipt["result"] = {"status": status}
+    await events.append(chat.id, "notifications", receipt)
+    # Neither a separate UI record nor a user message confers ownership.
+    await events.append(chat.id, "sharing", {"token": token, "id": "unconfirmed"})
+    await events.append(chat.id, "messages", {"id": "inbound", "token": token, "status": "sent"})
+    assert await destinations.recover_shared_thread(token) is None
+    assert await destinations.recover_shared_thread("github:repo:123:issue:7") is None
+    assert await chats.bindings(chat.id) == []
+    assert not requests
+
+
+async def test_recovery_preserves_existing_binding_without_reading_receipts(directory, provider, monkeypatch):
+    chat, _ = directory
+    requests, _ = provider
+    bound = await chats.bind("slack:T1:C1:100.123", chat.id, "slack", {"user_id": "U1"})
+
+    async def unavailable(*args):
+        raise RuntimeError("receipts unavailable")
+
+    monkeypatch.setattr(events, "read", unavailable)
+    assert await destinations.recover_shared_thread(bound.token) == bound
+    assert not requests
+
+
+@pytest.mark.parametrize("conflict", ["binding_during_scan", "sent_receipt"])
+async def test_recovery_never_transfers_a_conflicting_thread(directory, provider, monkeypatch, conflict):
+    chat, _ = directory
+    requests, _ = provider
+    token = "slack:T1:C1:100.123"
+    append = events.append
+
+    async def crash_after_receipt(chat_id, namespace, data):
+        index = await append(chat_id, namespace, data)
+        if namespace == "notifications" and "result" in data:
+            raise RuntimeError("crash before binding")
+        return index
+
+    with monkeypatch.context() as patch:
+        patch.setattr(events, "append", crash_after_receipt)
+        with pytest.raises(RuntimeError, match="crash before binding"):
+            await destinations.start_shared_thread(chat.id, "slack", "T1/C1", "Done", delivery_key="turn1")
+    receipt = (await events.read(chat.id, "notifications"))[-1][1]
+    other = await chats.create(None, "other owner", user_id="jane")
+    if conflict == "sent_receipt":
+        await events.append(other.id, "notifications", receipt)
+    else:
+        read = events.read
+
+        async def competing_binding(chat_id, namespace, *args):
+            records = await read(chat_id, namespace, *args)
+            if chat_id == chat.id and namespace == "notifications":
+                await chats.bind(token, other.id, "slack", {"user_id": "U2"})
+            return records
+
+        monkeypatch.setattr(events, "read", competing_binding)
+    requests.clear()
+    with pytest.raises(ValueError, match="conflicting sent receipts|already bound"):
+        await destinations.recover_shared_thread(token)
+    bound = await chats.binding(token)
+    if conflict == "binding_during_scan":
+        assert bound.chat_id == other.id and bound.state == {"user_id": "U2"}
+        assert await destinations.recover_shared_thread(token) == bound
+    else:
+        assert bound is None
+    assert await events.read(chat.id, "sharing") == []
+    assert not requests
+
+
+async def test_github_send_recovers_another_chats_sent_thread_before_posting(directory, provider, monkeypatch):
+    chat, _ = directory
+    requests, _ = provider
+    append = events.append
+
+    async def crash_after_receipt(chat_id, namespace, data):
+        index = await append(chat_id, namespace, data)
+        if namespace == "notifications" and "result" in data:
+            raise RuntimeError("crash before binding")
+        return index
+
+    with monkeypatch.context() as patch:
+        patch.setattr(events, "append", crash_after_receipt)
+        with pytest.raises(RuntimeError, match="crash before binding"):
+            await destinations.start_shared_thread(chat.id, "github", "acme/hatchery#7", "Done", delivery_key="turn1")
+    other = await chats.create(chat.space_id, "other", user_id="jane")
+    with pytest.raises(ValueError, match="already bound"):
+        await destinations.start_shared_thread(other.id, "github", "acme/hatchery#7", "Different", delivery_key="turn2")
+    assert (await chats.binding("github:repo:123:issue:7")).chat_id == chat.id
     assert sum(path.endswith("/comments") for path, _, _ in requests) == 1

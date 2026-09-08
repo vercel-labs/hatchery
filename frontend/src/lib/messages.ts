@@ -3,6 +3,10 @@ import type { UIMessage } from "ai";
 // Worker tools live in the Python backend. Their implementations are migration
 // stubs until the Vercel Sandbox control plane lands.
 export type HatcheryTools = {
+  start_shared_thread: {
+    input: Record<string, unknown>;
+    output: unknown;
+  };
   create_sandbox: {
     input: { repos?: string[]; title?: string };
     output: unknown;
@@ -18,7 +22,7 @@ export type HatcheryTools = {
 };
 
 export type ChatUIMessage = UIMessage<
-  { origin?: "slack" },
+  { origin?: "slack" | "github" | "ui"; author?: string },
   {
     reload: unknown;
     "space-assignment": {

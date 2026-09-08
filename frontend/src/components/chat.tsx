@@ -4,6 +4,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { PlusIcon } from "lucide-react";
 
 import { ChatMessage } from "@/components/chat-message";
+import {
+  SharedThreadLink,
+  SharedThreadNotification,
+} from "@/components/shared-thread";
+import { Message, MessageContent } from "@/components/ui/message";
 import { Button } from "@/components/ui/button";
 import { PromptForm } from "@/components/prompt-form";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -24,6 +29,7 @@ import {
 import { apiBase, apiFetch, type Chat } from "@/lib/api";
 import { submissionLabel } from "@/components/chat-status";
 import type { ChatUIMessage } from "@/lib/messages";
+import { sharingTimeline, type SharedThread } from "@/lib/sharing";
 
 export function ChatView({
   chatId,
@@ -84,6 +90,37 @@ export function ChatView({
   const attachedGeneration = useRef(streamGeneration);
   const [markingSeen, setMarkingSeen] = useState(false);
   const [seenError, setSeenError] = useState("");
+  const [savedSharing, setSavedSharing] = useState<SharedThread[]>([]);
+  const [sharingError, setSharingError] = useState("");
+  const sharing = useMemo(
+    () => sharingTimeline(messages, savedSharing),
+    [messages, savedSharing],
+  );
+
+  // Refresh on reload and messages.changed, even during a live/failed turn.
+  // Status changes also recover a sent notification if streaming lost output.
+  useEffect(() => {
+    const controller = new AbortController();
+    apiFetch(`/api/chats/${chatId}/sharing`, {
+      signal: controller.signal,
+      cache: "no-store",
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error();
+        const stored: SharedThread[] = await response.json();
+        if (!Array.isArray(stored)) throw new Error();
+        if (!controller.signal.aborted) {
+          setSavedSharing(stored);
+          setSharingError("");
+        }
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setSharingError("Could not refresh shared threads. Thread links may be incomplete.");
+        }
+      });
+    return () => controller.abort();
+  }, [chatId, messageRevision, status]);
 
   useEffect(() => {
     onMessagesChange?.(messages);
@@ -139,7 +176,7 @@ export function ChatView({
 
   return (
     <div className="mx-auto flex min-h-0 w-full flex-1 flex-col">
-      {messages.length === 0 ? (
+      {messages.length === 0 && sharing.threads.length === 0 ? (
         <div className="flex flex-1 items-center justify-center p-6">
           <Empty>
             <EmptyHeader>
@@ -165,13 +202,25 @@ export function ChatView({
           <MessageScroller className="flex-1">
             <MessageScrollerViewport>
               <MessageScrollerContent className="mx-auto flex w-full max-w-2xl flex-col gap-6 px-6 py-6">
-                {messages.map((message) => (
+                {sharing.messages.map((message) => (
                   <MessageScrollerItem
                     key={message.id}
                     messageId={message.id}
                     scrollAnchor={message.role === "user"}
                   >
                     <ChatMessage message={message} />
+                  </MessageScrollerItem>
+                ))}
+                {sharing.fallback.map((thread) => (
+                  <MessageScrollerItem
+                    key={`sharing:${thread.id}`}
+                    messageId={`sharing:${thread.id}`}
+                  >
+                    <Message align="start">
+                      <MessageContent>
+                        <SharedThreadNotification sharing={thread} fallback />
+                      </MessageContent>
+                    </Message>
                   </MessageScrollerItem>
                 ))}
                 {status === "submitted" && (
@@ -189,6 +238,27 @@ export function ChatView({
       )}
 
       <div className="mx-auto flex w-full max-w-2xl flex-col gap-2 px-6 pb-6">
+        {sharing.threads.length > 0 && (
+          <Alert role="status">
+            <AlertTitle>This chat continues in shared threads</AlertTitle>
+            <AlertDescription className="flex flex-col gap-1">
+              <span>Replies are shared with these destinations. This UI remains owner-only.</span>
+              <ul className="flex flex-col gap-1">
+                {sharing.threads.map((thread) => (
+                  <li key={thread.id}>
+                    <SharedThreadLink sharing={thread} />
+                  </li>
+                ))}
+              </ul>
+            </AlertDescription>
+          </Alert>
+        )}
+        {sharingError && (
+          <Alert variant="destructive">
+            <AlertTitle>Shared threads unavailable</AlertTitle>
+            <AlertDescription>{sharingError}</AlertDescription>
+          </Alert>
+        )}
         {error && (
           <Alert variant="destructive">
             <AlertTitle>Request failed</AlertTitle>

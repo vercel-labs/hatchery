@@ -1,6 +1,8 @@
 import asyncio
 import json
 
+import pytest
+
 import store
 from store import chats, spaces
 
@@ -281,3 +283,83 @@ async def test_dedupe():
     assert await chats.dedupe("slack:ev1") is True
     assert await chats.dedupe("slack:ev1") is False
     assert await chats.dedupe("slack:ev2") is True
+
+
+async def test_bind_is_idempotent_and_exact_without_transferring():
+    chat = await chats.create(None, "owner", user_id="owner")
+    other = await chats.create(None, "other", user_id="other")
+    token = "slack:T1:C1:100.1"
+    first = await chats.bind(token, chat.id, "slack", {"user_id": "U1", "comment_id": 1})
+    assert await chats.binding(token) == first
+    assert await chats.binding("slack:C1:100.1") is None
+    assert await chats.bind(token, chat.id, "slack", first.state) == first
+    enriched = await chats.bind(token, chat.id, "slack", {"user_id": "U2", "sharing_id": "share1"})
+    assert enriched.state == {"user_id": "U1", "comment_id": 1, "sharing_id": "share1"}
+    with pytest.raises(ValueError, match="already bound"):
+        await chats.bind(token, other.id, "slack", {"user_id": "U2"})
+    assert await chats.binding(token) == enriched
+    assert (await chats.get(chat.id)).user_id == "owner"
+    with pytest.raises(ValueError, match="does not exist"):
+        await chats.bind("new", "missing", "slack", {})
+    assert await chats.binding("new") is None
+
+
+async def test_bind_concurrent_chats_have_exactly_one_winner():
+    owners = [await chats.create(None, str(i), user_id=str(i)) for i in range(10)]
+    results = await asyncio.gather(
+        *(chats.bind("github:repo:1:issue:7", owner.id, "github", {}) for owner in owners),
+        return_exceptions=True,
+    )
+    winners = [result for result in results if isinstance(result, chats.Binding)]
+    assert len(winners) == 1
+    assert sum(isinstance(result, ValueError) for result in results) == 9
+    assert await chats.binding("github:repo:1:issue:7") == winners[0]
+
+
+@pytest.mark.parametrize("allow_participants", [False, True])
+async def test_shared_claim_preserves_owner_identity_and_sharing_state(allow_participants):
+    owner = await chats.create(None, "shared", user_id="owner", author_display_name="Owner")
+    token = "slack:T1:C1:100.1"
+    state = {"team_id": "T1", "channel_id": "C1", "thread_ts": "100.1", "user_id": "U1",
+             "sharing_id": "share1", "excluded_message_ids": ["private"], "comment_id": 1}
+    await chats.bind(token, owner.id, "slack", state)
+    claimed, created = await chats.claim(
+        token, "slack", None, "participant", {**state, "user_id": "U2", "comment_id": 2,
+                                               "sharing_id": "other", "excluded_message_ids": []},
+        user_id="participant", author_display_name="Participant", allow_participants=allow_participants,
+    )
+    assert not created
+    assert claimed == owner
+    assert await chats.get(owner.id) == owner
+    bound = await chats.binding(token)
+    assert bound.state == {**state, "comment_id": 2 if allow_participants else 1}
+
+
+@pytest.mark.parametrize("user_id", [None, "participant"])
+async def test_shared_claim_cannot_take_over_unowned_legacy_chat(user_id):
+    token = "slack:T1:C1:100.1"
+    state = {"team_id": "T1", "user_id": "U1"}
+    legacy, _ = await chats.claim(token, "slack", None, "legacy", state)
+    rejected, created = await chats.claim(
+        token, "slack", None, "participant", {"team_id": "T1", "user_id": "U2"},
+        user_id=user_id, allow_participants=True,
+    )
+    assert not created and rejected == legacy
+    assert rejected.user_id is None
+    assert (await chats.binding(token)).state == state
+
+
+async def test_shared_github_participant_updates_comment_not_owner_or_routing():
+    owner = await chats.create(None, "shared", user_id="owner")
+    token = "github:repo:1:issue:7"
+    state = {"owner": "acme", "repo": "hatchery", "repository_id": 1, "kind": "issue",
+             "number": 7, "comment_id": 1, "sender_id": "42", "sharing_id": "share1",
+             "excluded_message_ids": ["private"], "start_message_id": "1"}
+    await chats.bind(token, owner.id, "github", state)
+    claimed, created = await chats.claim(
+        token, "github", None, "participant", {**state, "comment_id": 2, "sender_id": "43", "number": 8,
+                                               "start_message_id": "2"},
+        user_id="participant", allow_participants=True,
+    )
+    assert not created and claimed == owner
+    assert (await chats.binding(token)).state == {**state, "comment_id": 2, "sender_id": "43"}

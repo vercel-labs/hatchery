@@ -29,6 +29,12 @@ class FakeBus:
     def __init__(self) -> None:
         self.dispatched: list[channels.Inbound] = []
         self.seen: set[str] = set()
+        self.bindings: dict[str, dict] = {}
+        self.lookups: list[str] = []
+
+    async def binding(self, token: str) -> dict | None:
+        self.lookups.append(token)
+        return self.bindings.get(token)
 
     async def dispatch(self, inbound: channels.Inbound) -> None:
         self.dispatched.append(inbound)
@@ -91,6 +97,59 @@ async def test_issue_comment_mention_dispatches():
     assert inbound.state["kind"] == "issue"
     assert inbound.state["number"] == 5
     assert inbound.state["sender_id"] == "7"
+    assert inbound.state["message_id"] == 900
+    assert inbound.state["display_text"] == "please port this"
+    assert inbound.state["author"] == "andrey"
+    assert inbound.persist and inbound.invoke
+
+
+@pytest.mark.parametrize("pull", [False, True])
+async def test_bound_unmentioned_comment_persists_without_invoking(pull):
+    bus = FakeBus()
+    token = f"repo:42:{'pull' if pull else 'issue'}:5"
+    bus.bindings[token] = {}
+    _, bus = await handled(forwarded(issue_comment(body="  progress update  ", pull=pull), "issue_comment"), bus)
+    [inbound] = bus.dispatched
+    assert bus.lookups == [token]
+    assert inbound.token == token
+    assert inbound.persist is True
+    assert inbound.invoke is False
+    assert inbound.state["message_id"] == 900
+    assert inbound.state["display_text"] == "progress update"
+    assert inbound.state["author"] == "andrey"
+
+
+async def test_unbound_unmentioned_comment_is_ignored():
+    ack, bus = await handled(forwarded(issue_comment(body="progress update"), "issue_comment"))
+    assert ack.work is None
+    assert bus.lookups == ["repo:42:issue:5"]
+    assert bus.dispatched == []
+
+
+async def test_bound_unmentioned_review_reply_keeps_root():
+    payload = issue_comment()
+    payload["comment"] = {"id": 901, "in_reply_to_id": 800, "body": "updated"}
+    payload["pull_request"] = {"number": 9}
+    bus = FakeBus()
+    bus.bindings["repo:42:pull:9:review-comment:800"] = {}
+    _, bus = await handled(forwarded(payload, "pull_request_review_comment"), bus)
+    [inbound] = bus.dispatched
+    assert inbound.token == "repo:42:pull:9:review-comment:800"
+    assert inbound.state["root_comment_id"] == 800
+    assert inbound.state["message_id"] == 901
+    assert inbound.persist and not inbound.invoke
+
+
+async def test_bound_thread_still_rejects_bots_and_mirror_marker():
+    for payload in (
+        issue_comment(body="automated", sender={"login": "robot[bot]", "type": "Bot"}),
+        issue_comment(body=f"mirrored\n\n{github.MARKER}"),
+        issue_comment(comment={"id": 900, "body": "automated", "user": {"login": "robot[bot]", "type": "Bot"}}),
+    ):
+        bus = FakeBus()
+        bus.bindings["repo:42:issue:5"] = {}
+        await handled(forwarded(payload, "issue_comment"), bus)
+        assert bus.dispatched == []
 
 
 async def test_pr_comment_gets_pull_token():
@@ -128,12 +187,13 @@ async def test_ignores_no_mention_bots_own_marker_and_other_events():
         assert bus.dispatched == []
 
 
-async def test_dedupes_delivery_id():
+async def test_retries_retain_source_id_for_server_dedupe():
     bus = FakeBus()
     await handled(forwarded(issue_comment(), "issue_comment", delivery="d1"), bus)
     await handled(forwarded(issue_comment(), "issue_comment", delivery="d1"), bus)
     await handled(forwarded(issue_comment(), "issue_comment", delivery="d2"), bus)
-    assert len(bus.dispatched) == 2
+    assert [inbound.state["message_id"] for inbound in bus.dispatched] == [900] * 3
+    assert bus.seen == set()
 
 
 def api_channel(calls: list) -> github.GitHubChannel:
@@ -169,6 +229,55 @@ async def test_reply_posts_issue_comment_with_marker():
     [request] = calls
     assert request.url.path == "/repos/vercel/repo/issues/5/comments"
     assert json.loads(request.read())["body"] == f"ported!\n\n{github.MARKER}"
+
+
+@pytest.mark.parametrize("origin,source", [("ui", "Hatchery UI"), ("slack", "Slack"), ("github", "GitHub")])
+@pytest.mark.parametrize("kind", ["issue", "pull", "review_thread"])
+async def test_human_message_mirrors_event_author_with_marker(origin, source, kind):
+    calls: list[httpx.Request] = []
+    response = await api_channel(calls).on_event(
+        channels.event(channels.protocol.MESSAGE_RECEIVED, message="hello", author="Andrey", origin=origin),
+        {**state(kind), "author": "Wrong Name", "sender_id": "someone-else"},
+    )
+    [request] = calls
+    assert response == {"id": 1}
+    assert json.loads(request.read())["body"] == f"Andrey · via {source}\n\nhello\n\n{github.MARKER}"
+    expected_path = "/repos/vercel/repo/pulls/5/comments/800/replies" if kind == "review_thread" else "/repos/vercel/repo/issues/5/comments"
+    assert request.url.path == expected_path
+
+
+async def test_nonfinal_assistant_text_is_ignored_but_each_final_is_delivered():
+    calls: list[httpx.Request] = []
+    channel = api_channel(calls)
+    result = await channel.on_event(
+        channels.event(channels.protocol.MESSAGE_COMPLETED, message="working", final=False), state(),
+    )
+    assert result is None
+    assert calls == []
+    for text in ("first visible reply", "second visible reply"):
+        assert await channel.on_event(
+            channels.event(channels.protocol.MESSAGE_COMPLETED, message=text, final=True), state(),
+        ) == {"id": 1}
+    assert [json.loads(call.read())["body"] for call in calls] == [
+        f"first visible reply\n\n{github.MARKER}", f"second visible reply\n\n{github.MARKER}",
+    ]
+
+
+async def test_failed_persistence_does_not_burn_retry():
+    class FailingBus(FakeBus):
+        async def dispatch(self, inbound):
+            if not self.dispatched:
+                self.dispatched.append(inbound)
+                raise RuntimeError("store unavailable")
+            await super().dispatch(inbound)
+
+    bus = FailingBus()
+    webhook = forwarded(issue_comment(), "issue_comment")
+    with pytest.raises(RuntimeError, match="store unavailable"):
+        await handled(webhook, bus)
+    await handled(webhook, bus)
+    assert [inbound.state["message_id"] for inbound in bus.dispatched] == [900, 900]
+    assert not bus.seen
 
 
 async def test_reply_to_review_thread_uses_replies_endpoint():

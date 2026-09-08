@@ -25,9 +25,14 @@ class TurnInput(pydantic.BaseModel):
     task_id: str | None = None
 
 
+class Reply(pydantic.BaseModel):
+    id: str
+    text: str
+
+
 class PreparedTurn(pydantic.BaseModel):
     history: list[ai.messages.Message]
-    cached_reply: str | None = None
+    cached_reply: Reply | None = None
 
 
 @workflow.step
@@ -35,28 +40,50 @@ async def prepare_turn(turn: TurnInput) -> PreparedTurn:
     """Load canonical history and recover a committed worker reply if present."""
     from app import server
     from agent import dispatcher
+    from store import events, turns
     import worker
 
-    stored = await server._transcript(turn.chat_id)
+    async with turns.run(turn.chat_id):
+        await server._flush_pending_messages(turn.chat_id)
+        stored = await server._transcript(turn.chat_id)
+        records = await events.read(turn.chat_id, "turns")
+        if not any(
+            data.get("type") == "turn.prepared" and data.get("turn_id") == turn.turn_id
+            for _, data in records
+        ):
+            visible_ids = {message.id for message in stored}
+            inbox = await events.read(turn.chat_id, "inbox")
+            await events.append(turn.chat_id, "turns", {
+                "type": "turn.prepared", "turn_id": turn.turn_id,
+                "message_ids": list(dict.fromkeys(
+                    data["message_id"] for _, data in inbox
+                    if data.get("message_id") in visible_ids
+                )),
+            })
     cached_reply = None
     if turn.task_id is not None:
         task = await worker.get_task(turn.chat_id, turn.task_id)
         if task is None:
             raise ValueError("unknown subagent completion")
-        cached_reply = task.completion_message
-        if not cached_reply and task.completion_sequence is not None:
-            marker = f"subagent_result_{task.id}_{task.completion_sequence}"
-            result_index = next(
-                (index for index, message in enumerate(stored) if message.id == marker),
-                -1,
-            )
-            cached_reply = next(
-                (
-                    message.text
-                    for message in reversed(stored[result_index + 1 :])
-                    if message.role == "assistant" and message.text
-                ),
-                None,
+        marker = f"subagent_result_{task.id}_{task.completion_sequence}"
+        result_index = next(
+            (index for index, message in enumerate(stored) if message.id == marker),
+            -1,
+        )
+        reply = next(
+            (
+                message for message in reversed(stored[result_index + 1 :])
+                if message.role == "assistant" and message.text and not message.tool_calls
+                and (not task.completion_message or message.text == task.completion_message)
+            ),
+            None,
+        ) if result_index >= 0 else None
+        if reply is not None:
+            cached_reply = Reply(id=reply.id, text=reply.text)
+        elif task.completion_message and task.completion_message != "subagent completion recorded":
+            cached_reply = Reply(
+                id=f"subagent_reply_{task.id}_{task.completion_sequence}",
+                text=task.completion_message,
             )
     space = await server._space_for_chat(turn.chat_id)
     return PreparedTurn(
@@ -218,8 +245,35 @@ async def send_message_step(
         return error.result
 
 
+@workflow.step(max_retries=0)
+async def start_shared_thread_step(
+    chat_id: str, provider: typing.Literal["slack", "github"], destination: str,
+    text: str, people: list[str] | None, *, delivery_key: str,
+    tool_call_id: str, excluded_message_ids: list[str],
+) -> dict:
+    from channels import destinations
+
+    try:
+        return await destinations.start_shared_thread(
+            chat_id, provider, destination, text, people, delivery_key=delivery_key,
+            tool_call_id=tool_call_id, excluded_message_ids=excluded_message_ids,
+        )
+    except destinations.SlackScopeRequired as error:
+        return error.result
+
+
+@workflow.step
+async def mirror_sharing(chat_id: str, sharing_id: str) -> None:
+    from app import server
+
+    await server._mirror_sharing(chat_id, sharing_id)
+
+
 current_agent: contextvars.ContextVar["DurableDispatcher"] = contextvars.ContextVar(
     "current_agent"
+)
+current_share_scope: contextvars.ContextVar[tuple[str, list[str]]] = contextvars.ContextVar(
+    "current_share_scope"
 )
 
 
@@ -311,7 +365,7 @@ async def find_channels(
 @ai.tool
 async def find_people(query: str) -> list[dict]:
     """Find linked people by Hatchery name or Slack/GitHub handle.
-    Returns Hatchery IDs to use in send_message's people argument.
+    Returns Hatchery IDs for the people argument of either sharing or one-off sends.
     """
     return await find_people_step(current_agent.get().chat_id, query)
 
@@ -333,6 +387,27 @@ async def send_message(
     return result
 
 
+@ai.tool
+async def start_shared_thread(
+    provider: typing.Literal["slack", "github"], destination: str, text: str,
+    people: list[str] | None = None,
+) -> dict:
+    """Share and continue this conversation at an exact find_channels destination,
+    with Hatchery people IDs from find_people. Only future replies are shared.
+    """
+    agent = current_agent.get()
+    tool_call_id, excluded_message_ids = current_share_scope.get()
+    result = await start_shared_thread_step(
+        agent.chat_id, provider, destination, text, people, delivery_key=agent.turn_id,
+        tool_call_id=tool_call_id, excluded_message_ids=excluded_message_ids,
+    )
+    if result.get("error") == "missing_scope":
+        raise RuntimeError(result["detail"])
+    if result.get("status") == "sent" and result.get("sharing"):
+        await mirror_sharing(agent.chat_id, result["sharing"]["id"])
+    return result
+
+
 TOOLS = [
     create_sandbox,
     list_sandboxes,
@@ -343,6 +418,7 @@ TOOLS = [
     find_channels,
     find_people,
     send_message,
+    start_shared_thread,
 ]
 
 
@@ -366,15 +442,29 @@ class DurableDispatcher(ai.Agent):
         while context.keep_running():
             assistant_message = await llm_step(context, self.writer)
             context.add(assistant_message)
+            await commit_messages(self.chat_id, [assistant_message])
             yield ai.events.StreamEnd(message=assistant_message)
 
             async with ai.ToolRunner() as runner:
                 for tool_call in context.resolve(assistant_message.tool_calls):
-                    runner.schedule(tool_call)
+                    async def execute(call=tool_call):
+                        token = current_share_scope.set((
+                            call.id, [message.id for message in context.messages],
+                        ))
+                        try:
+                            result = await call()
+                            return ai.tool_result(result, exception=result.exception)
+                        finally:
+                            current_share_scope.reset(token)
+
+                    runner.schedule(execute)
                 async for event in runner.events():
                     await write_stream_event(self.writer, event)
                     yield event
-                context.add(runner.get_tool_message())
+                tool_message = runner.get_tool_message()
+                context.add(tool_message)
+                if tool_message is not None:
+                    await commit_messages(self.chat_id, [tool_message])
 
 
 @workflow.step
@@ -478,6 +568,14 @@ async def close_stream(writer: vercel.workflow.WorkflowWritable) -> None:
     await writer.close()
 
 
+@workflow.step
+async def drain_inbound(chat_id: str) -> None:
+    """Start pending channel input only after the previous turn has closed."""
+    from app import server
+
+    await server._run_inbound_turn(chat_id)
+
+
 def lifecycle_event(
     event_type: str, turn: TurnInput, error: str | None = None
 ) -> dict[str, typing.Any]:
@@ -495,21 +593,22 @@ def lifecycle_event(
 @workflow.step
 async def commit_messages(
     chat_id: str, messages: list[ai.messages.Message]
-) -> list[str]:
-    """Idempotently append completed workflow messages to the canonical transcript."""
+) -> list[Reply]:
+    """Idempotently append messages, preserving reply IDs for channel filtering."""
     from app import server
-    from store import events
+    from store import events, turns
 
-    known = {message.id for message in await server._transcript(chat_id)}
-    for message in messages:
-        if message.id not in known:
-            await events.append(chat_id, "messages", message.model_dump(mode="json"))
-            known.add(message.id)
+    async with turns.run(chat_id):
+        known = {message.id for message in await server._transcript(chat_id)}
+        for message in messages:
+            if message.id not in known:
+                await events.append(chat_id, "messages", message.model_dump(mode="json"))
+                known.add(message.id)
     return [
-        message.text
+        Reply(id=message.id, text=message.text)
         for message in messages
         if message.role == "assistant" and message.text
-    ] or ["subagent completion recorded"]
+    ]
 
 
 @workflow.step
@@ -529,15 +628,15 @@ async def emit_turn_event(chat_id: str, event_type: str, error: str | None = Non
 
 
 @workflow.step(max_retries=0)
-async def deliver_replies(turn: TurnInput, replies: list[str]) -> None:
+async def deliver_replies(turn: TurnInput, replies: list[Reply]) -> None:
     """Mirror replies to bound channels and finish worker completion bookkeeping."""
     from app import server
     from store import chats, events
     import worker
 
-    for index, reply in enumerate(replies):
+    for reply in replies:
         failures = await server._deliver(
-            turn.chat_id, reply, final=index == len(replies) - 1
+            turn.chat_id, reply.text, final=True, message_id=reply.id,
         )
         if failures:
             raise RuntimeError("; ".join(failures))
@@ -547,7 +646,7 @@ async def deliver_replies(turn: TurnInput, replies: list[str]) -> None:
     task = await worker.get_task(turn.chat_id, turn.task_id)
     if task is None:
         return
-    task.completion_message = replies[-1]
+    task.completion_message = replies[-1].text if replies else None
     task.completion_delivered = True
     await worker.store.save_task(task)
     if task.status in ("complete", "errored"):
@@ -560,7 +659,7 @@ async def deliver_replies(turn: TurnInput, replies: list[str]) -> None:
             await chats.finish(
                 turn.chat_id,
                 "failed" if task.status == "errored" else "done",
-                replies[-1],
+                replies[-1].text if replies else "subagent completion recorded",
             )
     await events.append(turn.chat_id, "ui", {"type": "messages.changed"})
     await events.append(turn.chat_id, "ui", {"type": "chat.changed"})
@@ -616,6 +715,7 @@ async def run_turn(turn: TurnInput) -> None:
         raise
     finally:
         await close_stream(writer)
+        await drain_inbound(turn.chat_id)
 
 
 async def active_turn(chat_id: str) -> "turns.ActiveTurn | None":

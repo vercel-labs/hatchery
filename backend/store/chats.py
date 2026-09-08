@@ -1,7 +1,7 @@
 """Chats and the channel bindings that feed them.
 
 A chat is one conversation in a space, visible in the UI. A binding maps a
-channel-scoped token ("slack:C1:1712.001", "github:owner/repo:issue:7") to
+channel-scoped token ("slack:T1:C1:1712.001", "github:repo:123:issue:7") to
 its chat, so the same conversation is reachable from slack, github, and the
 UI at once. Single-owner: one chat per token, enforced by an atomic claim
 (postgres: INSERT .. ON CONFLICT DO NOTHING; local: one lock). dedupe gives
@@ -270,6 +270,66 @@ async def finish(chat_id: str, status: str, artifact: str | None = None) -> mode
         return chat
 
 
+async def binding(token: str) -> Binding | None:
+    """Look up exactly one channel token, without legacy fallback."""
+    if store.use_postgres():
+        from store import db
+
+        row = await (await db.pool()).fetchrow(
+            "SELECT * FROM hatchery_bindings WHERE token = $1", token
+        )
+        if row is None:
+            return None
+        return Binding(
+            token=token, chat_id=row["chat_id"], channel=row["channel"],
+            state=json.loads(row["state"]) if isinstance(row["state"], str) else row["state"],
+        )
+    with _lock:
+        data = _read_bindings().get(token)
+        return Binding(token=token, **data) if data is not None else None
+
+
+async def bind(token: str, chat_id: str, channel: str, state: dict) -> Binding:
+    """Attach an existing chat atomically; never transfer an external thread.
+
+    Replays fill missing state only, preserving original identity and newer
+    inbound state. Authorization belongs to the caller.
+    """
+    if store.use_postgres():
+        from store import db
+
+        async with (await db.pool()).acquire() as conn, conn.transaction():
+            if not await conn.fetchval("SELECT id FROM hatchery_chats WHERE id = $1", chat_id):
+                raise ValueError("chat does not exist")
+            row = await conn.fetchrow(
+                "INSERT INTO hatchery_bindings (token, chat_id, channel, state) "
+                "VALUES ($1, $2, $3, $4::jsonb) ON CONFLICT (token) DO UPDATE "
+                "SET state = EXCLUDED.state || hatchery_bindings.state "
+                "WHERE hatchery_bindings.chat_id = EXCLUDED.chat_id "
+                "AND hatchery_bindings.channel = EXCLUDED.channel RETURNING *",
+                token, chat_id, channel, json.dumps(state),
+            )
+            if row is None:
+                raise ValueError("destination is already bound to another chat or channel")
+            return Binding(
+                token=token, chat_id=chat_id, channel=channel,
+                state=json.loads(row["state"]) if isinstance(row["state"], str) else row["state"],
+            )
+    with _lock:
+        if _read_chat(chat_id) is None:
+            raise ValueError("chat does not exist")
+        bindings_ = _read_bindings()
+        existing = bindings_.get(token)
+        if existing is not None:
+            if existing["chat_id"] != chat_id or existing["channel"] != channel:
+                raise ValueError("destination is already bound to another chat or channel")
+            state = {**state, **existing.get("state", {})}
+        result = Binding(token=token, chat_id=chat_id, channel=channel, state=state)
+        bindings_[token] = result.model_dump(exclude={"token"})
+        _write_bindings(bindings_)
+        return result
+
+
 async def claim(
     token: str,
     channel: str,
@@ -279,13 +339,17 @@ async def claim(
     user_id: str | None = None,
     author_display_name: str | None = None,
     legacy_token: str | None = None,
+    *,
+    allow_participants: bool = False,
 ) -> tuple[models.Chat, bool]:
     """Atomically map a channel token to its owning chat.
 
     Creates the chat (and binding) if the token is unowned, otherwise returns
     the existing owner with the binding state merged in. This is what stops
     two concurrent webhooks from both creating a chat for the same
-    conversation. Returns (chat, created).
+    conversation. Returns (chat, created). allow_participants admits linked,
+    allowed users validated by the server, but never changes an existing owner.
+    Unowned legacy chats still require the original provider identity.
     """
     candidate = models.Chat(
         id=f"chat_{uuid.uuid4().hex[:12]}",
@@ -335,11 +399,12 @@ async def claim(
                         author_display_name,
                     )
                     chat = _chat(claimed["data"])
-                if user_id is None or chat.user_id == user_id:
+                merged = _inbound_state(chat, saved_state, state, user_id, allow_participants)
+                if merged is not None:
                     await conn.execute(
-                        "UPDATE hatchery_bindings SET state = state || $2::jsonb WHERE token = $1",
+                        "UPDATE hatchery_bindings SET state = $2::jsonb WHERE token = $1",
                         binding_token,
-                        json.dumps(state),
+                        json.dumps(merged),
                     )
                     if binding_token != token:
                         await conn.execute(
@@ -370,11 +435,21 @@ async def claim(
                 token,
             )
             chat = _chat(owner["data"])
-            if user_id is None or chat.user_id == user_id:
+            saved_state = json.loads(owner["state"]) if isinstance(owner["state"], str) else dict(owner["state"])
+            if user_id is not None and chat.user_id is None and _binding_identity_matches(saved_state, state):
+                claimed = await conn.fetchrow(
+                    "UPDATE hatchery_chats SET data = data || "
+                    "jsonb_build_object('user_id', $2::text, 'author_display_name', $3::text) "
+                    "WHERE id = $1 RETURNING data",
+                    chat.id, user_id, author_display_name,
+                )
+                chat = _chat(claimed["data"])
+            merged = _inbound_state(chat, saved_state, state, user_id, allow_participants)
+            if merged is not None:
                 await conn.execute(
-                    "UPDATE hatchery_bindings SET state = state || $2::jsonb WHERE token = $1",
+                    "UPDATE hatchery_bindings SET state = $2::jsonb WHERE token = $1",
                     token,
-                    json.dumps(state),
+                    json.dumps(merged),
                 )
             return chat, False
 
@@ -399,17 +474,36 @@ async def claim(
                     owner.user_id = user_id
                     owner.author_display_name = author_display_name
                     _write_chat(owner)
-                if user_id is None or owner.user_id == user_id:
-                    existing["state"] = {**existing.get("state", {}), **state}
+                merged = _inbound_state(owner, existing.get("state", {}), state, user_id, allow_participants)
+                if merged is not None:
+                    existing["state"] = merged
                     if binding_token != token:
                         bindings_.pop(binding_token)
                         bindings_[token] = existing
                     _write_bindings(bindings_)
                 return owner, False
+            raise ValueError("binding refers to a missing chat")
         bindings_[token] = {"chat_id": candidate.id, "channel": channel, "state": dict(state)}
         _write_bindings(bindings_)
         _write_chat(candidate)
         return candidate, True
+
+
+def _inbound_state(
+    chat: models.Chat, saved: dict, inbound: dict, user_id: str | None, allow_participants: bool,
+) -> dict | None:
+    if chat.user_id is None:
+        if not _binding_identity_matches(saved, inbound) and (user_id is not None or saved.get("user_id")):
+            return None
+    elif user_id is not None and chat.user_id != user_id and not allow_participants:
+        return None
+    # Routing and sharing metadata are not supplied by participants. In particular,
+    # Slack's user_id remains the original binding identity, not the latest author.
+    immutable = {
+        "user_id", "team_id", "channel_id", "thread_ts", "repository_id", "kind",
+        "number", "root_comment_id", "sharing_id", "excluded_message_ids", "start_message_id",
+    }
+    return {**saved, **{key: value for key, value in inbound.items() if key not in immutable or key not in saved}}
 
 
 def _binding_identity_matches(saved: dict, inbound: dict) -> bool:

@@ -1,4 +1,5 @@
 import ast
+import contextlib
 import inspect
 import json
 import textwrap
@@ -42,6 +43,8 @@ async def test_durable_tools_keep_effects_non_retriable():
     assert durable.find_channels_step.max_retries > 0
     assert durable.find_people_step.max_retries > 0
     assert durable.send_message_step.max_retries == 0
+    assert durable.start_shared_thread_step.max_retries == 0
+    assert durable.mirror_sharing.max_retries > 0
 
 
 async def test_custom_loop_uses_context_and_workflow_stream(monkeypatch):
@@ -56,6 +59,7 @@ async def test_custom_loop_uses_context_and_workflow_stream(monkeypatch):
             pass
 
     monkeypatch.setattr(durable, "llm_step", model_step)
+    monkeypatch.setattr(durable, "commit_messages", durable.commit_messages.func)
     writer = Writer()
     agent = durable.DurableDispatcher("chat_1", writer)
     history = [ai.user_message("help")]
@@ -149,6 +153,7 @@ async def test_destination_tools_forward_trusted_scope_through_steps(monkeypatch
         ("find_channels", {"provider", "query"}),
         ("find_people", {"query"}),
         ("send_message", {"provider", "destination", "text", "people"}),
+        ("start_shared_thread", {"provider", "destination", "text", "people"}),
     ):
         properties = tools[name].tool.spec.params["properties"]
         assert set(properties) == fields
@@ -201,6 +206,8 @@ async def test_scope_failure_returns_from_step_but_raises_from_tool(monkeypatch,
     ("find_channels", False),
     ("send_message", False),
     ("send_message", True),
+    ("start_shared_thread", False),
+    ("start_shared_thread", True),
 ])
 async def test_scope_failure_reaches_model_once_and_agent_continues(monkeypatch, tool_name, returned):
     from channels import destinations
@@ -235,7 +242,7 @@ async def test_scope_failure_reaches_model_once_and_agent_continues(monkeypatch,
 
     monkeypatch.setattr(destinations, tool_name, service)
     monkeypatch.setattr(durable, "llm_step", model_step)
-    for name in (f"{tool_name}_step", "write_stream_event"):
+    for name in (f"{tool_name}_step", "write_stream_event", "commit_messages"):
         monkeypatch.setattr(durable, name, getattr(durable, name).func)
     agent = durable.DurableDispatcher("chat_1", Writer(), turn_id="turn_1")
     token = durable.current_agent.set(agent)
@@ -325,8 +332,9 @@ async def test_create_sandbox_tool_forwards_size(monkeypatch):
 async def test_commit_messages_is_idempotent():
     message = ai.assistant_message("done")
 
-    assert await durable.commit_messages.func("chat_1", [message]) == ["done"]
-    assert await durable.commit_messages.func("chat_1", [message]) == ["done"]
+    expected = [durable.Reply(id=message.id, text="done")]
+    assert await durable.commit_messages.func("chat_1", [message]) == expected
+    assert await durable.commit_messages.func("chat_1", [message]) == expected
 
     stored = await events.read("chat_1", "messages")
     assert len(stored) == 1
@@ -351,19 +359,22 @@ async def test_deliver_replies_finishes_worker_completion(monkeypatch):
     await worker.store.save_task(task)
     delivered = []
 
-    async def deliver(chat_id, message, *, final=True):
-        delivered.append((chat_id, message, final))
+    async def deliver(chat_id, message, *, final=True, message_id):
+        delivered.append((chat_id, message, final, message_id))
         return []
 
     from app import server
 
     monkeypatch.setattr(server, "_deliver", deliver)
     turn = durable.TurnInput(chat_id=chat.id, origin="worker", task_id=task.id)
-    await durable.deliver_replies.func(turn, ["working", "done"])
+    await durable.deliver_replies.func(turn, [
+        durable.Reply(id="reply_1", text="working"),
+        durable.Reply(id="reply_2", text="done"),
+    ])
 
     assert delivered == [
-        (chat.id, "working", False),
-        (chat.id, "done", True),
+        (chat.id, "working", True, "reply_1"),
+        (chat.id, "done", True, "reply_2"),
     ]
     current = await worker.get_task(chat.id, task.id)
     assert current.completion_message == "done"
@@ -408,6 +419,15 @@ async def test_run_turn_ships_real_failed_spans_and_preserves_error(monkeypatch,
     async def emit(*args):
         channel_events.append(args)
 
+    async def drain(chat_id):
+        from store import turns
+
+        assert chat_id == "chat_1"
+        assert await turns.active(chat_id) is None
+        assert writer.closed
+        assert writer.events[-1]["type"] == "turn.failed"
+        channel_events.append((chat_id, "drained"))
+
     writer = Writer()
     agent = FailingAgent()
     monkeypatch.setattr(durable, "DurableDispatcher", lambda *args: agent)
@@ -416,6 +436,7 @@ async def test_run_turn_ships_real_failed_spans_and_preserves_error(monkeypatch,
     monkeypatch.setattr(durable, "prepare_turn", prepare)
     monkeypatch.setattr(durable, "ship_spans", ship)
     monkeypatch.setattr(durable, "emit_turn_event", emit)
+    monkeypatch.setattr(durable, "drain_inbound", drain)
     for name in ("register_turn", "finish_turn", "write_lifecycle_event", "close_stream"):
         monkeypatch.setattr(durable, name, getattr(durable, name).func)
     turn = durable.TurnInput(chat_id="chat_1", turn_id="turn_1", origin="ui")
@@ -445,7 +466,9 @@ async def test_run_turn_ships_real_failed_spans_and_preserves_error(monkeypatch,
     }
     assert writer.events[-1]["type"] == "turn.failed"
     assert writer.events[-1]["error"] == str(caught.value)
-    assert channel_events[-1] == ("chat_1", "turn.failed", str(caught.value))
+    assert channel_events[-2:] == [
+        ("chat_1", "turn.failed", str(caught.value)), ("chat_1", "drained"),
+    ]
     assert writer.closed is True
 
 
@@ -538,3 +561,253 @@ async def test_start_turn_registers_before_announcing(monkeypatch):
         "run_id": "run_1",
         "generation": 0,
     }
+
+
+async def test_prepare_turn_records_consumed_inbox_once():
+    from store import spaces
+
+    space = await spaces.create("work")
+    chat = await chats.create(space.id, "work")
+    first = ai.user_message("first inbound")
+    await events.append(chat.id, "messages", first.model_dump(mode="json"))
+    await events.append(chat.id, "inbox", {"message_id": first.id})
+    turn = durable.TurnInput(chat_id=chat.id, turn_id="turn_1", origin="channel")
+    prepared = await durable.prepare_turn.func(turn)
+    assert prepared.history[-1] == first
+
+    second = ai.user_message("arrived while running")
+    await events.append(chat.id, "messages", second.model_dump(mode="json"))
+    await events.append(chat.id, "inbox", {"message_id": second.id})
+    await durable.prepare_turn.func(turn)
+    assert await events.read(chat.id, "turns") == [(0, {
+        "type": "turn.prepared", "turn_id": "turn_1", "message_ids": [first.id],
+    })]
+    next_turn = turn.model_copy(update={"turn_id": "turn_2"})
+    prepared = await durable.prepare_turn.func(next_turn)
+    assert prepared.history[-1] == second
+    assert (await events.read(chat.id, "turns"))[-1][1]["message_ids"] == [first.id, second.id]
+
+
+@pytest.mark.parametrize("stored_reply", [False, True])
+async def test_cached_worker_reply_keeps_stable_id(stored_reply):
+    from store import spaces
+
+    space = await spaces.create("work")
+    chat = await chats.create(space.id, "work")
+    task = worker.Task(
+        id="task_1", chat_id=chat.id, worker_id="wrk_1", title="fix", prompt="fix it",
+        model="openai/test", status="complete", event_sequence=2, completion_sequence=2,
+        completion_message="done", created_at="2026-09-03T00:00:00+00:00",
+        updated_at="2026-09-03T00:00:00+00:00",
+    )
+    await worker.store.save_task(task)
+    marker = ai.user_message("worker completed")
+    marker.id = "subagent_result_task_1_2"
+    reply = ai.assistant_message("done")
+    for message in [marker, *([reply] if stored_reply else [])]:
+        await events.append(chat.id, "messages", message.model_dump(mode="json"))
+    turn = durable.TurnInput(chat_id=chat.id, turn_id="turn_1", origin="worker", task_id=task.id)
+    expected = durable.Reply(id=reply.id if stored_reply else "subagent_reply_task_1_2", text="done")
+    for _ in range(2):
+        assert (await durable.prepare_turn.func(turn)).cached_reply == expected
+
+
+async def test_no_assistant_text_produces_no_external_placeholder(monkeypatch):
+    from app import server
+
+    async def deliver(*args, **kwargs):
+        pytest.fail("internal placeholder must not be delivered")
+
+    monkeypatch.setattr(server, "_deliver", deliver)
+    message = ai.tool_message(tool_call_id="call_1", result="done", tool_name="work")
+    replies = await durable.commit_messages.func("chat_1", [message])
+    assert replies == []
+    await durable.deliver_replies.func(durable.TurnInput(chat_id="chat_1", origin="ui"), replies)
+
+
+async def test_completed_turn_drains_after_finish_and_stream_close(monkeypatch):
+    from app import server
+    from store import turns
+
+    writer = types.SimpleNamespace(closed=False, events=[])
+    delivered = []
+    drained = []
+
+    async def write(value):
+        writer.events.append(value)
+
+    async def close():
+        writer.closed = True
+
+    async def prepare(turn):
+        return durable.PreparedTurn(history=[], cached_reply=durable.Reply(id="reply_1", text="done"))
+
+    async def deliver(chat_id, text, **kwargs):
+        delivered.append((chat_id, text, kwargs))
+        return []
+
+    async def drain(chat_id):
+        assert await turns.active(chat_id) is None
+        assert writer.closed
+        assert writer.events[-1]["type"] == "turn.completed"
+        drained.append(chat_id)
+
+    async def emit(*args):
+        pass
+
+    writer.write = write
+    writer.close = close
+    monkeypatch.setattr(durable.vercel.workflow, "get_writable", lambda: writer)
+    monkeypatch.setattr(durable.vercel.workflow, "get_workflow_metadata", lambda: types.SimpleNamespace(run_id="run_1"))
+    monkeypatch.setattr(durable, "prepare_turn", prepare)
+    monkeypatch.setattr(durable, "emit_turn_event", emit)
+    monkeypatch.setattr(server, "_deliver", deliver)
+    monkeypatch.setattr(server, "_run_inbound_turn", drain)
+    for name in ("register_turn", "deliver_replies", "finish_turn", "write_lifecycle_event", "close_stream", "drain_inbound"):
+        monkeypatch.setattr(durable, name, getattr(durable, name).func)
+    await inspect.unwrap(durable.run_turn.func)(
+        durable.TurnInput(chat_id="chat_1", turn_id="turn_1", origin="channel"),
+    )
+    assert delivered == [("chat_1", "done", {"final": True, "message_id": "reply_1"})]
+    assert drained == ["chat_1"]
+
+
+@pytest.mark.parametrize("later_failure", [False, True])
+async def test_shared_thread_receipts_keep_live_scope_on_replay(monkeypatch, later_failure):
+    from app import server
+    from channels import destinations
+    from store import spaces
+
+    space = await spaces.create("work")
+    space.repos = ["acme/work"]
+    await spaces.save(space)
+    chat = await chats.create(space.id, "share", user_id="user_test")
+    history = [ai.user_message("private request"), ai.assistant_message("private history"),
+               ai.user_message("share the summary and continue")]
+    before = ai.assistant_message("private planning", ai.messages.ToolCallPart(
+        tool_call_id="actual_share_call", tool_name="start_shared_thread",
+        tool_args=json.dumps({"provider": "github", "destination": "acme/work#7", "text": "Shared summary"}),
+    ))
+    after = ai.assistant_message("future public reply")
+    for message in history:
+        await events.append(chat.id, "messages", message.model_dump(mode="json"))
+    requests = []
+    mirrors = []
+
+    async def get_user(user_id):
+        return {"id": "user_test", "email": "test@vercel.com", "github": {"id": "42", "login": "owner"}}
+
+    def respond(request):
+        requests.append((request.method, request.url.path))
+        responses = {
+            "/repos/acme/work/issues/7": {"number": 7},
+            "/repos/acme/work": {"id": 123, "full_name": "acme/work"},
+            "/repos/acme/work/issues/7/comments": {"id": 99, "html_url": "https://github.com/acme/work/issues/7#issuecomment-99"},
+        }
+        return httpx.Response(200, json=responses[request.url.path])
+
+    @contextlib.asynccontextmanager
+    async def client(provider):
+        async with httpx.AsyncClient(base_url="https://api.github.com/", transport=httpx.MockTransport(respond)) as http:
+            yield http
+
+    async def mirror(chat_id, sharing_id):
+        record = next(data for _, data in await events.read(chat_id, "sharing") if data["id"] == sharing_id)
+        stored = await server._transcript(chat_id)
+        assert any(message.id == before.id for message in stored)
+        mirrors.append(record)
+
+    class Writer:
+        async def write(self, value):
+            pass
+
+    monkeypatch.setattr(destinations.auth_store, "get_user", get_user)
+    monkeypatch.setattr(destinations, "_client", client)
+    monkeypatch.setattr(server, "_mirror_sharing", mirror, raising=False)
+    async def model_step(context, writer):
+        if len(context.messages) == len(history):
+            return before
+        if later_failure:
+            raise RuntimeError("later model step failed")
+        return after
+
+    monkeypatch.setattr(durable, "llm_step", model_step)
+    commit = durable.commit_messages.func
+    share_step = durable.start_shared_thread_step.func
+    for name in ("commit_messages", "write_stream_event", "start_shared_thread_step", "mirror_sharing"):
+        monkeypatch.setattr(durable, name, getattr(durable, name).func)
+
+    # Replay the same completed model messages. The service's durable receipt
+    # prevents another provider post even if a workflow step ran before crashing.
+    for _ in range(2):
+        agent = durable.DurableDispatcher(chat.id, Writer(), "turn_stable")
+        model = ai.get_model("openai/test")
+        token = durable.current_agent.set(agent)
+        try:
+            with pytest.raises(ExceptionGroup) if later_failure else contextlib.nullcontext():
+                async with agent.run(model, history) as run:
+                    async for _event in run:
+                        pass
+        finally:
+            durable.current_agent.reset(token)
+
+    assert requests.count(("POST", "/repos/acme/work/issues/7/comments")) == 1
+    assert len(mirrors) == 2
+    assert mirrors[0] == mirrors[1]
+    sharing = mirrors[0]
+    assert sharing["tool_call_id"] == "actual_share_call"
+    assert sharing["state"]["excluded_message_ids"] == [message.id for message in [*history, before]]
+    assert after.id not in sharing["state"]["excluded_message_ids"]
+    stored = await server._transcript(chat.id)
+    assert sum(message.id == before.id for message in stored) == 1
+    assert any(message.role == "tool" and message.tool_results[0].tool_call_id == "actual_share_call" for message in stored)
+    assert any(message.id == after.id for message in stored) is not later_failure
+
+    # A replayed workflow step may return its cached receipt without re-entering
+    # destinations. Mirroring must be a separate step after that cached result.
+    receipt = await share_step(
+        chat.id, "github", "acme/work#7", "Shared summary", None, delivery_key="turn_stable",
+        tool_call_id="actual_share_call", excluded_message_ids=[message.id for message in [*history, before]],
+    )
+
+    async def cached_step(*args, **kwargs):
+        return receipt
+
+    monkeypatch.setattr(durable, "start_shared_thread_step", cached_step)
+    later_failure = False
+    agent = durable.DurableDispatcher(chat.id, Writer(), "turn_stable")
+    token = durable.current_agent.set(agent)
+    try:
+        async with agent.run(ai.get_model("openai/test"), history) as run:
+            async for _event in run:
+                pass
+    finally:
+        durable.current_agent.reset(token)
+    assert len(mirrors) == 3
+    assert requests.count(("POST", "/repos/acme/work/issues/7/comments")) == 1
+    replies = await commit(chat.id, run.messages[len(history):])
+    assert replies == [durable.Reply(id=before.id, text=before.text), durable.Reply(id=after.id, text=after.text)]
+
+
+async def test_delivery_filters_old_text_and_delivers_every_new_reply_once(monkeypatch):
+    from app import server
+
+    chat = await chats.create(None, "share")
+    before = ai.assistant_message("private planning before sharing")
+    first = ai.assistant_message("first public reply")
+    second = ai.assistant_message("second public reply")
+    await chats.bind("github:repo:123:issue:7", chat.id, "github", {
+        "sharing_id": "sharing_1", "excluded_message_ids": [before.id],
+    })
+    delivered = []
+
+    class Channel:
+        async def on_event(self, event, state):
+            delivered.append(event.data["message"])
+
+    monkeypatch.setitem(server.bot.channels, "github", Channel())
+    replies = await durable.commit_messages.func(chat.id, [before, first, second])
+    turn = durable.TurnInput(chat_id=chat.id, turn_id="turn_1", origin="ui")
+    for _ in range(2):
+        await durable.deliver_replies.func(turn, replies)
+    assert delivered == ["first public reply", "second public reply"]

@@ -19,8 +19,9 @@ between several installations (multi-org) is not wired up yet.
 
 Behavior ported from eve's github channel defaults, trimmed:
 - handle issue_comment and pull_request_review_comment with action "created"
-- gate on an @bot_name token in the body (stripped before dispatch); drop
-  bot senders and our own comments (hidden marker), dedupe delivery ids
+- mentions invoke; unmentioned human replies persist only in bound threads
+- drop bot senders and our own comments (hidden marker); the hub dedupes
+  stable source message IDs when persisting
 - one session per conversation: "repo:<id>:issue:<n>", "repo:<id>:pull:<n>",
   or "repo:<id>:pull:<n>:review-comment:<root>" for review threads
 - eyes reaction on turn start, chunked comments (65536 limit) on replies
@@ -86,21 +87,23 @@ class GitHubChannel:
         inbound = self._gate(event_name, payload)
         if inbound is None:
             return channels.Ack(200, '{"ok": true, "ignored": true}')
-        delivery = webhook.headers.get("x-github-delivery", "")
-        if delivery and not await bus.dedupe(delivery):
-            return channels.Ack()
+        if not inbound.invoke and await bus.binding(inbound.token) is None:
+            return channels.Ack(200, '{"ok": true, "ignored": true}')
+        # Dispatch owns idempotent persistence; retries must not be burned here.
         return channels.Ack(work=bus.dispatch(inbound))
 
     def _gate(self, event_name: str, payload: dict) -> channels.Inbound | None:
         comment = payload.get("comment") or {}
-        sender = payload.get("sender") or {}
+        sender = comment.get("user") or payload.get("sender") or {}
         body = comment.get("body", "")
-        if not self._bot_name or sender.get("type") == "Bot" or MARKER in body:
+        if (
+            sender.get("type") == "Bot" or (payload.get("sender") or {}).get("type") == "Bot"
+            or MARKER in body or not sender.get("login") or not comment.get("id")
+        ):
             return None
-        mention = re.compile(rf"@{re.escape(self._bot_name)}(?=$|[^A-Za-z0-9_-])", re.IGNORECASE)
-        if not mention.search(body):
-            return None
-        message = mention.sub("", body).strip()
+        mention = re.compile(rf"@{re.escape(self._bot_name)}(?=$|[^A-Za-z0-9_-])", re.IGNORECASE) if self._bot_name else None
+        invoke = bool(mention and mention.search(body))
+        message = mention.sub("", body).strip() if mention else body.strip()
 
         repository = payload.get("repository") or {}
         repository_id = repository.get("id")
@@ -136,6 +139,9 @@ class GitHubChannel:
             "root_comment_id": root,
             "comment_id": comment.get("id"),
             "sender_id": str(sender.get("id", "")),
+            "message_id": comment["id"],
+            "display_text": message,
+            "author": sender["login"],
         }
         return channels.Inbound(
             token=token,
@@ -143,28 +149,39 @@ class GitHubChannel:
             state=state,
             title=f"{owner}/{repo}#{number}",
             repo=f"{owner}/{repo}",
+            invoke=invoke,
         )
 
-    async def on_event(self, event: channels.Event, state: dict) -> None:
+    async def on_event(self, event: channels.Event, state: dict) -> dict | None:
         if event.type == channels.protocol.TURN_STARTED:
-            await self._react(state)
+            return await self._react(state)
+        elif event.type == channels.protocol.MESSAGE_RECEIVED:
+            text = str(event.data.get("message", ""))
+            if not text:
+                return None
+            origin = str(event.data.get("origin", "ui"))
+            source = {"ui": "Hatchery UI", "slack": "Slack", "github": "GitHub"}.get(origin, origin)
+            author = event.data.get("author") or "User"
+            return await self._comment(state, f"{author} · via {source}\n\n{text}")
         elif event.type == channels.protocol.MESSAGE_COMPLETED:
-            await self._comment(state, str(event.data.get("message", "")))
+            if event.data.get("final", True):
+                return await self._comment(state, str(event.data.get("message", "")))
         elif event.type == channels.protocol.TURN_FAILED:
-            await self._comment(state, f"something went wrong: {event.data.get('error', 'unknown error')}")
+            return await self._comment(state, f"something went wrong: {event.data.get('error', 'unknown error')}")
+        return None
 
-    async def _react(self, state: dict) -> None:
+    async def _react(self, state: dict) -> dict | None:
         comment_id = state.get("comment_id")
         if not comment_id:
             return
         subject = "pulls" if state["kind"] == "review_thread" else "issues"
-        await self._api(
+        return await self._api(
             "POST",
             f"/repos/{state['owner']}/{state['repo']}/{subject}/comments/{comment_id}/reactions",
             {"content": "eyes"},
         )
 
-    async def _comment(self, state: dict, text: str) -> None:
+    async def _comment(self, state: dict, text: str) -> dict | None:
         if not text:
             return
         if state["kind"] == "review_thread":
@@ -175,8 +192,10 @@ class GitHubChannel:
         else:
             path = f"/repos/{state['owner']}/{state['repo']}/issues/{state['number']}/comments"
         size = COMMENT_LIMIT - len(MARKER) - 2
+        response = None
         for start in range(0, len(text), size):
-            await self._api("POST", path, {"body": f"{text[start : start + size]}\n\n{MARKER}"})
+            response = await self._api("POST", path, {"body": f"{text[start : start + size]}\n\n{MARKER}"})
+        return response  # for a chunked message, the last provider comment's receipt
 
     async def _api(self, method: str, path: str, body: dict) -> dict:
         token = await connect.get_token(self._connector, subject=connect.ConnectAppTokenSubject())

@@ -1,5 +1,8 @@
+import json
 import uuid
 
+import ai
+import ai.testing
 import httpx
 import pytest
 
@@ -46,6 +49,9 @@ def test_system_prompt_describes_notification_policy():
         "do not establish automatic two-way routing",
         "does not guarantee a notification",
         "If delivery is uncertain, do not retry",
+        "when asked to notify or share and continue the conversation, use start_shared_thread",
+        "If explicitly asked for a one-off, use send_message",
+        "not earlier conversation text",
     ):
         assert policy in " ".join(prompt.split())
 
@@ -98,6 +104,7 @@ async def test_destination_tools_are_chat_scoped(monkeypatch, provider, people):
         ("find_channels", {"provider", "query"}),
         ("find_people", {"query"}),
         ("send_message", {"provider", "destination", "text", "people"}),
+        ("start_shared_thread", {"provider", "destination", "text", "people"}),
     ):
         properties = tools[name].tool.spec.params["properties"]
         assert set(properties) == fields
@@ -151,7 +158,7 @@ async def test_worker_tools_are_chat_scoped(monkeypatch):
     assert set(tools) == {
         "create_sandbox", "list_sandboxes", "create_subagent",
         "message_subagent", "check_subagent", "require_attention",
-        "find_channels", "find_people", "send_message",
+        "find_channels", "find_people", "send_message", "start_shared_thread",
     }
     assert await tools["list_sandboxes"].fn() == []
     assert seen["chat_id"] == "chat_1"
@@ -211,3 +218,47 @@ async def test_require_attention_uses_scoped_chat_and_validates_reason():
 
     with pytest.raises(Exception):
         await tool.tool.spec.params_adapter.validate_python({"reason": "routine"})
+
+
+async def test_shared_thread_uses_live_context_and_persists_exact_anchor(monkeypatch):
+    from app import server
+    from channels import destinations
+
+    history = [ai.user_message("share this conversation"), ai.assistant_message("private history"),
+               ai.user_message("notify release and continue there")]
+    before = ai.assistant_message("private planning", ai.messages.ToolCallPart(
+        tool_call_id="actual_share_call", tool_name="start_shared_thread",
+        tool_args=json.dumps({"provider": "slack", "destination": "T1/C1", "text": "Shared summary"}),
+    ))
+    after = ai.assistant_message("future public reply")
+    model = ai.testing.FakeModel([*history, before, after])
+    scopes = []
+    mirrored = []
+
+    async def share(chat_id, provider, destination, text, people, **scope):
+        stored = await server._transcript(chat_id)
+        assert stored[-1].tool_calls[0].tool_call_id == "actual_share_call"
+        scopes.append(scope)
+        return {"status": "sent", "sharing": {"id": "sharing_1"}}
+
+    async def mirror(chat_id, sharing_id):
+        mirrored.append((chat_id, sharing_id))
+
+    monkeypatch.setattr(destinations, "start_shared_thread", share)
+    monkeypatch.setattr(server, "_mirror_sharing", mirror, raising=False)
+    agent = dispatcher.agent_for({"id": "chat_1"})
+    async with agent.run(model, history) as run:
+        emitted = [event async for event in run]
+
+    actual_before = run.messages[len(history)]
+    actual_after = run.messages[-1]
+    assert scopes[0]["tool_call_id"] == "actual_share_call"
+    assert scopes[0]["excluded_message_ids"] == [message.id for message in [*history, actual_before]]
+    assert actual_after.id not in scopes[0]["excluded_message_ids"]
+    assert mirrored == [("chat_1", "sharing_1")]
+    results = [event for event in emitted if isinstance(event, ai.events.ToolCallResult)]
+    assert len(results) == 1
+    assert results[0].message.tool_results[0].tool_call_id == "actual_share_call"
+    assert [message.id for message in await server._transcript("chat_1")] == [
+        message.id for message in run.messages[len(history):]
+    ]

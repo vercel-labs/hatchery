@@ -8,6 +8,12 @@ class FakeHub:
     def __init__(self) -> None:
         self.dispatched: list[tuple[str, channels.Inbound]] = []
         self.deduped: list[str] = []
+        self.bindings: dict[str, dict] = {}
+        self.lookups: list[tuple[str, str]] = []
+
+    async def binding(self, channel: str, token: str) -> dict | None:
+        self.lookups.append((channel, token))
+        return self.bindings.get(f"{channel}:{token}")
 
     async def dispatch(self, channel: str, inbound: channels.Inbound) -> None:
         self.dispatched.append((channel, inbound))
@@ -55,6 +61,18 @@ def test_dedupe_keys_are_channel_scoped():
     client, hub = make_client()
     client.post("/channels/v1/fake", content=b"x")
     assert hub.deduped == ["fake:d1"]
+
+
+async def test_binding_lookup_forwards_channel_and_exact_team_scoped_token():
+    hub = FakeHub()
+    hub.bindings["slack:T1:C1:100.1"] = {"channel_id": "C1", "thread_ts": "100.1"}
+    bus = channels._Bus(hub, "slack")
+    assert await bus.binding("T1:C1:100.1") == hub.bindings["slack:T1:C1:100.1"]
+    assert await bus.binding("T2:C1:100.1") is None
+    assert await channels._Bus(hub, "github").binding("T1:C1:100.1") is None
+    assert hub.lookups == [
+        ("slack", "T1:C1:100.1"), ("slack", "T2:C1:100.1"), ("github", "T1:C1:100.1"),
+    ]
 
 
 def test_unknown_channel_404s():

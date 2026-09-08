@@ -15,6 +15,7 @@ import asyncio
 import contextlib
 import datetime
 import hmac
+import hashlib
 import html
 import json
 import logging
@@ -40,7 +41,7 @@ import vercel.queue
 from agent import classifier, dispatcher, durable, sandbox, stream as agent_stream, telemetry, topic
 import worker
 from worker import protocol as worker_protocol
-from channels import github, slack
+from channels import destinations, github, slack
 from store import chats, events, jobs, spaces, turns
 
 log = logging.getLogger("app")
@@ -99,24 +100,28 @@ class _StoreHub:
             if channel == "slack":
                 token = f"slack:{inbound.state['team_id']}:{inbound.token}"
                 legacy_token = f"slack:{inbound.token}"
-            chat, created = await chats.claim(
-                token,
-                channel,
-                None,
-                title,
-                inbound.state,
-                user_id=user_id,
-                author_display_name=_user_display_name(user),
-                legacy_token=legacy_token,
+            # Slack's root ID is unknown until posting succeeds, so serialize by
+            # channel. GitHub issue IDs are known in advance. Both match sending.
+            lock_key = (
+                f"sharing:slack:{inbound.state['team_id']}:{inbound.token.split(':', 1)[0]}"
+                if channel == "slack" else f"sharing:{token}"
             )
-            if user_id is not None and chat.user_id != user_id:
-                span.set_attrs(ignored="owned_by_another_user", **{"chat.id": chat.id})
+            async with turns.run(lock_key):
+                await destinations.recover_shared_thread(token)
+                chat, created = await chats.claim(
+                    token, channel, None, title, inbound.state,
+                    user_id=user_id,
+                    author_display_name=_user_display_name(user),
+                    legacy_token=legacy_token,
+                    allow_participants=True,
+                )
+            if user_id is not None and chat.user_id is None:
+                span.set_attrs(ignored="unclaimed_legacy_chat", **{"chat.id": chat.id})
                 return
             async with turns.run(chat.id):
                 chat = await chats.get(chat.id) or chat
                 span.set_attrs(
-                    {"chat.id": chat.id, "space.id": chat.space_id or ""},
-                    created=created,
+                    {"chat.id": chat.id, "space.id": chat.space_id or ""}, created=created,
                 )
                 if chat.archived_at is not None:
                     span.set_attrs(ignored="archived")
@@ -125,50 +130,65 @@ class _StoreHub:
                         "This chat is archived. Unarchive it in Hatchery before posting.",
                     )
                     return
-                if created:
-                    if inbound.persist:
-                        await events.append(
-                            chat.id, "messages", ai.user_message(inbound.text).model_dump(mode="json")
-                        )
-                        await events.append(chat.id, "ui", {"type": "messages.changed"})
-                    await _classify_chat(
-                        chat.id,
-                        inbound.text,
-                        {
-                            "origin": channel,
-                            "author": _inbound_author(inbound),
-                            "repo": inbound.repo,
-                            "channel_state": inbound.state,
-                        },
-                        found,
-                    )
-                    chat = await chats.get(chat.id) or chat
-                    _spawn(_name_chat(chat.id, inbound.text))
-                elif chat.space_id is None:
-                    await _classify_chat(
-                        chat.id,
-                        inbound.text,
-                        {
-                            "origin": channel,
-                            "author": _inbound_author(inbound),
-                            "repo": inbound.repo,
-                            "channel_state": inbound.state,
-                        },
-                        found,
-                    )
-                    chat = await chats.get(chat.id) or chat
-                elif inbound.persist:
-                    await events.append(
-                        chat.id, "messages", ai.user_message(inbound.text).model_dump(mode="json")
-                    )
+                source_id = str(inbound.state.get("message_id", ""))
+                binding = await chats.binding(token)
+                start_id = (binding.state if binding else {}).get("start_message_id")
+                if channel == "github" and start_id and source_id and int(source_id) <= int(start_id):
+                    return  # delayed events from before this issue was shared
+                message = ai.user_message(inbound.text)
+                if source_id:
+                    message.id = "inbound_" + hashlib.sha256(f"{token}:{source_id}".encode()).hexdigest()
+                author = _user_display_name(user) or _inbound_author(inbound)
+                display_text = str(inbound.state.get("display_text", inbound.text))
+                message.provider_metadata = {"hatchery": {
+                    "origin": channel, "author": author, "display_text": display_text,
+                    "source_binding": token,
+                }}
+                stored = await _transcript(chat.id)
+                pending = await events.read(chat.id, "pending_messages")
+                known = any(item.id == message.id for item in stored) or any(
+                    data.get("id") == message.id for _, data in pending
+                )
+                if inbound.persist and not known:
+                    # Keep the active turn's assistant/tool messages adjacent.
+                    # These inputs stay visible in the UI, then join model history
+                    # after that turn's answer so the next turn actually runs.
+                    namespace = "pending_messages" if await durable.active_turn(chat.id) else "messages"
+                    await events.append(chat.id, namespace, message.model_dump(mode="json"))
                     await events.append(chat.id, "ui", {"type": "messages.changed"})
+                elif not inbound.persist and not known:
+                    return  # classifier wakeups never invoke an unstored message
+                if inbound.persist:
+                    # Stable message IDs repair a post-persistence crash without
+                    # duplicating the transcript or echoing back to its source.
+                    await _emit(chat.id, channels.event(
+                        channels.protocol.MESSAGE_RECEIVED, message=display_text,
+                        message_id=message.id, origin=channel, author=author,
+                        source_binding=token,
+                    ))
+                if chat.space_id is None:
+                    await _classify_chat(
+                        chat.id, inbound.text,
+                        {"origin": channel, "author": author, "repo": inbound.repo,
+                         "channel_state": inbound.state}, found,
+                    )
+                    chat = await chats.get(chat.id) or chat
+                if created:
+                    _spawn(_name_chat(chat.id, inbound.text))
                 span.set_attrs({"space.id": chat.space_id or ""}, invoke=inbound.invoke)
                 log.info("inbound %s -> %s chat %s", channel, "new" if created else "existing", chat.id)
                 if inbound.invoke:
+                    inbox = await events.read(chat.id, "inbox")
+                    if not any(data.get("message_id") == message.id for _, data in inbox):
+                        await events.append(chat.id, "inbox", {"message_id": message.id})
                     await _run_inbound_turn(chat.id)
 
     async def dedupe(self, key: str) -> bool:
         return await chats.dedupe(key)
+
+    async def binding(self, channel: str, token: str) -> dict | None:
+        binding = await destinations.recover_shared_thread(f"{channel}:{token}")
+        return binding.state if binding else None
 
 
 def _user_display_name(user: dict | None) -> str | None:
@@ -750,25 +770,48 @@ async def chat_events(
 @app.get("/api/chats/{chat_id}/messages")
 async def chat_messages(chat_id: str) -> list[ai.ui.ai_sdk.UIMessage]:
     """The stored transcript as UI messages, with internal messages hidden."""
+    transcript = await _transcript(chat_id)
+    known = {message.id for message in transcript}
+    transcript.extend(
+        ai.messages.Message.model_validate(data)
+        for _, data in await events.read(chat_id, "pending_messages") if data.get("id") not in known
+    )
     transcript = [
-        message
-        for message in await _transcript(chat_id)
-        if (message.provider_metadata or {}).get("hatchery", {}).get("kind")
-        != "subagent_result"
+        message for message in transcript
+        if (message.provider_metadata or {}).get("hatchery", {}).get("kind") != "subagent_result"
     ]
     messages = ai.ui.ai_sdk.to_ui_messages(transcript)
+    metadata = {message.id: (message.provider_metadata or {}).get("hatchery", {}) for message in transcript}
     for message in messages:
         if message.role != "user":
             continue
+        source = metadata.get(message.id, {})
+        if source.get("origin"):
+            message.metadata = {key: source[key] for key in ("origin", "author") if key in source}
         for part in message.parts:
             if getattr(part, "type", None) != "text":
                 continue
-            match = re.fullmatch(r'<slack_message\b[^>]*>\s*(.*?)\s*</slack_message>', part.text, re.DOTALL)
-            if match is None:
+            if "display_text" in source:
+                part.text = source["display_text"]
                 continue
-            part.text = html.unescape(match.group(1))
-            message.metadata = {**(message.metadata or {}), "origin": "slack"}
+            # Older transcripts carry attribution only in their model wrapper.
+            for tag, origin in (("slack_message", "slack"), ("github_context", "github")):
+                match = re.fullmatch(rf'<{tag}\b[^>]*>\s*(.*?)\s*</{tag}>', part.text, re.DOTALL)
+                if match:
+                    part.text = html.unescape(match.group(1)) if origin == "slack" else match.group(1)
+                    message.metadata = {**(message.metadata or {}), "origin": origin}
+                    break
     return messages
+
+
+@app.get("/api/chats/{chat_id}/sharing")
+async def chat_sharing(chat_id: str) -> list[dict]:
+    """Public display records, not routing state or pre-sharing message IDs."""
+    return [
+        {key: record.get(key) for key in
+         ("id", "provider", "label", "url", "text", "tool_call_id", "message_id")}
+        for _, record in await events.read(chat_id, "sharing")
+    ]
 
 
 class ChatRequest(pydantic.BaseModel):
@@ -777,13 +820,18 @@ class ChatRequest(pydantic.BaseModel):
 
 
 @app.post("/api/chat")
-async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
+async def chat(request: ChatRequest, http_request: fastapi.Request) -> fastapi.responses.StreamingResponse:
     """Persist the user input, then attach to its durable workflow stream."""
+    user = http_request.state.user
     incoming, _ = ai.ui.ai_sdk.to_messages(request.messages)
     try:
         async with turns.run(request.chat_id):
             current = await chats.get(request.chat_id)
             if current is None:
+                raise fastapi.HTTPException(404, "unknown chat")
+            if current.user_id is None and current.trigger == "ui":
+                current = await chats.claim_user(current.id, user["id"], _user_display_name(user))
+            if current.user_id != user["id"]:
                 raise fastapi.HTTPException(404, "unknown chat")
             if current.archived_at is not None:
                 raise fastapi.HTTPException(
@@ -793,11 +841,13 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                 raise turns.BusyError(
                     f"chat {request.chat_id} already has an active turn"
                 )
+            await _flush_pending_messages(request.chat_id)
             stored = await _transcript(request.chat_id)
             known = {message.id for message in stored}
             received = []
             for message in incoming:
                 if message.role == "user" and message.id not in known:
+                    message.provider_metadata = {"hatchery": {"origin": "ui", "author": _user_display_name(user)}}
                     await events.append(
                         request.chat_id,
                         "messages",
@@ -806,13 +856,24 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                     stored.append(message)
                     known.add(message.id)
                     received.append(message)
-            for message in received:
+            # Retry the submitted UI message's delivery from trusted storage,
+            # even when a previous request persisted it before crashing. Receipts
+            # prevent a duplicate post. Never re-export client-supplied history.
+            submitted = next((message for message in reversed(incoming) if message.role == "user"), None)
+            to_deliver = list(received)
+            if submitted and not any(message.id == submitted.id for message in received):
+                previous = next((message for message in stored if message.id == submitted.id), None)
+                if previous and (previous.provider_metadata or {}).get("hatchery", {}).get("origin") == "ui":
+                    to_deliver.append(previous)
+            for message in to_deliver:
                 await _emit(
                     request.chat_id,
                     channels.event(
                         channels.protocol.MESSAGE_RECEIVED,
                         message=message.text,
+                        message_id=message.id,
                         origin="ui",
+                        author=_user_display_name(user),
                     ),
                 )
 
@@ -1393,37 +1454,108 @@ async def complete_worker_task(task: worker.Task) -> None:
 
 
 async def _emit(chat_id: str, event: channels.Event) -> list[str]:
-    async with ai.experimental_telemetry.span("channel.deliver") as span:
+    async with ai.experimental_telemetry.span("channel.deliver") as span, turns.run(chat_id):
         bindings = await chats.bindings(chat_id)
         span.set_attrs(
-            {"chat.id": chat_id},
-            event_type=event.type,
-            binding_count=len(bindings),
+            {"chat.id": chat_id}, event_type=event.type, binding_count=len(bindings),
         )
         failures = []
+        message_id = event.data.get("message_id")
+        receipts = await events.read(chat_id, "deliveries") if message_id else []
         for binding in bindings:
+            if binding.token == event.data.get("source_binding"):
+                continue
+            if message_id and message_id in binding.state.get("excluded_message_ids", []):
+                continue
             channel = bot.channels.get(binding.channel)
             if channel is None:
                 continue
+            key = f"{binding.token}:{event.type}:{message_id}" if message_id else None
+            previous = next((data for _, data in reversed(receipts) if data.get("key") == key), None) if key else None
+            if previous:
+                if previous.get("status") != "sent":
+                    failures.append(f"{binding.channel}: delivery uncertain; check the thread before resending")
+                continue
+            if key:
+                # Mark before the external side effect. A timeout/crash must not
+                # trigger a blind duplicate post on webhook/workflow replay.
+                await events.append(chat_id, "deliveries", {
+                    "key": key, "status": "pending", "message_id": message_id,
+                    "binding": binding.token,
+                })
             try:
-                await channel.on_event(event, binding.state)
+                response = await channel.on_event(event, binding.state)
             except Exception as error:
                 log.exception("channel delivery failed: %s -> %s", chat_id, binding.channel)
                 failures.append(f"{binding.channel}: {error}")
+                if key:
+                    await events.append(chat_id, "deliveries", {
+                        "key": key, "status": "unknown", "detail": str(error),
+                    })
+            else:
+                if key:
+                    await events.append(chat_id, "deliveries", {
+                        "key": key, "status": "sent", "response": response,
+                    })
+        if failures and message_id:
+            await chats.set_attention(chat_id, "blocked")
+            await events.append(chat_id, "ui", {"type": "chat.changed"})
         span.set_attrs(failure_count=len(failures))
         return failures
 
 
-async def _deliver(chat_id: str, message: str, *, final: bool = True) -> list[str]:
+async def _deliver(
+    chat_id: str, message: str, *, final: bool = True, message_id: str | None = None,
+) -> list[str]:
     data = {"message": message}
+    if message_id:
+        data["message_id"] = message_id
     if not final:
         data["final"] = False
     return await _emit(chat_id, channels.event(channels.protocol.MESSAGE_COMPLETED, **data))
 
 
-async def _run_inbound_turn(chat_id: str) -> None:
-    """Start one durable dispatcher turn after the channel has been acknowledged."""
+async def _mirror_sharing(chat_id: str, sharing_id: str) -> None:
+    """The root is already posted; mirror it only to other attached threads."""
+    record = next(data for _, data in await events.read(chat_id, "sharing") if data["id"] == sharing_id)
+    failures = await _emit(chat_id, channels.event(
+        channels.protocol.MESSAGE_COMPLETED, message=record["text"],
+        message_id=f"sharing:{sharing_id}", source_binding=record["token"],
+    ))
+    if failures:
+        raise RuntimeError("; ".join(failures))
+
+
+async def _flush_pending_messages(chat_id: str) -> None:
+    """Move queued human input after the completed turn, under the chat lock."""
     async with turns.run(chat_id):
+        known = {message.id for message in await _transcript(chat_id)}
+        changed = False
+        for _, data in await events.read(chat_id, "pending_messages"):
+            if data["id"] not in known:
+                await events.append(chat_id, "messages", data)
+                known.add(data["id"])
+                changed = True
+        if changed:
+            await events.append(chat_id, "ui", {"type": "messages.changed"})
+
+
+async def _run_inbound_turn(chat_id: str) -> None:
+    """Drain durable input requests; busy chats pick them up after the active turn."""
+    async with turns.run(chat_id):
+        chat = await chats.get(chat_id)
+        if chat is None or chat.archived_at is not None:
+            return
+        if await durable.active_turn(chat_id) is not None:
+            return
+        await _flush_pending_messages(chat_id)
+        inbox = await events.read(chat_id, "inbox")
+        consumed = {
+            message_id for _, data in await events.read(chat_id, "turns")
+            if data.get("type") == "turn.prepared" for message_id in data.get("message_ids", [])
+        }
+        if not any(data.get("message_id") not in consumed for _, data in inbox):
+            return
         await durable.start_turn(chat_id, "channel")
 
 
@@ -1442,8 +1574,7 @@ async def _run_dispatcher_turn(
             async for _ in result:
                 pass
             added = result.messages[len(history) :]
-            for message in added:
-                await events.append(chat_id, "messages", message.model_dump(mode="json"))
+            await durable.commit_messages.func(chat_id, added)
     finally:
         telemetry.flush()
     messages = [
