@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import base64
 import collections
+import contextlib
 import datetime
 import fcntl
 import hashlib
@@ -18,6 +19,7 @@ import pathlib
 import pty
 import re
 import signal
+import stat
 import struct
 import subprocess
 import sys
@@ -30,7 +32,9 @@ import uuid
 import asyncssh
 import websockets.asyncio.server
 
-VERSION = 11
+VERSION = 13
+FX_VERSION = "0.0.8"
+FX_BINARY = "/opt/hatchery/bin/fx"
 REPLAY_LIMIT = 1024 * 1024
 FX_INPUT_READY = b"\x1b[?2004h"
 FX_INTERRUPT_SETTLE = 0.75
@@ -141,7 +145,9 @@ class Runtime:
             env["FX_AUTO_UPGRADE"] = "0"
             env["HATCHERY_ACTIVE_TASK"] = task_id
             env["HATCHERY_WORKSPACE"] = self.workspace
+            previous_sessions = {path.name for path in (self.fx_home / "sessions").glob("*")} if not resume else set()
             session = TTYSession(task_id, self.fx_command(resume=resume), self.workspace, 80, 24, env)
+            session.fx_previous_sessions = previous_sessions
             self.processes[task_id] = session
             self.active[task_id] = {"model": model}
             self._save_state()
@@ -178,6 +184,7 @@ class Runtime:
                 self.workspace,
                 seen=seen,
                 stop=lambda: session.exit_code is not None,
+                exclude=getattr(session, "fx_previous_sessions", set()),
             )
         )
         try:
@@ -195,6 +202,8 @@ class Runtime:
                     await self._emit(task_id, "task.transcript", self.transcript_payload(event))
                 elif event["type"] == "attention":
                     await self._emit(task_id, "task.question", {"question": event["text"]})
+                elif event["type"] == "turn.failed":
+                    await self._emit(task_id, "task.failed", {"error": event["text"]})
                 elif event["type"] == "turn.completed":
                     await self._emit(task_id, "task.completed", {
                         "result": {
@@ -287,7 +296,7 @@ class Runtime:
 
     @staticmethod
     def fx_command(*, resume: bool = False) -> list[str]:
-        command = ["fx"]
+        command = [FX_BINARY]
         if resume:
             command += ["--resume", "last"]
         return command
@@ -326,106 +335,131 @@ class Runtime:
             time.sleep(FX_SUBMIT_BEAT)
             session.write(b"\r")
 
-    def discover_fx_session(self, workspace: str) -> str | None:
+    def discover_fx_session(self, workspace: str, *, exclude: set[str] | None = None) -> str | None:
         canonical = str(pathlib.Path(workspace).resolve())
-        latest = self.fx_home / "sessions" / "latest"
-        hashed = latest / f"{hashlib.sha256(canonical.encode()).hexdigest()}.json"
-        candidates = [hashed]
-        try:
-            candidates.extend(path for path in latest.glob("*.json") if path != hashed)
-        except OSError:
-            return None
+        sessions = self.fx_home / "sessions"
         best: tuple[int, str] | None = None
-        for path in candidates:
+        for path in sessions.glob("*/session.json"):
             try:
-                pointer = json.loads(path.read_text(encoding="utf-8"))
-                if str(pathlib.Path(pointer.get("workspace_root", "")).resolve()) != canonical:
+                metadata = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(metadata, dict):
                     continue
-                updated_at_ms = pointer.get("updated_at_ms")
-                session_id = pointer.get("session_id")
+                workspace_root = metadata.get("workspace_root")
+                if not isinstance(workspace_root, str) or str(pathlib.Path(workspace_root).resolve()) != canonical:
+                    continue
+                session_id = metadata.get("id")
+                updated_at_ms = metadata.get("updated_at_ms")
                 if not isinstance(updated_at_ms, int) or not isinstance(session_id, str):
                     continue
+                if not re.fullmatch(r"[A-Za-z0-9_.-]{1,255}", session_id) or session_id in (".", ".."):
+                    continue
+                if session_id in (exclude or ()):
+                    continue
+                directory = sessions / session_id
+                if metadata.get("schema_version") != 4 or path.parent != directory:
+                    continue
+                if metadata.get("subagent_child") or (directory / "subagent" / "owner.json").exists():
+                    continue
+                # Match fx's --resume last ranking: only committed history
+                # advances freshness beyond metadata, not recovery.json.
+                with (directory / "events.jsonl").open("rb") as file:
+                    for line in file:
+                        if not line.endswith(b"\n"):
+                            break
+                        event = json.loads(line).get("event", {})
+                        if any(name in event for name in ("turn_completed", "interrupted", "context_checkpoint")):
+                            updated_at_ms = max(updated_at_ms, os.fstat(file.fileno()).st_mtime_ns // 1_000_000)
+                            break
                 candidate = (updated_at_ms, session_id)
-                if best is None or candidate[0] > best[0]:
+                if best is None or candidate > best:
                     best = candidate
-            except (OSError, ValueError, KeyError, json.JSONDecodeError):
+            except (OSError, ValueError, TypeError, AttributeError):
                 continue
         return best[1] if best else None
 
     @staticmethod
     def decode_fx_event(record: dict, state: dict | None = None) -> list[dict]:
         state = state if state is not None else {}
-        seen_calls = state.setdefault("calls", set())
-        seen_results = state.setdefault("results", set())
-        seen_turns = state.setdefault("turns", set())
-        payload = record.get("payload") or {}
-        kind = record.get("kind")
-        source = str(record.get("event_id") or record.get("seq") or "")
+        if record.get("schema_version") != 2:
+            raise ValueError(f"unsupported fx conversation schema: {record.get('schema_version')}")
+        conversation = record.get("event")
+        if not isinstance(conversation, dict) or len(conversation) != 1:
+            raise ValueError("invalid fx conversation event")
+        kind, payload = next(iter(conversation.items()))
+        sequence = record["seq"]
+        state["conversation_seq"] = sequence
+        # Include content so a recovered/replaced suffix may reuse a sequence.
+        digest = hashlib.sha256(json.dumps(record, sort_keys=True).encode()).hexdigest()[:16]
+        source = f"conversation:{sequence}:{digest}"
         events: list[dict] = []
-        execution = {}
-        if kind == "recovery_checkpoint_set":
-            checkpoint = payload.get("checkpoint") or {}
-            turn_id = checkpoint.get("turn_id")
-            user = (checkpoint.get("user") or {}).get("text")
-            if user and turn_id not in seen_turns:
-                seen_turns.add(turn_id)
-                events.append({"type": "user", "text": user, "source_key": f"{source}:user"})
-            execution = checkpoint.get("execution") or {}
-        elif kind == "history_turn_committed":
-            turn = payload.get("turn") or {}
-            execution = turn.get("execution") or {}
-        else:
-            return events
-        for step in execution.get("tool_steps") or []:
-            for call in step.get("tool_calls") or []:
-                call_id = str(call.get("id") or "")
-                if not call_id or call_id in seen_calls:
-                    continue
-                seen_calls.add(call_id)
-                raw = call.get("arguments_json") or "{}"
-                try:
-                    arguments = json.loads(raw)
-                except (TypeError, json.JSONDecodeError):
-                    arguments = {"raw": raw}
-                name = str(call.get("name") or "")
-                normalized = {"name": name, "arguments": arguments}
-                if name == "run_command":
-                    normalized["command"] = arguments.get("command", "")
-                elif name in ("read_file", "write_file", "edit_file"):
-                    normalized["path"] = arguments.get("path", "")
-                events.append({"type": "tool.call", "id": call_id, "tool": normalized, "source_key": f"{source}:call:{call_id}"})
-            for result in step.get("tool_results") or []:
-                call_id = str(result.get("tool_call_id") or "")
-                if not call_id or call_id in seen_results:
-                    continue
-                seen_results.add(call_id)
-                events.append({
-                    "type": "tool.result",
-                    "id": call_id,
-                    "output": str(result.get("output") or ""),
-                    "error": result.get("status") != "success",
-                    "source_key": f"{source}:result:{call_id}",
-                })
-        if kind == "history_turn_committed":
-            turn = payload.get("turn") or {}
-            assistant = str(turn.get("assistant") or "")
-            if assistant:
-                events.append({"type": "assistant", "text": assistant, "source_key": f"{source}:assistant"})
-            if turn.get("kind") == "interrupted" and turn.get("terminal_reason") == "cancelled":
-                events.append({"type": "attention", "text": "the turn was cancelled", "source_key": f"{source}:cancelled"})
-            else:
-                events.append({"type": "turn.completed", "source_key": f"{source}:completed"})
+        if kind == "user":
+            state["open_turn"] = sequence
+            events.append({"type": "user", "text": payload.get("text", ""), "turn_key": sequence, "source_key": f"{source}:user"})
+        elif kind == "steering":
+            events.append({"type": "user", "text": payload.get("text", ""), "source_key": f"{source}:steering"})
+        elif kind == "assistant":
+            if payload.get("text"):
+                events.append({"type": "assistant", "text": payload["text"], "source_key": f"{source}:assistant"})
+        elif kind == "tool_call":
+            raw = payload.get("arguments_json") or "{}"
+            try:
+                arguments = json.loads(raw)
+            except (TypeError, json.JSONDecodeError):
+                arguments = {"raw": raw}
+            if not isinstance(arguments, dict):
+                arguments = {"raw": raw}
+            events.append({
+                "type": "tool.call", "id": payload["call_id"],
+                "tool": {"name": payload["tool_name"], "arguments": arguments},
+                "source_key": f"{source}:call",
+            })
+        elif kind == "tool_result":
+            events.append({
+                "type": "tool.result", "id": payload["call_id"],
+                "output": payload.get("preview") or "",
+                "error": payload.get("status") != "success",
+                "truncated": payload.get("completeness", "complete") != "complete",
+                "source_key": f"{source}:result",
+            })
+            if payload.get("artifact_ref"):
+                events[-1].update(artifact_ref=payload["artifact_ref"], stored_bytes=payload.get("stored_bytes"))
+        elif kind == "turn_completed":
+            state.pop("open_turn", None)
+            events.append({"type": "turn.completed", "source_key": f"{source}:completed"})
+        elif kind == "interrupted":
+            state.pop("open_turn", None)
+            if payload.get("partial_text"):
+                events.append({"type": "assistant", "text": payload["partial_text"], "source_key": f"{source}:assistant"})
+            cancelled = payload.get("reason") == "cancelled"
+            events.append({
+                "type": "attention" if cancelled else "turn.failed",
+                "text": "the turn was cancelled" if cancelled else "the fx turn failed",
+                "source_key": f"{source}:interrupted",
+            })
+        elif kind != "context_checkpoint":
+            raise ValueError(f"unsupported fx conversation event: {kind}")
         return events
 
     @classmethod
     def decode_fx_jsonl(cls, raw: bytes, state: dict | None = None) -> list[dict]:
         state = state if state is not None else {}
         events: list[dict] = []
-        for line in raw.splitlines():
+        pending: list[dict] = []
+        # A trailing partial frame is normal while fx writes. Retry it next poll.
+        for line in raw.split(b"\n")[:-1]:
             if not line.strip():
                 continue
             record = json.loads(line)
-            events.extend(cls.decode_fx_event(record, state))
+            if record.get("schema_version") != 2 or not isinstance(record.get("event"), dict):
+                raise ValueError("expected fx 0.0.8 conversation record")
+            pending.append(record)
+            # 0.0.8 writes complete turns in batches. Do not publish a suffix
+            # which fx may discard during recovery after a failed write.
+            if not any(name in record["event"] for name in ("turn_completed", "interrupted", "context_checkpoint")):
+                continue
+            for item in pending:
+                events.extend(cls.decode_fx_event(item, state))
+            pending.clear()
         return events
 
     def stream_fx_events(
@@ -435,46 +469,95 @@ class Runtime:
         seen: set[str] | None = None,
         wait: bool = True,
         stop=None,
+        exclude: set[str] | None = None,
     ):
         seen = seen if seen is not None else set()
-        tailed: set[str] = set()
-        session_id = self.discover_fx_session(workspace)
+        session_id = self.discover_fx_session(workspace, exclude=exclude)
         while session_id is None:
             if not wait or (stop is not None and stop()):
                 return
             time.sleep(0.15)
-            session_id = self.discover_fx_session(workspace)
-        while session_id:
-            if stop is not None and stop():
+            session_id = self.discover_fx_session(workspace, exclude=exclude)
+        directory = self.fx_home / "sessions" / session_id
+        path = directory / "events.jsonl"
+        decoder_state: dict = {}
+        previous = b""
+        while True:
+            # Stay bound to this session and drain its final snapshot after exit.
+            try:
+                raw = path.read_bytes()
+            except FileNotFoundError:
+                raw = b""
+            if not raw.startswith(previous):
+                decoder_state = {}  # Recovery replaced or truncated the log.
+            previous = raw
+            decoded = self.decode_fx_jsonl(raw, decoder_state)
+            try:
+                recovery = json.loads((directory / "recovery.json").read_text(encoding="utf-8"))
+            except (FileNotFoundError, json.JSONDecodeError):
+                recovery = None
+            if recovery is not None and recovery.get("conversation_seq") == decoder_state.get("conversation_seq", 0):
+                checkpoint = recovery["checkpoint"]
+                # The sidecar repeats the user/tools in the final batch. Normalize
+                # its checkpoint to the same event shapes and stable identities.
+                sequence = decoder_state.get("open_turn", recovery["conversation_seq"] + 1)
+                progress = [{"user": checkpoint["user"]}]
+                for step in (checkpoint.get("execution") or {}).get("tool_steps") or []:
+                    for call in step.get("tool_calls") or []:
+                        progress.append({"tool_call": {
+                            "call_id": call["id"], "tool_name": call["name"],
+                            "arguments_json": call.get("arguments_json"),
+                        }})
+                    for result in step.get("tool_results") or []:
+                        progress.append({"tool_result": {
+                            "call_id": result["tool_call_id"], "status": result["status"],
+                            "preview": result.get("output") or result.get("preview"),
+                            "artifact_ref": result.get("output_handle"),
+                            "stored_bytes": result.get("stored_output_bytes"),
+                            "completeness": "partial" if result.get("truncated") else "complete",
+                        }})
+                for event in progress:
+                    decoded.extend(self.decode_fx_event({"schema_version": 2, "seq": sequence, "event": event}))
+            for event in decoded:
+                # Stable identities survive sidecar updates and log replacement.
+                source = event["source_key"]
+                if event["type"] in ("tool.call", "tool.result"):
+                    source = f"{event['type']}:{event['id']}"
+                elif "turn_key" in event:
+                    digest = hashlib.sha256(event["text"].encode()).hexdigest()[:16]
+                    source = f"user:{event['turn_key']}:{digest}"
+                key = f"{session_id}:{source}"
+                if key in seen:
+                    continue
+                if reference := event.pop("artifact_ref", None):
+                    try:
+                        if pathlib.Path(reference).name != reference or reference in (".", ".."):
+                            raise ValueError("invalid fx tool-result reference")
+                        with contextlib.ExitStack() as stack:
+                            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                            session_fd = os.open(directory, flags)
+                            stack.callback(os.close, session_fd)
+                            results_fd = os.open("tool-results", flags, dir_fd=session_fd)
+                            stack.callback(os.close, results_fd)
+                            fd = os.open(reference, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=results_fd)
+                            file = stack.enter_context(os.fdopen(fd, "rb"))
+                            info = os.fstat(file.fileno())
+                            expected = event.pop("stored_bytes", None)
+                            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                                raise ValueError("invalid fx tool-result file")
+                            if expected is not None and info.st_size != expected:
+                                raise ValueError("fx tool-result size mismatch")
+                            event["output"] = file.read(8 * 1024 + 1).decode(errors="replace")
+                            if info.st_size > 8 * 1024:
+                                event["truncated"] = True
+                    except (OSError, ValueError):
+                        event["output"] = event.get("output") or "[fx tool output unavailable]"
+                        event["truncated"] = True
+                seen.add(key)
+                yield {**event, "source_key": key, "session_id": session_id}
+            if not wait or (stop is not None and stop()):
                 return
-            if session_id in tailed:
-                return
-            tailed.add(session_id)
-            path = self.fx_home / "sessions" / session_id / "events.jsonl"
-            decoder_state: dict = {}
-            initial_size = path.stat().st_size if path.exists() else 0
-            follow_armed = True
-            while True:
-                if stop is not None and stop():
-                    return
-                if path.exists():
-                    for event in self.decode_fx_jsonl(path.read_bytes(), decoder_state):
-                        key = f"{session_id}:{event['source_key']}"
-                        if key in seen:
-                            continue
-                        seen.add(key)
-                        yield {**event, "source_key": key, "session_id": session_id}
-                if not wait:
-                    return
-                time.sleep(0.15)
-                current_size = path.stat().st_size if path.exists() else 0
-                newer = self.discover_fx_session(workspace)
-                if follow_armed and current_size == initial_size and newer and newer not in tailed:
-                    session_id = newer
-                    break
-                if current_size != initial_size:
-                    initial_size = current_size
-                    follow_armed = False
+            time.sleep(0.15)
 
     def recover(self) -> dict:
         """Return the persisted transport cursors loaded during construction."""
@@ -600,7 +683,7 @@ class Runtime:
                 tool_call_id=str(event.get("id") or ""),
                 output=output[:max_text],
                 error=bool(event.get("error")),
-                truncated=len(output) > max_text,
+                truncated=bool(event.get("truncated")) or len(output) > max_text,
             )
         return payload
 
@@ -616,6 +699,8 @@ class Runtime:
             await self._emit(task_id, "task.transcript", self.transcript_payload(event))
         elif kind == "attention":
             await self._emit(task_id, "task.question", {"question": event.get("text", "input required")})
+        elif kind == "turn.failed":
+            await self._emit(task_id, "task.failed", {"error": event["text"]})
         elif kind == "turn.completed":
             await self._emit(task_id, "task.completed", {
                 "result": {

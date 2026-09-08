@@ -278,8 +278,7 @@ async def _bootstrap(
             "set -e; python3 -c 'from vercel import connect, queue; import asyncssh, websockets' 2>/dev/null || "
             "python3 -m pip install --disable-pip-version-check 'vercel-queue==0.7.3' "
             "'vercel-connect' 'asyncssh>=2.21,<3' 'websockets>=15,<17'; "
-            "command -v gh >/dev/null || true; "
-            "command -v fx >/dev/null || curl -fsSL https://fx.sh/setup.sh | bash",
+            "command -v gh >/dev/null || true",
         ],
         check=True,
         capture_output=True,
@@ -325,6 +324,10 @@ async def _start_daemon(
         "/bin/sh",
         [
             "-lc",
+            "set -e; "
+            f'if [ "$({daemon_main.FX_BINARY} --version 2>/dev/null)" != "{daemon_main.FX_VERSION}" ]; then '
+            f"curl -fsSL https://fx.sh/setup.sh | FX_INSTALL_DIR={SHIM_PATH} bash -s -- v{daemon_main.FX_VERSION}; fi; "
+            f'test "$({daemon_main.FX_BINARY} --version)" = "{daemon_main.FX_VERSION}"; '
             f"pkill -f '^python3 {DAEMON_PATH}( |$)' 2>/dev/null || true; "
             f"{command} >>{DAEMON_LOG_PATH} 2>&1",
         ],

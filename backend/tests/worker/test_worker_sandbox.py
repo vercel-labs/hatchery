@@ -1,6 +1,9 @@
+import os
+import subprocess
 import types
 
 import httpx
+import pytest
 
 from worker import models, sandbox
 
@@ -116,7 +119,9 @@ async def test_provision_creates_persistent_sandbox_and_checks_daemon(monkeypatc
     for package in ("vercel-queue", "vercel-connect", "asyncssh", "websockets"):
         assert package in bootstrap
     assert "from vercel import connect, queue; import asyncssh, websockets" in bootstrap
-    assert "fx.sh/setup.sh" in bootstrap
+    startup = calls["process"][1][1]
+    assert "FX_INSTALL_DIR=/opt/hatchery/bin bash -s -- v0.0.8" in startup
+    assert 'test "$(/opt/hatchery/bin/fx --version)" = "0.0.8"' in startup
     assert calls["options"]["ports"] == [8787, 8788]
     assert calls["options"]["env"] == {
         "AI_GATEWAY_API_KEY": sandbox.AI_GATEWAY_PLACEHOLDER,
@@ -146,6 +151,64 @@ async def test_provision_creates_persistent_sandbox_and_checks_daemon(monkeypatc
         "https://daemon.example/health",
         {"authorization": "Bearer secret"},
     )
+
+
+@pytest.mark.parametrize("installed,downloaded,passes", [
+    (None, "0.0.8", True),
+    ("0.0.7", "0.0.8", True),
+    ("0.0.9", "0.0.8", True),
+    ("0.0.8", None, True),
+    ("0.0.7", None, False),
+    (None, "0.0.9", False),
+])
+async def test_daemon_startup_enforces_fx_pin(monkeypatch, tmp_path, installed, downloaded, passes):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fx = bin_dir / "fx"
+    if installed is not None:
+        fx.write_text(f"#!/bin/sh\nprintf '%s\\n' '{installed}'\n")
+        fx.chmod(0o755)
+    fetched = tmp_path / "fetched"
+    installer = tmp_path / "setup.sh"
+    installer.write_text(
+        "set -eu\n"
+        "test \"$1\" = v0.0.8\n"
+        'mkdir -p "$FX_INSTALL_DIR"\n'
+        'cat > "$FX_INSTALL_DIR/fx" <<\'EOF\'\n'
+        f"#!/bin/sh\nprintf '%s\\n' '{downloaded}'\n"
+        "EOF\n"
+        'chmod +x "$FX_INSTALL_DIR/fx"\n'
+    )
+    curl = bin_dir / "curl"
+    curl.write_text(
+        f"#!/bin/sh\ntouch '{fetched}'\n"
+        + (f"cat '{installer}'\n" if downloaded is not None else "exit 22\n")
+    )
+    curl.chmod(0o755)
+    monkeypatch.setattr(sandbox, "SHIM_PATH", str(bin_dir))
+    monkeypatch.setattr(sandbox.daemon_main, "FX_BINARY", str(fx))
+    scripts = []
+
+    class Box:
+        region = "iad1"
+
+        async def create_process(self, command, args, env):
+            scripts.append(args[1])
+
+    await sandbox._start_daemon(Box(), "wrk", models.WorkerSpec(), "secret")
+    # Exercise the actual installation/version-check prefix without starting
+    # a daemon or killing processes. The downloader is an offline fixture.
+    script = scripts[0].split("pkill -f", 1)[0] + "printf admitted"
+    result = subprocess.run(
+        ["/bin/sh", "-c", script],
+        env=os.environ | {"PATH": f"{bin_dir}:{os.environ['PATH']}"},
+        text=True, capture_output=True,
+    )
+    assert (result.returncode == 0) is passes, result.stderr
+    assert ("admitted" in result.stdout) is passes
+    assert fetched.exists() is (installed != "0.0.8")
+    if passes:
+        assert subprocess.check_output([str(fx), "--version"], text=True).strip() == "0.0.8"
 
 
 def test_worker_spec_resolves_semantic_and_legacy_resources():

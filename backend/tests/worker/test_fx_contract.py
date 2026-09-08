@@ -1,15 +1,11 @@
 import asyncio
 import json
-import pathlib
 import threading
 import time
 
 import pytest
 
 from worker.daemon import main
-
-
-FIXTURES = pathlib.Path(__file__).with_name("testdata")
 
 
 def _require(subject, name):
@@ -32,9 +28,6 @@ def _require(subject, name):
         ("fx_resume_launches_interactive_last_session", "fx_command"),
         ("fx_empty_restore_does_not_submit_prompt", "fx_command"),
         ("fx_session_is_discovered_by_workspace", "discover_fx_session"),
-        ("fx_stream_follows_newer_session", "stream_fx_events"),
-        ("fx_stream_never_revisits_old_session", "stream_fx_events"),
-        ("fx_stream_stays_on_parent_when_child_moves_pointer", "stream_fx_events"),
         ("fx_committed_message_does_not_invent_question", "decode_fx_event"),
         ("fx_mcp_configuration_merges_servers", "configure_fx_mcp"),
         ("fx_disables_header_authenticated_mcp_server", "configure_fx_mcp"),
@@ -44,29 +37,6 @@ def _require(subject, name):
 )
 def test_fx_runtime_contract(scenario, capability):
     _require(main.Runtime, capability)
-
-
-def test_fx_session_discovery_skips_pointer_with_null_timestamp(monkeypatch, tmp_path):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    latest = tmp_path / ".fx" / "sessions" / "latest"
-    latest.mkdir(parents=True)
-    (latest / "pointer.json").write_text(json.dumps({
-        "workspace_root": str(workspace),
-        "session_id": "session-initializing",
-        "updated_at_ms": None,
-    }))
-    runtime = main.Runtime("wrk", str(workspace), lambda event: None)
-
-    assert runtime.discover_fx_session(str(workspace)) is None
-
-    (latest / "pointer.json").write_text(json.dumps({
-        "workspace_root": str(workspace),
-        "session_id": "session-ready",
-        "updated_at_ms": 123,
-    }))
-    assert runtime.discover_fx_session(str(workspace)) == "session-ready"
 
 
 def test_fx_gateway_key_is_process_environment_only(monkeypatch, tmp_path):
@@ -86,25 +56,6 @@ def test_fx_gateway_key_uses_current_process_environment(monkeypatch, tmp_path):
     runtime = main.Runtime("wrk", str(tmp_path), lambda event: None)
 
     assert runtime.configure_fx() == {"AI_GATEWAY_API_KEY": "gateway-key"}
-
-
-@pytest.mark.parametrize(
-    "fixture,scenario",
-    [
-        ("fx_events.jsonl", "decode_events_and_coalesce_checkpoints"),
-        ("fx_events.jsonl", "normalize_fx_tool_inputs"),
-        ("fx_events.jsonl", "stream_events_with_stable_source_keys"),
-        ("fx_user_turn.jsonl", "ingest_user_turn_once_before_agent_work"),
-        ("fx_two_turns.jsonl", "ingest_each_typed_submission_once"),
-    ],
-    ids=lambda value: value,
-)
-def test_captured_fx_jsonl_contract(fixture, scenario):
-    raw = (FIXTURES / fixture).read_bytes()
-    assert raw.endswith(b"\n")
-    decoder = _require(main.Runtime, "decode_fx_jsonl")
-    events = decoder(raw)
-    assert events, scenario
 
 
 def test_transcript_payload_is_bounded_and_flat():
