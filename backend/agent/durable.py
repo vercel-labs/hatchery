@@ -299,7 +299,7 @@ async def require_attention(
 async def find_channels(
     provider: typing.Literal["slack", "github"], query: str,
 ) -> list[dict]:
-    """Find Slack bot-member channels by name/ID, or GitHub issue/PR candidates
+    """Find public Slack bot-member channels by name/ID, or GitHub issue/PR candidates
     by title, owner/repo#number, or URL within this space's repositories.
     """
     result = await find_channels_step(current_agent.get().chat_id, provider, query)

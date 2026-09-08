@@ -37,7 +37,6 @@ class SlackScopeRequired(RuntimeError):
 
     def __init__(self, method: str, body: dict, headers: httpx.Headers):
         scopes = {}
-        descriptions = []
         provided = body.get("provided")
         for field, value in {
             "needed": body.get("needed"),
@@ -46,15 +45,11 @@ class SlackScopeRequired(RuntimeError):
         }.items():
             parsed = sorted(set(value.replace(",", " ").split())) if isinstance(value, str) else None
             scopes[field] = parsed
-            label = "(not reported)" if parsed is None else ",".join(parsed) or "(none)"
-            descriptions.append(f"{field}={label}")
         connector = os.environ.get("SLACK_CONNECTOR", "unconfigured")
-        details = "; ".join(descriptions)
-        message = (
-            f"Slack {method} failed: missing_scope (connector={connector}; {details}). "
-            "Check the Slack bot scopes in Vercel Connect and reauthorize the workspace installation. "
-            "Do not retry until permissions are updated."
-        )
+        message = json.dumps({
+            field: body[field] for field in ("error", "needed", "provided")
+            if isinstance(body.get(field), str)
+        })
         super().__init__(message)
         self.result = {
             "status": "failed", "provider": "slack", "error": "missing_scope",
@@ -168,7 +163,7 @@ def _github_ref(query: str) -> tuple[str, int] | None:
 
 
 async def find_channels(chat_id: str, provider: Provider, query: str) -> list[dict]:
-    """Find Slack bot-member channels or GitHub issues/PRs in this space."""
+    """Find public Slack bot-member channels or GitHub issues/PRs in this space."""
     _rank(query, [])  # reject empty queries before making provider calls
     user, space = await _context(chat_id)
     candidates = []
@@ -178,13 +173,11 @@ async def find_channels(chat_id: str, provider: Provider, query: str) -> list[di
             cursor = ""
             while True:
                 body = await _api(client, "POST", "users.conversations", data={
-                    "types": "public_channel,private_channel", "exclude_archived": "true",
+                    "types": "public_channel", "exclude_archived": "true",
                     "limit": "200", "cursor": cursor,
                 })
                 for channel in body.get("channels", []):
-                    if channel.get("is_archived"):
-                        continue
-                    if channel.get("is_private") and user["slack"]["user_id"] not in await _slack_members(client, channel["id"]):
+                    if channel.get("is_archived") or channel.get("is_private"):
                         continue
                     identifier = f"{team}/{channel['id']}"
                     candidates.append({

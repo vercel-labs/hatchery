@@ -39,8 +39,8 @@ ask for clarification and call require_attention with blocked rather than guess.
 These are one-off sends: they create no bindings and do not establish automatic
 two-way routing. Sending or mentioning someone does not guarantee a notification.
 If delivery is uncertain, do not retry; report the uncertainty.
-If a tool returns missing_scope, report its connector, method, needed and provided
-scopes, and mark the chat blocked. Do not retry or interpret it as no matches.
+If a tool returns missing_scope, briefly report the needed scope and mark the
+chat blocked. Do not retry or interpret it as no matches.
 Do not invent scope details that the provider did not report."""
 
 
@@ -81,7 +81,7 @@ def agent_for(chat: dict) -> ai.Agent:
     async def find_channels(
         provider: typing.Literal["slack", "github"], query: str,
     ) -> list[dict]:
-        """Find Slack bot-member channels by name/ID, or GitHub issue/PR candidates
+        """Find public Slack bot-member channels by name/ID, or GitHub issue/PR candidates
         by title, owner/repo#number, or URL within this space's repositories.
         """
         return await destinations.find_channels(chat_id, provider, query)

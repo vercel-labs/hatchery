@@ -72,6 +72,7 @@ def provider(monkeypatch):
                     {"id": "COLD", "name": "hatchery-old", "is_archived": True},
                 ], "response_metadata": {"next_cursor": "page2"}})
             return httpx.Response(200, json={"ok": True, "channels": [
+                {"id": "C2", "name": "hatchery-releases"},
                 {"id": "CPRIVATE", "name": "hatchery-private", "is_private": True},
                 {"id": "COTHER", "name": "random"},
             ]})
@@ -89,15 +90,16 @@ def provider(monkeypatch):
     return requests, overrides
 
 
-async def test_channel_search_paginates_and_returns_private_and_fuzzy_candidates(directory, provider):
+async def test_channel_search_paginates_public_channels_and_returns_fuzzy_candidates(directory, provider):
     chat, _ = directory
     requests, _ = provider
     found = await destinations.find_channels(chat.id, "slack", "#hatchery")
-    assert {item["id"] for item in found} == {"T1/C1", "T1/CPRIVATE"}
-    assert next(item for item in found if item["channel_id"] == "CPRIVATE")["private"]
+    assert {item["id"] for item in found} == {"T1/C1", "T1/C2"}
+    assert all(not item["private"] for item in found)
     pages = [form for path, _, form in requests if path == "users.conversations"]
     assert [page["cursor"] for page in pages] == ["", "page2"]
-    assert pages[0]["types"] == "public_channel,private_channel"
+    assert all(page["types"] == "public_channel" for page in pages)
+    assert not any(path == "conversations.members" for path, _, _ in requests)
     assert all("aliases" not in item for item in found)
     exact = await destinations.find_channels(chat.id, "slack", "#HATCHERY-UPDATES")
     assert exact[0]["id"] == "T1/C1"
@@ -108,12 +110,10 @@ async def test_channel_search_paginates_and_returns_private_and_fuzzy_candidates
     assert await destinations.find_channels(chat.id, "slack", "zzzzzzzzzz") == []
 
 
-async def test_private_channels_require_owner_membership_for_discovery_and_send(directory, provider):
+async def test_private_channel_send_still_requires_owner_membership(directory, provider):
     chat, _ = directory
     requests, overrides = provider
     overrides["conversations.members"] = {"ok": True, "members": ["U2", "UBOT"]}
-    found = await destinations.find_channels(chat.id, "slack", "hatchery")
-    assert [item["id"] for item in found] == ["T1/C1"]
     overrides["conversations.info"] = {"ok": True, "channel": {"is_member": True, "is_private": True}}
     for people in [[], ["jane"]]:
         with pytest.raises(ValueError, match="owner cannot access"):
@@ -328,8 +328,10 @@ async def test_scope_error_preserves_provider_details_without_logging_credential
     assert result["method"] == "users.conversations"
     assert result["needed"] == ["channels:read", "groups:read"]
     assert result["provided"] == ["channels:read", "chat:write"]
-    assert "needed=channels:read,groups:read" in str(caught.value)
-    assert "provided=channels:read,chat:write" in str(caught.value)
+    assert json.loads(str(caught.value)) == {
+        "error": "missing_scope", "needed": "channels:read,groups:read",
+        "provided": "chat:write,channels:read",
+    }
     assert str(caught.value) in caplog.text
     assert "do-not-log" not in caplog.text + json.dumps(result)
 
@@ -354,8 +356,9 @@ async def test_scope_error_header_fallback_does_not_invent_missing_details(direc
     assert result["needed"] == needed
     assert result["provided"] == provided
     assert result["accepted_scopes"] == accepted
-    if needed is None:
-        assert "needed=(not reported)" in result["detail"]
+    assert json.loads(result["detail"]) == {
+        "error": "missing_scope", **{key: value for key, value in body.items() if isinstance(value, str)},
+    }
 
 
 async def test_send_scope_failure_keeps_details_in_durable_receipt(directory, provider):
