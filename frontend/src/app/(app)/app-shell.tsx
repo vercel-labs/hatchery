@@ -39,9 +39,15 @@ import {
 } from "@/lib/api";
 import { chatAttentionLabel, chatSidebarText } from "@/lib/chat-sidebar";
 import type { ChatUIMessage } from "@/lib/messages";
+import {
+  type AccentColor,
+  isAccentColor,
+  resolveSpaceColor,
+} from "@/lib/space-colors";
 import { cn } from "@/lib/utils";
 import { ChatView } from "@/components/chat";
 import { SandboxForm } from "@/components/sandbox-form";
+import { SpaceColorPicker } from "@/components/space-color-picker";
 import { TerminalPane, type SandboxWorkspace } from "@/components/terminal-pane";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -123,7 +129,7 @@ function Dot({ color }: { color: string | undefined }) {
   return (
     <span
       className="size-2 shrink-0 rounded-full"
-      style={{ backgroundColor: color ?? "var(--muted-foreground)" }}
+      style={{ backgroundColor: resolveSpaceColor(color) }}
     />
   );
 }
@@ -167,7 +173,7 @@ function ChatSidebarItem({
       >
         <span
           className="absolute inset-y-1 left-0 w-0.5 rounded-full"
-          style={{ backgroundColor: spaceColor ?? "var(--muted-foreground)" }}
+          style={{ backgroundColor: resolveSpaceColor(spaceColor) }}
         />
         {attentionLabel && (
           <div
@@ -217,6 +223,7 @@ export function AppShell() {
   const [failed, setFailed] = useState(false);
   const [addingSpace, setAddingSpace] = useState(false);
   const [spaceName, setSpaceName] = useState("");
+  const [spaceColor, setSpaceColor] = useState<AccentColor | null>(null);
   const [vercelCLI, setVercelCLI] = useState<VercelCLIConnection | null>(null);
   const [vercelToken, setVercelToken] = useState("");
   const [vercelSheetOpen, setVercelSheetOpen] = useState(false);
@@ -345,7 +352,10 @@ export function AppShell() {
     const res = await apiFetch("/api/spaces", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: spaceName }),
+      body: JSON.stringify({
+        name: spaceName,
+        ...(spaceColor ? { color: spaceColor } : {}),
+      }),
     });
     if (!res.ok) return;
     const space: Space = await res.json();
@@ -353,6 +363,7 @@ export function AppShell() {
     router.push(`/spaces/${encodeURIComponent(space.id)}`);
     setSortSpaceId(space.id);
     setSpaceName("");
+    setSpaceColor(null);
     setAddingSpace(false);
   };
 
@@ -603,31 +614,35 @@ export function AppShell() {
                 </SidebarGroupAction>
                 <SidebarGroupContent>
                   {addingSpace && (
-                    <form className="flex gap-1 px-2 pb-1" onSubmit={createSpace}>
-                      <Input
-                        autoFocus
-                        value={spaceName}
-                        onChange={(event) => setSpaceName(event.target.value)}
-                        placeholder="Space name"
-                        aria-label="Space name"
-                        className="h-7"
-                      />
-                      <Button type="submit" size="icon-xs" disabled={!spaceName.trim()}>
-                        <CheckIcon />
-                        <span className="sr-only">Add space</span>
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-xs"
-                        onClick={() => {
-                          setAddingSpace(false);
-                          setSpaceName("");
-                        }}
-                      >
-                        <XIcon />
-                        <span className="sr-only">Cancel</span>
-                      </Button>
+                    <form className="flex flex-col gap-2 px-2 pb-2" onSubmit={createSpace}>
+                      <div className="flex gap-1">
+                        <Input
+                          autoFocus
+                          value={spaceName}
+                          onChange={(event) => setSpaceName(event.target.value)}
+                          placeholder="Space name"
+                          aria-label="Space name"
+                          className="h-7"
+                        />
+                        <Button type="submit" size="icon-xs" disabled={!spaceName.trim()}>
+                          <CheckIcon />
+                          <span className="sr-only">Add space</span>
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-xs"
+                          onClick={() => {
+                            setAddingSpace(false);
+                            setSpaceName("");
+                            setSpaceColor(null);
+                          }}
+                        >
+                          <XIcon />
+                          <span className="sr-only">Cancel</span>
+                        </Button>
+                      </div>
+                      <SpaceColorPicker value={spaceColor} onValueChange={setSpaceColor} />
                     </form>
                   )}
                   <SidebarMenu>
@@ -650,7 +665,7 @@ export function AppShell() {
                             >
                               <span
                                 className="absolute inset-y-1 left-0 w-1 rounded-full"
-                                style={{ backgroundColor: space.color }}
+                                style={{ backgroundColor: resolveSpaceColor(space.color) }}
                               />
                               <span className="truncate">{space.name}</span>
                             </SidebarMenuButton>
@@ -925,6 +940,9 @@ function SpacePane({
   const [editingDocument, setEditingDocument] = useState(false);
   const [documentName, setDocumentName] = useState(space.name);
   const [documentAbout, setDocumentAbout] = useState(space.about);
+  const [documentColor, setDocumentColor] = useState<AccentColor | null>(
+    isAccentColor(space.color) ? space.color : null,
+  );
   const [savingDocument, setSavingDocument] = useState(false);
   const [documentError, setDocumentError] = useState("");
   const [editingResources, setEditingResources] = useState(false);
@@ -978,6 +996,7 @@ function SpacePane({
   const startEditingDocument = () => {
     setDocumentName(space.name);
     setDocumentAbout(space.about);
+    setDocumentColor(isAccentColor(space.color) ? space.color : null);
     setDocumentError("");
     setEditingDocument(true);
   };
@@ -993,7 +1012,11 @@ function SpacePane({
       const response = await apiFetch(`/api/spaces/${space.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: documentName, about: documentAbout }),
+        body: JSON.stringify({
+          name: documentName,
+          about: documentAbout,
+          ...(documentColor ? { color: documentColor } : {}),
+        }),
       });
       if (!response.ok) throw new Error();
       onChange(await response.json());
@@ -1164,6 +1187,23 @@ function SpacePane({
                 onChange={(event) => setDocumentName(event.target.value)}
                 aria-invalid={Boolean(documentError)}
               />
+            </Field>
+            <Field>
+              <FieldLabel>Accent color</FieldLabel>
+              <SpaceColorPicker
+                value={documentColor}
+                onValueChange={setDocumentColor}
+                label={`Accent color for ${space.name}`}
+              />
+              {!isAccentColor(space.color) && (
+                <FieldDescription className="flex items-center gap-2">
+                  <span
+                    className="size-3 shrink-0 rounded-full"
+                    style={{ backgroundColor: resolveSpaceColor(space.color) }}
+                  />
+                  The current custom color is kept unless you choose a new accent.
+                </FieldDescription>
+              )}
             </Field>
             <Field data-invalid={Boolean(documentError)}>
               <FieldLabel htmlFor={`space-about-${space.id}`}>Markdown</FieldLabel>

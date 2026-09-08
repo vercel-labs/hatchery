@@ -11,6 +11,7 @@ async def test_default_is_created_once():
     assert first.id == second.id == spaces.DEFAULT_ID
     assert first.name == "workspace"
     assert first.repos == []
+    assert first.color in spaces.ACCENT_COLORS
     assert [s.id for s in await spaces.list_all()] == [spaces.DEFAULT_ID]
 
 
@@ -31,6 +32,8 @@ async def test_create_and_delete():
 
     assert created.id.startswith("spc_")
     assert created.name == "new space"
+    assert created.color in spaces.ACCENT_COLORS
+    assert (await spaces.create("green space", "green")).color == "green"
     assert await spaces.delete(created.id)
     assert await spaces.get(created.id) is None
     assert not await spaces.delete(created.id)

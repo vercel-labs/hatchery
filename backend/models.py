@@ -6,6 +6,7 @@ import pydantic
 
 
 AttentionReason = typing.Literal["result_available", "blocked"]
+AccentColor = typing.Literal["blue", "red", "amber", "green", "teal", "purple", "pink"]
 
 
 class Resource(pydantic.BaseModel):
@@ -20,7 +21,7 @@ class Space(pydantic.BaseModel):
     about: str = ""  # markdown, the space's canvas
     repos: list[str] = []  # "owner/repo", autocloned into the sandbox
     resources: list[Resource] = []  # extra links; repos show up alongside these
-    color: str  # hex; the ui codes the space and its chats with it
+    color: str  # semantic accent family; legacy custom values remain readable
     created_at: str  # utc isoformat, same as Event.meta.at
 
     @pydantic.field_validator("repos")
