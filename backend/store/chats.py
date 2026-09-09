@@ -103,6 +103,52 @@ async def create(
         return chat
 
 
+async def create_once(
+    chat_id: str,
+    space_id: str | None,
+    title: str,
+    user_id: str | None,
+    author_display_name: str | None = None,
+) -> models.Chat:
+    """Create one UI chat for a caller-generated id, or return its safe retry."""
+    chat = models.Chat(
+        id=chat_id,
+        user_id=user_id,
+        author_display_name=author_display_name,
+        space_id=space_id,
+        title=title,
+        trigger="ui",
+        created_at=_now(),
+    )
+    if store.use_postgres():
+        from store import db
+
+        row = await (await db.pool()).fetchrow(
+            "INSERT INTO hatchery_chats (id, space_id, data) "
+            "VALUES ($1, $2, $3::jsonb) ON CONFLICT (id) DO NOTHING RETURNING data",
+            chat.id,
+            chat.space_id,
+            chat.model_dump_json(),
+        )
+        existing = _chat(row["data"]) if row is not None else await get(chat_id)
+    else:
+        with _lock:
+            existing = _read_chat(chat_id)
+            if existing is None:
+                _write_chat(chat)
+                existing = chat
+    if existing is None:
+        raise RuntimeError("chat creation failed")
+    if (
+        existing.user_id != user_id
+        or existing.trigger != "ui"
+        or existing.space_id != space_id
+        or existing.title != title
+    ):
+        raise ValueError("chat id conflicts with an existing chat")
+    return existing
+
+
 async def get(chat_id: str) -> models.Chat | None:
     if store.use_postgres():
         from store import db

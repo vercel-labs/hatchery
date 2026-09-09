@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { GitBranchIcon, Loader2Icon } from "lucide-react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -25,7 +25,7 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
-import { apiBase, apiFetch } from "@/lib/api";
+import { apiBase, apiFetch, type Chat } from "@/lib/api";
 
 type Launch = {
   title: string;
@@ -49,40 +49,63 @@ const emptyLaunch: Launch = {
 
 export function SandboxForm({
   chatId,
+  spaceId = null,
   open,
   onOpenChange,
+  onPersist,
   onCreated,
+  isCurrent = () => true,
 }: {
-  chatId: string;
+  chatId?: string;
+  spaceId?: string | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onCreated: (sandboxId: string) => void;
+  onPersist?: () => Promise<Chat>;
+  onCreated: (sandboxId: string, chatId: string) => void;
+  isCurrent?: () => boolean;
 }) {
   const [launch, setLaunch] = useState(emptyLaunch);
   const [suggesting, setSuggesting] = useState(true);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState("");
+  const creatingRef = useRef(false);
 
   useEffect(() => {
     if (!open) return;
-    apiFetch(`/api/chats/${chatId}/sandboxes/suggestion`)
+    let current = true;
+    const suggestionPath = chatId
+      ? `/api/chats/${chatId}/sandboxes/suggestion`
+      : `/api/sandboxes/suggestion${spaceId ? `?space_id=${encodeURIComponent(spaceId)}` : ""}`;
+    apiFetch(suggestionPath)
       .then(async (response) => {
         if (!response.ok) throw new Error("Could not suggest sandbox settings");
-        setLaunch(await response.json());
+        const suggested: Launch = await response.json();
+        if (current) setLaunch(suggested);
       })
       .catch((reason: Error) => {
+        if (!current) return;
         setLaunch(emptyLaunch);
         setError(reason.message);
       })
-      .finally(() => setSuggesting(false));
-  }, [chatId, open]);
+      .finally(() => {
+        if (current) setSuggesting(false);
+      });
+    return () => {
+      current = false;
+    };
+  }, [chatId, open, spaceId]);
 
   const create = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (creatingRef.current) return;
+    creatingRef.current = true;
     setCreating(true);
     setError("");
     try {
-      const response = await apiFetch(`/api/chats/${chatId}/sandboxes`, {
+      const persistedChatId = chatId ?? (await onPersist?.())?.id;
+      if (!persistedChatId) throw new Error("Could not create chat");
+      if (!isCurrent()) return;
+      const response = await apiFetch(`/api/chats/${persistedChatId}/sandboxes`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(launch),
@@ -92,17 +115,22 @@ export function SandboxForm({
         throw new Error(body?.detail?.[0]?.msg ?? body?.detail ?? "Could not create sandbox");
       }
       const sandbox: { id: string } = await response.json();
-      onOpenChange(false);
-      onCreated(sandbox.id);
+      if (!isCurrent()) return;
+      changeOpen(false);
+      onCreated(sandbox.id, persistedChatId);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not create sandbox");
     } finally {
+      creatingRef.current = false;
       setCreating(false);
     }
   };
 
   const changeOpen = (nextOpen: boolean) => {
-    if (!nextOpen) setSuggesting(true);
+    if (!nextOpen) {
+      setSuggesting(true);
+      setError("");
+    }
     onOpenChange(nextOpen);
   };
 

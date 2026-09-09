@@ -53,8 +53,13 @@ import {
   resolveSpaceColor,
 } from "@/lib/space-colors";
 import { cn } from "@/lib/utils";
-import { ChatView } from "@/components/chat";
-import { newChatRequest } from "@/components/new-chat-state";
+import { ChatView, NewChatView } from "@/components/chat";
+import {
+  createChatPersister,
+  startsFreshDraft,
+  type NewChatHandoff,
+  type NewChatRequest,
+} from "@/components/new-chat-state";
 import { SandboxForm } from "@/components/sandbox-form";
 import { SpaceColorPicker } from "@/components/space-color-picker";
 import { TerminalPane, type SandboxWorkspace } from "@/components/terminal-pane";
@@ -229,6 +234,26 @@ export function AppShell() {
     requiresAttention: false,
     spaceId: null,
   });
+  const [newChatGeneration, setNewChatGeneration] = useState(0);
+  const newChatGenerationRef = useRef(0);
+  const previousPath = useRef<string | null>(null);
+  const draftPersister = useRef<
+    ((spaceId: string | null) => Promise<Chat>) | null
+  >(null);
+  const [chatHandoff, setChatHandoff] = useState<{
+    chat: Chat;
+    startup: NewChatHandoff;
+  } | null>(null);
+
+  useEffect(() => {
+    if (startsFreshDraft(previousPath.current, pathname)) {
+      draftPersister.current = null;
+      setChatHandoff(null);
+      newChatGenerationRef.current += 1;
+      setNewChatGeneration(newChatGenerationRef.current);
+    }
+    previousPath.current = pathname;
+  }, [pathname]);
 
   const disconnectGitHub = async () => {
     if (!window.confirm("Disconnect GitHub? Active sandboxes will lose repository access.")) {
@@ -320,10 +345,33 @@ export function AppShell() {
     selection?.kind === "space"
       ? (spaces?.find((s) => s.id === selection.id) ?? null)
       : null;
-  const selectedChat =
+  const routedChat =
     selection?.kind === "chat"
       ? (chats?.find((c) => c.id === selection.id) ?? null)
       : null;
+  const activeChatHandoff =
+    chatHandoff &&
+    (selection === null ||
+      (selection.kind === "chat" && selection.id === chatHandoff.chat.id))
+      ? chatHandoff
+      : null;
+  const selectedChat = activeChatHandoff?.chat ?? routedChat;
+
+  useEffect(() => {
+    if (
+      !chatHandoff ||
+      pathname !== `/chats/${encodeURIComponent(chatHandoff.chat.id)}`
+    ) {
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      setChatHandoff((current) =>
+        current?.chat.id === chatHandoff.chat.id ? null : current,
+      );
+    });
+    return () => window.clearTimeout(timeout);
+  }, [chatHandoff, pathname]);
+
   const selectedWarning = spaceWarnings.find(
     (warning) =>
       warning.space_id === (selectedSpace?.id ?? selectedChat?.space_id),
@@ -392,17 +440,53 @@ export function AppShell() {
     refreshingChats.current = false;
   }, []);
 
-  const createChat = async () => {
-    const res = await apiFetch("/api/chats", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(newChatRequest()),
-    });
-    if (!res.ok) return;
-    const chat: Chat = await res.json();
-    setChats((prev) => [chat, ...(prev ?? [])]);
-    router.push(`/chats/${encodeURIComponent(chat.id)}`);
+  const persistDraftChat = useCallback((spaceId: string | null) => {
+    if (!draftPersister.current) {
+      draftPersister.current = createChatPersister(
+        async (request: NewChatRequest) => {
+          const response = await apiFetch("/api/chats", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(request),
+          });
+          if (!response.ok) {
+            const body = await response.json().catch(() => ({}));
+            throw new Error(body.detail ?? "Could not create chat");
+          }
+          const chat: Chat = await response.json();
+          setChats((current) => [
+            chat,
+            ...(current ?? []).filter((item) => item.id !== chat.id),
+          ]);
+          return chat;
+        },
+      );
+    }
+    return draftPersister.current(spaceId);
+  }, []);
+
+  const openNewChat = () => {
+    draftPersister.current = null;
+    setChatHandoff(null);
+    newChatGenerationRef.current += 1;
+    setNewChatGeneration(newChatGenerationRef.current);
+    if (pathname !== "/") router.push("/");
   };
+
+  const openPersistedChat = useCallback(
+    (chatId: string) => {
+      router.replace(`/chats/${encodeURIComponent(chatId)}`);
+    },
+    [router],
+  );
+
+  const handoffPersistedChat = useCallback(
+    (chat: Chat, startup: NewChatHandoff) => {
+      setChatHandoff({ chat, startup });
+      router.replace(`/chats/${encodeURIComponent(chat.id)}`);
+    },
+    [router],
+  );
 
   const setChatArchived = async (chat: Chat, archived: boolean) => {
     const res = await apiFetch(`/api/chats/${chat.id}/archive`, {
@@ -739,7 +823,7 @@ export function AppShell() {
                 <SidebarGroupAction
                   title="New chat"
                   aria-label="New chat"
-                  onClick={createChat}
+                  onClick={openNewChat}
                 >
                   <PlusIcon />
                 </SidebarGroupAction>
@@ -893,7 +977,11 @@ export function AppShell() {
           <Separator orientation="vertical" className="h-4" />
           <span className="min-w-0 flex-1 truncate text-sm font-medium">
             {selectedSpace?.name ??
-              (selectedChat ? chatSidebarText(selectedChat).label : "hatchery")}
+              (selectedChat
+                ? chatSidebarText(selectedChat).label
+                : selection
+                  ? "hatchery"
+                  : "New chat")}
           </span>
         </header>
         {selectedChat && !failed ? (
@@ -902,6 +990,11 @@ export function AppShell() {
             chat={selectedChat}
             spaces={spaces ?? []}
             warning={selectedWarning?.warning}
+            handoff={
+              activeChatHandoff?.chat.id === selectedChat.id
+                ? activeChatHandoff.startup
+                : undefined
+            }
             onChatChanged={refreshChats}
             onChatUpdated={updateChat}
             onSpaceChange={(spaceId) =>
@@ -928,7 +1021,7 @@ export function AppShell() {
             }
           />
         ) : (
-          <div className="flex-1 overflow-y-auto p-6 md:p-10">
+          <div className="flex flex-1 overflow-y-auto p-6 md:p-10">
             {failed ? (
               <Empty>
                 <EmptyHeader>
@@ -962,14 +1055,18 @@ export function AppShell() {
                 </EmptyHeader>
               </Empty>
             ) : (
-              <Empty>
-                <EmptyHeader>
-                  <EmptyTitle>Nothing selected</EmptyTitle>
-                  <EmptyDescription>
-                    Pick a space or a chat from the sidebar.
-                  </EmptyDescription>
-                </EmptyHeader>
-              </Empty>
+              <NewChatView
+                key={newChatGeneration}
+                spaces={spaces ?? []}
+                onPersist={persistDraftChat}
+                onHandoff={handoffPersistedChat}
+                onOpenChat={openPersistedChat}
+                onCreateSpace={() => setAddingSpace(true)}
+                isCurrent={() =>
+                  window.location.pathname === "/" &&
+                  newChatGenerationRef.current === newChatGeneration
+                }
+              />
             )}
           </div>
         )}
@@ -1611,6 +1708,7 @@ function LiveChat({
   chat,
   spaces,
   warning,
+  handoff,
   onChatChanged,
   onChatUpdated,
   onSpaceChange,
@@ -1621,6 +1719,7 @@ function LiveChat({
   chat: Chat;
   spaces: Space[];
   warning?: string;
+  handoff?: NewChatHandoff;
   onChatChanged: () => void;
   onChatUpdated: (chat: Chat) => void;
   onSpaceChange: (spaceId: string) => void | Promise<void>;
@@ -1628,9 +1727,10 @@ function LiveChat({
   onCreateSpace: () => void;
   onSpaceAssigned: (spaceId: string) => void;
 }) {
+  const [startup] = useState(handoff);
   const [initialMessages, setInitialMessages] = useState<
     ChatUIMessage[] | null
-  >(null);
+  >(startup?.loadMessages === false ? [] : null);
   const [sandboxes, setSandboxes] = useState<SandboxWorkspace[]>([]);
   const [messageRevision, setMessageRevision] = useState(0);
   const [streamGeneration, setStreamGeneration] = useState(0);
@@ -1661,13 +1761,15 @@ function LiveChat({
   }, [chat.id]);
 
   useEffect(() => {
-    apiFetch(`/api/chats/${chat.id}/messages`)
-      .then((res) => (res.ok ? res.json() : []))
-      .then(setInitialMessages)
-      .catch(() => setInitialMessages([]));
+    if (startup?.loadMessages !== false) {
+      apiFetch(`/api/chats/${chat.id}/messages`)
+        .then((res) => (res.ok ? res.json() : []))
+        .then(setInitialMessages)
+        .catch(() => setInitialMessages([]));
+    }
     const frame = requestAnimationFrame(loadSandboxes);
     return () => cancelAnimationFrame(frame);
-  }, [chat.id, loadSandboxes]);
+  }, [chat.id, loadSandboxes, startup]);
 
   useEffect(() => {
     const source = new EventSource(
@@ -1748,6 +1850,7 @@ function LiveChat({
             traceId={chat.telemetry_span?.trace_id ?? null}
             archived={chat.archived_at !== null}
             attentionReason={chat.attention_reason}
+            handoff={startup}
             onMessagesChange={onMessagesChange}
             onSeen={onChatUpdated}
             onSpaceChange={onSpaceChange}

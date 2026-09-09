@@ -199,6 +199,31 @@ async def test_claim_is_single_owner_under_concurrency():
     assert sum(1 for _, created in results if created) == 1
 
 
+async def test_create_once_is_retry_safe_under_concurrency():
+    results = await asyncio.gather(
+        *(
+            chats.create_once(
+                "chat_123456789abc", None, "new chat", user_id="user_1"
+            )
+            for _ in range(20)
+        )
+    )
+
+    assert {chat.id for chat in results} == {"chat_123456789abc"}
+    assert [chat.id for chat in await chats.list_all()] == ["chat_123456789abc"]
+
+
+async def test_create_once_rejects_conflicting_retry():
+    await chats.create_once(
+        "chat_123456789abc", None, "new chat", user_id="user_1"
+    )
+
+    with pytest.raises(ValueError, match="conflicts"):
+        await chats.create_once(
+            "chat_123456789abc", "space_other", "new chat", user_id="user_1"
+        )
+
+
 async def test_create_get_list():
     chat = await chats.create(
         None, "manual chat", user_id="user_1", author_display_name="Ada"
