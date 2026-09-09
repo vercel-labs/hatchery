@@ -74,6 +74,41 @@ class Job(pydantic.BaseModel):
     created_at: str
 
 
+class ScratchpadActor(pydantic.BaseModel):
+    kind: typing.Literal["system", "user", "dispatcher"]
+    id: str | None = None
+    name: str | None = None
+
+
+class ScratchpadVersion(pydantic.BaseModel):
+    version: int
+    content: str
+    actor: ScratchpadActor
+    created_at: str
+
+
+class ScratchpadVersionSummary(pydantic.BaseModel):
+    version: int
+    actor: ScratchpadActor
+    created_at: str
+
+
+class ScratchpadDiffLine(pydantic.BaseModel):
+    kind: typing.Literal["header", "context", "add", "remove"]
+    text: str
+    old_line: int | None = None
+    new_line: int | None = None
+
+
+class ScratchpadView(pydantic.BaseModel):
+    snapshot: ScratchpadVersion
+    head_version: int
+    last_read_version: int
+    unread: bool
+    diff: list[ScratchpadDiffLine] = []
+    diff_truncated: bool = False
+
+
 class Chat(pydantic.BaseModel):
     id: str  # "chat_<hex>"
     user_id: str | None = None

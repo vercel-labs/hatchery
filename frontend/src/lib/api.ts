@@ -70,6 +70,37 @@ export type Space = {
   created_at: string;
 };
 
+export type ScratchpadActor = {
+  kind: "system" | "user" | "dispatcher";
+  id: string | null;
+  name: string | null;
+};
+
+export type ScratchpadVersion = {
+  version: number;
+  content: string;
+  actor: ScratchpadActor;
+  created_at: string;
+};
+
+export type ScratchpadVersionSummary = Omit<ScratchpadVersion, "content">;
+
+export type ScratchpadDiffLine = {
+  kind: "header" | "context" | "add" | "remove";
+  text: string;
+  old_line: number | null;
+  new_line: number | null;
+};
+
+export type ScratchpadView = {
+  snapshot: ScratchpadVersion;
+  head_version: number;
+  last_read_version: number;
+  unread: boolean;
+  diff: ScratchpadDiffLine[];
+  diff_truncated: boolean;
+};
+
 export type SpaceWarning = {
   space_id: string;
   repo: string;

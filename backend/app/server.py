@@ -42,7 +42,7 @@ from agent import classifier, durable, sandbox, stream as agent_stream, telemetr
 import worker
 from worker import protocol as worker_protocol
 from channels import github, slack
-from store import chats, events, jobs, spaces, turns
+from store import chats, events, jobs, scratchpad, spaces, turns
 
 log = logging.getLogger("app")
 _background: set[asyncio.Task] = set()
@@ -457,6 +457,85 @@ class SpaceWarning(pydantic.BaseModel):
     space_id: str
     repo: str
     warning: str
+
+
+class ScratchpadWriteRequest(pydantic.BaseModel):
+    content: str = pydantic.Field(max_length=scratchpad.MAX_CONTENT_LENGTH)
+    expected_version: int = pydantic.Field(ge=0)
+
+
+class ScratchpadReadRequest(pydantic.BaseModel):
+    version: int = pydantic.Field(ge=0)
+
+
+async def _scratchpad_view(version: int | None = None) -> models.ScratchpadView:
+    selected, head_version, last_read_version = await scratchpad.snapshot(version)
+    if selected is None:
+        raise fastapi.HTTPException(404, "unknown scratchpad version")
+    unread = selected.version == head_version and last_read_version < head_version
+    diff = []
+    diff_truncated = False
+    if unread:
+        baseline = await scratchpad.get(last_read_version)
+        assert baseline is not None
+        diff, diff_truncated = scratchpad.structured_diff(
+            baseline.content, selected.content
+        )
+    return models.ScratchpadView(
+        snapshot=selected,
+        head_version=head_version,
+        last_read_version=last_read_version,
+        unread=unread,
+        diff=diff,
+        diff_truncated=diff_truncated,
+    )
+
+
+@app.get("/api/scratchpad")
+async def get_scratchpad(version: int | None = None) -> models.ScratchpadView:
+    if version is not None and version < 0:
+        raise fastapi.HTTPException(422, "version must not be negative")
+    return await _scratchpad_view(version)
+
+
+@app.get("/api/scratchpad/versions")
+async def list_scratchpad_versions(
+    limit: int = fastapi.Query(default=50, ge=1, le=scratchpad.MAX_HISTORY_LIMIT),
+) -> list[models.ScratchpadVersionSummary]:
+    return await scratchpad.list_versions(limit)
+
+
+@app.put("/api/scratchpad", response_model=None)
+async def write_scratchpad(
+    body: ScratchpadWriteRequest, request: fastapi.Request
+) -> models.ScratchpadView | fastapi.responses.JSONResponse:
+    user = request.state.user
+    actor = models.ScratchpadActor(
+        kind="user", id=user["id"], name=_user_display_name(user)
+    )
+    try:
+        await scratchpad.write(
+            body.content, body.expected_version, actor, mark_read=True
+        )
+    except scratchpad.VersionConflict:
+        current = await _scratchpad_view()
+        return fastapi.responses.JSONResponse(
+            status_code=409,
+            content={
+                "detail": "scratchpad changed",
+                "current": current.model_dump(mode="json"),
+            },
+        )
+    return await _scratchpad_view()
+
+
+@app.post("/api/scratchpad/read")
+async def mark_scratchpad_read(body: ScratchpadReadRequest) -> models.ScratchpadView:
+    try:
+        await scratchpad.mark_read(body.version)
+    except ValueError as error:
+        raise fastapi.HTTPException(404, str(error)) from error
+    return await _scratchpad_view(body.version)
 
 
 @app.get("/api/spaces")

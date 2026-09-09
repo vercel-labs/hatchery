@@ -14,7 +14,7 @@ import ai.experimental_telemetry
 import channels
 import models
 from app import server
-from store import chats, events
+from store import chats, events, scratchpad
 
 
 def client() -> httpx.AsyncClient:
@@ -109,6 +109,99 @@ async def test_chat_routes_hide_another_users_chat(monkeypatch):
 
     assert listed.json() == []
     assert direct.status_code == 404
+
+
+async def test_scratchpad_routes_keep_history_and_mark_user_save_read():
+    async with client() as c:
+        initial = await c.get("/api/scratchpad")
+        saved = await c.put(
+            "/api/scratchpad",
+            headers={"origin": "http://test"},
+            json={"content": "# Shared", "expected_version": 0},
+        )
+        history = await c.get("/api/scratchpad/versions")
+        old = await c.get("/api/scratchpad?version=0")
+
+    assert initial.status_code == 200
+    assert initial.json()["snapshot"]["version"] == 0
+    assert saved.status_code == 200
+    assert saved.json()["snapshot"]["actor"] == {
+        "kind": "user",
+        "id": "user_test",
+        "name": "test@vercel.com",
+    }
+    assert saved.json()["last_read_version"] == 1
+    assert saved.json()["unread"] is False
+    assert [item["version"] for item in history.json()] == [1, 0]
+    assert old.json()["snapshot"]["content"] == ""
+
+
+async def test_scratchpad_conflict_preserves_draft_and_returns_current_diff():
+    actor = models.ScratchpadActor(kind="dispatcher", id="chat_1")
+    await scratchpad.write("agent change", 0, actor)
+
+    async with client() as c:
+        response = await c.put(
+            "/api/scratchpad",
+            headers={"origin": "http://test"},
+            json={"content": "user draft", "expected_version": 0},
+        )
+
+    assert response.status_code == 409
+    current = response.json()["current"]
+    assert current["snapshot"]["content"] == "agent change"
+    assert current["unread"] is True
+    assert {line["kind"] for line in current["diff"]} >= {"header", "add"}
+    assert (await scratchpad.get()).content == "agent change"
+
+
+async def test_mark_read_marks_exact_version_without_regressing_or_marking_newer_head():
+    actor = models.ScratchpadActor(kind="dispatcher", id="chat_1")
+    await scratchpad.write("one", 0, actor)
+    await scratchpad.write("two", 1, actor)
+
+    async with client() as c:
+        read_two = await c.post(
+            "/api/scratchpad/read",
+            headers={"origin": "http://test"},
+            json={"version": 2},
+        )
+        await scratchpad.write("three", 2, actor)
+        read_old = await c.post(
+            "/api/scratchpad/read",
+            headers={"origin": "http://test"},
+            json={"version": 1},
+        )
+        current = await c.get("/api/scratchpad")
+
+    assert read_two.json()["last_read_version"] == 2
+    assert read_old.json()["last_read_version"] == 2
+    assert current.json()["head_version"] == 3
+    assert current.json()["last_read_version"] == 2
+    assert current.json()["unread"] is True
+
+
+async def test_scratchpad_write_validates_body_and_origin():
+    async with client() as c:
+        invalid_version = await c.put(
+            "/api/scratchpad",
+            headers={"origin": "http://test"},
+            json={"content": "x", "expected_version": -1},
+        )
+        oversized = await c.put(
+            "/api/scratchpad",
+            headers={"origin": "http://test"},
+            json={"content": "x" * (scratchpad.MAX_CONTENT_LENGTH + 1), "expected_version": 0},
+        )
+        invalid_origin = await c.put(
+            "/api/scratchpad",
+            headers={"origin": "https://evil.example"},
+            json={"content": "x", "expected_version": 0},
+        )
+
+    assert invalid_version.status_code == 422
+    assert oversized.status_code == 422
+    assert invalid_origin.status_code == 403
 
 
 async def test_github_connection_routes(monkeypatch):

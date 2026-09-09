@@ -69,9 +69,16 @@ async def prepare_turn(turn: TurnInput) -> PreparedTurn:
                         None,
                     )
             space = await server._space_for_chat(turn.chat_id)
+            from store import scratchpad
+
+            global_scratchpad = await scratchpad.get()
             return PreparedTurn(
                 history=[
-                    ai.system_message(dispatcher.system_prompt(space, linked=linked)),
+                    ai.system_message(
+                        dispatcher.system_prompt(
+                            space, linked=linked, scratchpad=global_scratchpad
+                        )
+                    ),
                     *stored,
                 ],
                 linked=linked,
@@ -239,6 +246,39 @@ async def start_thread_step(
     )
 
 
+@workflow.step
+async def read_scratchpad_step() -> dict[str, typing.Any]:
+    from store import scratchpad
+
+    current = await scratchpad.get()
+    assert current is not None
+    return current.model_dump(mode="json")
+
+
+@workflow.step(max_retries=0)
+async def edit_scratchpad_step(
+    chat_id: str, content: str, expected_version: int
+) -> dict[str, typing.Any]:
+    import models
+    from store import scratchpad
+
+    try:
+        saved = await scratchpad.write(
+            content,
+            expected_version,
+            models.ScratchpadActor(kind="dispatcher", id=chat_id, name="dispatcher"),
+        )
+    except scratchpad.VersionConflict:
+        current = await scratchpad.get()
+        assert current is not None
+        return {
+            "status": "conflict",
+            "expected_version": expected_version,
+            "current": current.model_dump(mode="json"),
+        }
+    return {"status": "saved", **saved.model_dump(mode="json")}
+
+
 current_agent: contextvars.ContextVar["DurableDispatcher"] = contextvars.ContextVar(
     "current_agent"
 )
@@ -352,6 +392,27 @@ async def start_thread(
     return result
 
 
+@ai.tool
+async def read_scratchpad() -> dict[str, typing.Any]:
+    """Read the latest complete global scratchpad and its version."""
+    return await read_scratchpad_step()
+
+
+@ai.tool
+async def edit_scratchpad(
+    content: typing.Annotated[str, pydantic.Field(max_length=32_000)],
+    expected_version: typing.Annotated[int, pydantic.Field(ge=0)],
+) -> dict[str, typing.Any]:
+    """Exactly replace the global scratchpad if expected_version is still current."""
+    if len(content) > 32_000:
+        return {"status": "invalid", "error": "content exceeds 32000 characters"}
+    if expected_version < 0:
+        return {"status": "invalid", "error": "expected_version must not be negative"}
+    return await edit_scratchpad_step(
+        current_agent.get().chat_id, content, expected_version
+    )
+
+
 BASE_TOOLS = [
     create_sandbox,
     list_sandboxes,
@@ -361,6 +422,8 @@ BASE_TOOLS = [
     require_attention,
     find_channels,
     find_people,
+    read_scratchpad,
+    edit_scratchpad,
 ]
 
 

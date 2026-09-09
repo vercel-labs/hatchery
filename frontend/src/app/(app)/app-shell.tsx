@@ -19,6 +19,7 @@ import {
   PencilIcon,
   PlusIcon,
   MessageSquareIcon,
+  StickyNoteIcon,
   TerminalIcon,
   TriangleIcon,
   Trash2Icon,
@@ -61,6 +62,7 @@ import {
   type NewChatRequest,
 } from "@/components/new-chat-state";
 import { SandboxForm } from "@/components/sandbox-form";
+import { ScratchpadPane } from "@/components/scratchpad";
 import { SpaceColorPicker } from "@/components/space-color-picker";
 import { TerminalPane, type SandboxWorkspace } from "@/components/terminal-pane";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -130,6 +132,7 @@ import {
 } from "@/components/ui/sidebar";
 
 type Selection =
+  | { kind: "scratchpad" }
   | { kind: "space"; id: string }
   | { kind: "chat"; id: string }
   | null;
@@ -211,11 +214,14 @@ export function AppShell() {
   const router = useRouter();
   const spaceMatch = pathname.match(/^\/spaces\/([^/]+)$/);
   const chatMatch = pathname.match(/^\/chats\/([^/]+)$/);
-  const selection: Selection = spaceMatch
-    ? { kind: "space", id: decodeURIComponent(spaceMatch[1]) }
-    : chatMatch
-      ? { kind: "chat", id: decodeURIComponent(chatMatch[1]) }
-      : null;
+  const selection: Selection =
+    pathname === "/scratchpad"
+      ? { kind: "scratchpad" }
+      : spaceMatch
+        ? { kind: "space", id: decodeURIComponent(spaceMatch[1]) }
+        : chatMatch
+          ? { kind: "chat", id: decodeURIComponent(chatMatch[1]) }
+          : null;
   const [user, setUser] = useState<User | null | undefined>(undefined);
   const [spaces, setSpaces] = useState<Space[] | null>(null);
   const [chats, setChats] = useState<Chat[] | null>(null);
@@ -687,6 +693,19 @@ export function AppShell() {
                   <PlusIcon />
                 </SidebarGroupAction>
                 <SidebarGroupContent>
+                  <SidebarMenu>
+                    <SidebarMenuItem>
+                      <SidebarMenuButton
+                        isActive={selection?.kind === "scratchpad"}
+                        aria-current={selection?.kind === "scratchpad" ? "page" : undefined}
+                        render={<Link href="/scratchpad" />}
+                        tooltip="Global scratchpad"
+                      >
+                        <StickyNoteIcon />
+                        <span>Global scratchpad</span>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  </SidebarMenu>
                   {addingSpace && (
                     <form className="flex flex-col gap-2 px-2 pb-2" onSubmit={createSpace}>
                       <div className="flex gap-1">
@@ -976,12 +995,14 @@ export function AppShell() {
           <SidebarTrigger />
           <Separator orientation="vertical" className="h-4" />
           <span className="min-w-0 flex-1 truncate text-sm font-medium">
-            {selectedSpace?.name ??
-              (selectedChat
-                ? chatSidebarText(selectedChat).label
-                : selection
-                  ? "hatchery"
-                  : "New chat")}
+            {selection?.kind === "scratchpad"
+              ? "Global scratchpad"
+              : selectedSpace?.name ??
+                (selectedChat
+                  ? chatSidebarText(selectedChat).label
+                  : selection
+                    ? "hatchery"
+                    : "New chat")}
           </span>
         </header>
         {selectedChat && !failed ? (
@@ -1032,6 +1053,8 @@ export function AppShell() {
                   </EmptyDescription>
                 </EmptyHeader>
               </Empty>
+            ) : selection?.kind === "scratchpad" ? (
+              <ScratchpadPane />
             ) : selectedSpace ? (
               <SpacePane
                 key={selectedSpace.id}

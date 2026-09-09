@@ -45,7 +45,9 @@ async def test_durable_tools_keep_effects_non_retriable():
     assert durable.llm_step.max_retries > 0
     assert durable.list_sandboxes_step.max_retries > 0
     assert durable.check_subagent_step.max_retries > 0
+    assert durable.read_scratchpad_step.max_retries > 0
     assert durable.create_sandbox_step.max_retries == 0
+    assert durable.edit_scratchpad_step.max_retries == 0
     assert durable.create_subagent_step.max_retries == 0
     assert durable.message_subagent_step.max_retries == 0
     assert durable.require_attention_step.max_retries == 0
@@ -209,6 +211,50 @@ async def test_durable_require_attention_uses_trusted_chat_id(monkeypatch):
     properties = durable.require_attention.tool.spec.params["properties"]
     assert set(properties) == {"reason"}
     assert properties["reason"]["enum"] == ["result_available", "blocked"]
+
+
+async def test_scratchpad_steps_use_cas_and_do_not_mark_dispatcher_edit_read():
+    from store import scratchpad
+
+    assert (await durable.read_scratchpad_step.func())["version"] == 0
+    saved = await durable.edit_scratchpad_step.func("chat_trusted", "dispatcher note", 0)
+    conflict = await durable.edit_scratchpad_step.func("chat_trusted", "stale", 0)
+
+    assert saved["status"] == "saved"
+    assert saved["actor"] == {
+        "kind": "dispatcher",
+        "id": "chat_trusted",
+        "name": "dispatcher",
+    }
+    assert conflict["status"] == "conflict"
+    assert conflict["current"]["content"] == "dispatcher note"
+    assert await scratchpad.state() == (1, 0)
+
+
+async def test_edit_scratchpad_tool_uses_trusted_chat_id(monkeypatch):
+    calls = []
+
+    async def step(*args):
+        calls.append(args)
+        return {"status": "saved"}
+
+    class Writer:
+        async def write(self, value):
+            pass
+
+    monkeypatch.setattr(durable, "edit_scratchpad_step", step)
+    token = durable.current_agent.set(durable.DurableDispatcher("chat_trusted", Writer()))
+    try:
+        assert await durable.edit_scratchpad.fn("note", 4) == {"status": "saved"}
+    finally:
+        durable.current_agent.reset(token)
+
+    assert calls == [("chat_trusted", "note", 4)]
+    properties = durable.edit_scratchpad.tool.spec.params["properties"]
+    assert set(properties) == {"content", "expected_version"}
+    assert (await durable.edit_scratchpad.fn("note", -1))["status"] == "invalid"
+    assert (await durable.edit_scratchpad.fn("x" * 32_001, 4))["status"] == "invalid"
+    assert calls == [("chat_trusted", "note", 4)]
 
 
 async def test_create_sandbox_tool_forwards_size(monkeypatch):
