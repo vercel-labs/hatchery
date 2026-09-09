@@ -116,7 +116,6 @@ import {
   SidebarMenuItem,
   SidebarMenuSkeleton,
   SidebarProvider,
-  SidebarSeparator,
   SidebarTrigger,
 } from "@/components/ui/sidebar";
 
@@ -476,7 +475,7 @@ export function AppShell() {
   return (
     <SidebarProvider className="h-svh overflow-hidden">
       <Sidebar>
-        <SidebarHeader className="h-14 p-2">
+        <SidebarHeader className="h-14 border-b border-sidebar-border p-2">
           <DropdownMenu>
             <DropdownMenuTrigger
               render={
@@ -566,7 +565,6 @@ export function AppShell() {
             </DropdownMenuContent>
           </DropdownMenu>
         </SidebarHeader>
-        <SidebarSeparator />
 
         <SidebarContent>
           {archiveOpen ? (
