@@ -6,6 +6,30 @@ export type ChatSidebarText = {
   label: string;
 };
 
+export type ChatSidebarFilters = {
+  requiresAttention: boolean;
+  spaceId: string | null;
+};
+
+export function filterSidebarChats(
+  chats: Chat[],
+  filters: ChatSidebarFilters,
+): Chat[] {
+  return chats.filter(
+    (chat) =>
+      chat.archived_at === null &&
+      (!filters.requiresAttention || chat.attention_reason !== null) &&
+      (filters.spaceId === null || chat.space_id === filters.spaceId),
+  );
+}
+
+export function selectSidebarSpace(
+  filters: ChatSidebarFilters,
+  spaceId: string | null,
+): ChatSidebarFilters {
+  return { ...filters, spaceId };
+}
+
 export function chatAttentionLabel(chat: Chat): string | null {
   if (chat.attention_reason === "result_available") return "Result available";
   if (chat.attention_reason === "blocked") return "Blocked";

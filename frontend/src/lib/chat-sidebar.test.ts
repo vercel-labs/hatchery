@@ -2,7 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { Chat } from "./api.ts";
-import { chatAttentionLabel, chatSidebarText } from "./chat-sidebar.ts";
+import {
+  chatAttentionLabel,
+  chatSidebarText,
+  filterSidebarChats,
+  selectSidebarSpace,
+  type ChatSidebarFilters,
+} from "./chat-sidebar.ts";
 
 function chat(overrides: Partial<Chat> = {}): Chat {
   return {
@@ -22,6 +28,49 @@ function chat(overrides: Partial<Chat> = {}): Chat {
     ...overrides,
   };
 }
+
+test("filters active chats by attention and one space", () => {
+  const chats = [
+    chat({ id: "matching", space_id: "space_1", attention_reason: "blocked" }),
+    chat({ id: "other-space", space_id: "space_2", attention_reason: "blocked" }),
+    chat({ id: "no-attention", space_id: "space_1" }),
+    chat({
+      id: "archived",
+      space_id: "space_1",
+      attention_reason: "result_available",
+      archived_at: "2026-09-05T00:00:00Z",
+    }),
+  ];
+
+  assert.deepEqual(
+    filterSidebarChats(chats, { requiresAttention: true, spaceId: "space_1" }).map(
+      ({ id }) => id,
+    ),
+    ["matching"],
+  );
+  assert.deepEqual(
+    filterSidebarChats(chats, { requiresAttention: false, spaceId: null }).map(
+      ({ id }) => id,
+    ),
+    ["matching", "other-space", "no-attention"],
+  );
+});
+
+test("selecting and removing a space filter keeps other filters active", () => {
+  const filters: ChatSidebarFilters = {
+    requiresAttention: true,
+    spaceId: "space_1",
+  };
+
+  assert.deepEqual(selectSidebarSpace(filters, "space_2"), {
+    requiresAttention: true,
+    spaceId: "space_2",
+  });
+  assert.deepEqual(selectSidebarSpace(filters, null), {
+    requiresAttention: true,
+    spaceId: null,
+  });
+});
 
 test("labels persisted attention reasons", () => {
   assert.equal(
