@@ -1656,6 +1656,7 @@ function LiveChat({
             spaceId={chat.space_id}
             messageRevision={messageRevision}
             streamGeneration={streamGeneration}
+            traceId={chat.telemetry_span?.trace_id ?? null}
             archived={chat.archived_at !== null}
             attentionReason={chat.attention_reason}
             onMessagesChange={onMessagesChange}

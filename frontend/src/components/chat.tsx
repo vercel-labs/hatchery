@@ -31,6 +31,7 @@ export function ChatView({
   spaceId,
   messageRevision,
   streamGeneration,
+  traceId,
   archived,
   attentionReason,
   onMessagesChange,
@@ -43,6 +44,7 @@ export function ChatView({
   spaceId: string | null;
   messageRevision: number;
   streamGeneration: number;
+  traceId: string | null;
   archived: boolean;
   attentionReason: Chat["attention_reason"];
   onMessagesChange?: (messages: ChatUIMessage[]) => void;
@@ -226,6 +228,7 @@ export function ChatView({
         ) : (
           <PromptForm
             isBusy={isStreaming}
+            traceId={traceId}
             onSubmit={({ text }) => sendMessage({ text })}
             onStop={() => void stop()}
           />
