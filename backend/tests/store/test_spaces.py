@@ -33,7 +33,16 @@ async def test_create_and_delete():
     assert created.id.startswith("spc_")
     assert created.name == "new space"
     assert created.color in spaces.ACCENT_COLORS
-    assert (await spaces.create("green space", "green")).color == "green"
+    assert (await spaces.create("green space", "green-900")).color == "green-900"
+    assert spaces.ACCENT_COLORS == (
+        "blue-700",
+        "red-700",
+        "amber-700",
+        "green-700",
+        "teal-700",
+        "purple-700",
+        "pink-700",
+    )
     assert await spaces.delete(created.id)
     assert await spaces.get(created.id) is None
     assert not await spaces.delete(created.id)

@@ -37,6 +37,9 @@
   --color-input: var(--input);
   --color-border: var(--border);
   --color-destructive: var(--destructive);
+  --color-status-green-700: var(--status-green-700);
+  --color-status-amber-700: var(--status-amber-700);
+  --color-status-red-700: var(--status-red-700);
   --color-accent-foreground: var(--accent-foreground);
   --color-accent: var(--accent);
   --color-muted-foreground: var(--muted-foreground);
@@ -73,7 +76,7 @@
   --muted-foreground: oklch(0.556 0 0);
   --accent: oklch(0.97 0 0);
   --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
+  --destructive: var(--geist-red-900);
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
   --ring: oklch(0.708 0 0);
@@ -91,13 +94,34 @@
   --sidebar-accent-foreground: oklch(0.205 0 0);
   --sidebar-border: oklch(0.922 0 0);
   --sidebar-ring: oklch(0.708 0 0);
-  --space-accent-blue: oklch(57.61% 0.2508 258.23);
-  --space-accent-red: oklch(62.56% 0.2524 23.03);
-  --space-accent-amber: oklch(81.87% 0.1969 76.46);
-  --space-accent-green: oklch(64.58% 0.1746 147.27);
-  --space-accent-teal: oklch(64.92% 0.1572 181.95);
-  --space-accent-purple: oklch(55.5% 0.3008 306.12);
-  --space-accent-pink: oklch(63.52% 0.238 1.01);
+
+  /* Geist color scales: https://vercel.com/geist/colors.md */
+  --geist-blue-700: oklch(57.61% 0.2508 258.23);
+  --geist-blue-900: oklch(53.18% 0.2399 256.99);
+  --geist-blue-1000: oklch(26.67% 0.1099 254.34);
+  --geist-red-700: oklch(62.56% 0.2524 23.03);
+  --geist-red-900: oklch(54.99% 0.232 25.29);
+  --geist-red-1000: oklch(24.8% 0.1041 18.86);
+  --geist-amber-100: oklch(97.48% 0.0331 85.79);
+  --geist-amber-700: oklch(81.87% 0.1969 76.46);
+  --geist-amber-900: oklch(52.79% 0.1496 54.65);
+  --geist-amber-1000: oklch(30.83% 0.099 45.48);
+  --geist-green-700: oklch(64.58% 0.1746 147.27);
+  --geist-green-900: oklch(51.75% 0.1453 147.65);
+  --geist-green-1000: oklch(29.15% 0.1197 147.38);
+  --geist-teal-700: oklch(64.92% 0.1572 181.95);
+  --geist-teal-900: oklch(52.08% 0.1251 182.93);
+  --geist-teal-1000: oklch(32.11% 0.0788 179.82);
+  --geist-purple-700: oklch(55.5% 0.3008 306.12);
+  --geist-purple-900: oklch(47.18% 0.2579 304);
+  --geist-purple-1000: oklch(23.96% 0.13 305.66);
+  --geist-pink-700: oklch(63.52% 0.238 1.01);
+  --geist-pink-900: oklch(53.5% 0.2058 2.84);
+  --geist-pink-1000: oklch(26% 0.0977 359);
+  --status-green-700: var(--geist-green-700);
+  --status-amber-700: var(--geist-amber-700);
+  --status-red-700: var(--geist-red-700);
+  --markdown-mark: var(--geist-amber-100);
 }
 
 .dark {
@@ -115,7 +139,7 @@
   --muted-foreground: oklch(0.708 0 0);
   --accent: oklch(0.269 0 0);
   --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
+  --destructive: var(--geist-red-900);
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 15%);
   --ring: oklch(0.556 0 0);
@@ -126,19 +150,34 @@
   --chart-5: oklch(0.269 0 0);
   --sidebar: oklch(0.205 0 0);
   --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-primary: var(--primary);
+  --sidebar-primary-foreground: var(--primary-foreground);
   --sidebar-accent: oklch(0.269 0 0);
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.556 0 0);
-  --space-accent-blue: oklch(57.61% 0.2321 258.23);
-  --space-accent-red: oklch(62.56% 0.2234 23.03);
-  --space-accent-amber: oklch(81.87% 0.1969 76.46);
-  --space-accent-green: oklch(64.58% 0.199 147.27);
-  --space-accent-teal: oklch(64.92% 0.1403 181.95);
-  --space-accent-purple: oklch(55.5% 0.2186 306.12);
-  --space-accent-pink: oklch(63.52% 0.2346 1.01);
+  --geist-blue-700: oklch(57.61% 0.2321 258.23);
+  --geist-blue-900: oklch(71.7% 0.1648 250.794);
+  --geist-blue-1000: oklch(96.75% 0.0179 242.423);
+  --geist-red-700: oklch(62.56% 0.2234 23.03);
+  --geist-red-900: oklch(69.96% 0.2136 22.03);
+  --geist-red-1000: oklch(95.6% 0.0293 6.61);
+  --geist-amber-100: oklch(22.46% 0.0538 76.04);
+  --geist-amber-700: oklch(81.87% 0.1969 76.46);
+  --geist-amber-900: oklch(77.21% 0.1991 64.28);
+  --geist-amber-1000: oklch(96.7% 0.0418 84.59);
+  --geist-green-700: oklch(64.58% 0.199 147.27);
+  --geist-green-900: oklch(73.1% 0.2158 148.29);
+  --geist-green-1000: oklch(96.76% 0.056 154.18);
+  --geist-teal-700: oklch(64.92% 0.1403 181.95);
+  --geist-teal-900: oklch(74.56% 0.1765 182.8);
+  --geist-teal-1000: oklch(96.46% 0.056 180.29);
+  --geist-purple-700: oklch(55.5% 0.2186 306.12);
+  --geist-purple-900: oklch(69.87% 0.2037 309.51);
+  --geist-purple-1000: oklch(96.1% 0.0304 316.46);
+  --geist-pink-700: oklch(63.52% 0.2346 1.01);
+  --geist-pink-900: oklch(69.36% 0.2223 3.91);
+  --geist-pink-1000: oklch(95.74% 0.0326 350.08);
 }
 
 @layer base {

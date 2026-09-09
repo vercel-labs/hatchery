@@ -281,14 +281,26 @@ async def test_space_create_and_delete():
     assert deleted.status_code == 204
 
 
-async def test_space_create_accepts_only_accent_families():
+async def test_space_create_accepts_only_explicit_accent_ids():
+    accent_colors = [
+        f"{family}-{shade}"
+        for family in ("blue", "red", "amber", "green", "teal", "purple", "pink")
+        for shade in ("700", "900")
+    ]
     async with client() as c:
-        selected = await c.post("/api/spaces", json={"name": "docs", "color": "teal"})
-        invalid = await c.post("/api/spaces", json={"name": "legacy", "color": "#38bdf8"})
+        selected = [
+            await c.post("/api/spaces", json={"name": color, "color": color})
+            for color in accent_colors
+        ]
+        bare = await c.post("/api/spaces", json={"name": "legacy", "color": "teal"})
+        custom = await c.post(
+            "/api/spaces", json={"name": "legacy", "color": "#38bdf8"}
+        )
 
-    assert selected.status_code == 200
-    assert selected.json()["color"] == "teal"
-    assert invalid.status_code == 422
+    assert [response.json()["color"] for response in selected] == accent_colors
+    assert all(response.status_code == 200 for response in selected)
+    assert bare.status_code == 422
+    assert custom.status_code == 422
 
 
 async def test_space_delete_cascades_owner_scoped_jobs():
@@ -351,7 +363,7 @@ async def test_space_update_changes_accent_and_preserves_legacy_when_omitted():
         )
         changed = await c.patch(
             "/api/spaces/spc_legacy",
-            json={"name": "Legacy", "about": "changed", "color": "pink"},
+            json={"name": "Legacy", "about": "changed", "color": "pink-900"},
         )
         invalid = await c.patch(
             "/api/spaces/spc_legacy",
@@ -361,7 +373,7 @@ async def test_space_update_changes_accent_and_preserves_legacy_when_omitted():
     assert preserved.status_code == 200
     assert preserved.json()["color"] == "#38bdf8"
     assert changed.status_code == 200
-    assert changed.json()["color"] == "pink"
+    assert changed.json()["color"] == "pink-900"
     assert invalid.status_code == 422
 
 

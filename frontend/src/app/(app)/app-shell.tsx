@@ -41,7 +41,7 @@ import { chatAttentionLabel, chatSidebarText } from "@/lib/chat-sidebar";
 import type { ChatUIMessage } from "@/lib/messages";
 import {
   type AccentColor,
-  isAccentColor,
+  normalizeAccentColor,
   resolveSpaceColor,
 } from "@/lib/space-colors";
 import { cn } from "@/lib/utils";
@@ -180,8 +180,8 @@ function ChatSidebarItem({
             className={cn(
               "size-2 shrink-0 rounded-full",
               chat.attention_reason === "result_available"
-                ? "bg-green-500"
-                : "bg-yellow-500",
+                ? "bg-status-green-700"
+                : "bg-status-amber-700",
             )}
             title={attentionLabel}
             aria-label={attentionLabel}
@@ -642,7 +642,11 @@ export function AppShell() {
                           <span className="sr-only">Cancel</span>
                         </Button>
                       </div>
-                      <SpaceColorPicker value={spaceColor} onValueChange={setSpaceColor} />
+                      <SpaceColorPicker
+                        value={spaceColor}
+                        onValueChange={setSpaceColor}
+                        allowUnselected
+                      />
                     </form>
                   )}
                   <SidebarMenu>
@@ -940,8 +944,8 @@ function SpacePane({
   const [editingDocument, setEditingDocument] = useState(false);
   const [documentName, setDocumentName] = useState(space.name);
   const [documentAbout, setDocumentAbout] = useState(space.about);
-  const [documentColor, setDocumentColor] = useState<AccentColor | null>(
-    isAccentColor(space.color) ? space.color : null,
+  const [documentColor, setDocumentColor] = useState<AccentColor | null>(() =>
+    normalizeAccentColor(space.color),
   );
   const [savingDocument, setSavingDocument] = useState(false);
   const [documentError, setDocumentError] = useState("");
@@ -996,7 +1000,7 @@ function SpacePane({
   const startEditingDocument = () => {
     setDocumentName(space.name);
     setDocumentAbout(space.about);
-    setDocumentColor(isAccentColor(space.color) ? space.color : null);
+    setDocumentColor(normalizeAccentColor(space.color));
     setDocumentError("");
     setEditingDocument(true);
   };
@@ -1195,7 +1199,7 @@ function SpacePane({
                 onValueChange={setDocumentColor}
                 label={`Accent color for ${space.name}`}
               />
-              {!isAccentColor(space.color) && (
+              {!normalizeAccentColor(space.color) && (
                 <FieldDescription className="flex items-center gap-2">
                   <span
                     className="size-3 shrink-0 rounded-full"

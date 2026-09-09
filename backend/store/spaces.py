@@ -26,13 +26,13 @@ CREATE TABLE IF NOT EXISTS hatchery_spaces (
 
 DEFAULT_ID = "spc_hatchery"
 ACCENT_COLORS: tuple[models.AccentColor, ...] = (
-    "blue",
-    "red",
-    "amber",
-    "green",
-    "teal",
-    "purple",
-    "pink",
+    "blue-700",
+    "red-700",
+    "amber-700",
+    "green-700",
+    "teal-700",
+    "purple-700",
+    "pink-700",
 )
 _DEFAULT_ABOUT = (
     "A workspace for repositories, instructions, and reference material.\n\n"

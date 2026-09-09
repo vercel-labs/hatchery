@@ -225,12 +225,12 @@ function TaskTerminal({ chatId, tab }: { chatId: string; tab: TerminalTab }) {
         <span
           className={
             status === "live"
-              ? "size-2 rounded-full bg-emerald-500"
+              ? "size-2 rounded-full bg-status-green-700"
               : status === "exited"
                 ? "size-2 rounded-full bg-muted-foreground"
                 : status === "error"
-                  ? "size-2 rounded-full bg-destructive"
-                  : "size-2 animate-pulse rounded-full bg-amber-500"
+                  ? "size-2 rounded-full bg-status-red-700"
+                  : "size-2 animate-pulse rounded-full bg-status-amber-700"
           }
         />
         <span className="truncate text-xs text-muted-foreground">
