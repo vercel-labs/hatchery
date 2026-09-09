@@ -11,6 +11,8 @@ export type ChatSidebarFilters = {
   spaceId: string | null;
 };
 
+export const chatAttentionFilterLabel = "Wants attention";
+
 export function filterSidebarChats(
   chats: Chat[],
   filters: ChatSidebarFilters,

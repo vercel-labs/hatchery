@@ -3,6 +3,7 @@ import test from "node:test";
 
 import type { Chat } from "./api.ts";
 import {
+  chatAttentionFilterLabel,
   chatAttentionLabel,
   chatSidebarText,
   filterSidebarChats,
@@ -28,6 +29,10 @@ function chat(overrides: Partial<Chat> = {}): Chat {
     ...overrides,
   };
 }
+
+test("uses the Wants attention filter label", () => {
+  assert.equal(chatAttentionFilterLabel, "Wants attention");
+});
 
 test("filters active chats by attention and one space", () => {
   const chats = [

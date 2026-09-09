@@ -39,6 +39,7 @@ import {
   type VercelCLIConnection,
 } from "@/lib/api";
 import {
+  chatAttentionFilterLabel,
   chatAttentionLabel,
   chatSidebarText,
   filterSidebarChats,
@@ -686,7 +687,7 @@ export function AppShell() {
                   <DropdownMenuTrigger
                     render={
                       <SidebarGroupAction
-                        className="right-9"
+                        className="right-9 text-sidebar-foreground/50 hover:text-sidebar-accent-foreground [&>svg]:size-3"
                         title="Filter chats"
                         aria-label={`Filter chats${activeFilterCount ? `, ${activeFilterCount} active` : ""}`}
                       >
@@ -706,7 +707,7 @@ export function AppShell() {
                           }))
                         }
                       >
-                        Requires attention
+                        {chatAttentionFilterLabel}
                       </DropdownMenuCheckboxItem>
                     </DropdownMenuGroup>
                     <DropdownMenuSeparator />
@@ -744,14 +745,14 @@ export function AppShell() {
                 </SidebarGroupAction>
                 <SidebarGroupContent>
                   {activeFilterCount > 0 && (
-                    <div className="flex flex-wrap gap-1 px-2 pb-2">
+                    <div className="my-3 flex flex-wrap gap-1">
                       {chatFilters.requiresAttention && (
                         <Badge
                           variant="secondary"
                           render={
                             <button
                               type="button"
-                              aria-label="Remove Requires attention filter"
+                              aria-label={`Remove ${chatAttentionFilterLabel} filter`}
                               onClick={() =>
                                 setChatFilters((current) => ({
                                   ...current,
@@ -761,13 +762,16 @@ export function AppShell() {
                             />
                           }
                         >
-                          Requires attention
+                          {chatAttentionFilterLabel}
                           <XIcon data-icon="inline-end" />
                         </Badge>
                       )}
                       {chatFilters.spaceId && (
                         <Badge
                           variant="secondary"
+                          style={{
+                            borderBottomColor: resolveSpaceColor(filteredSpace?.color),
+                          }}
                           render={
                             <button
                               type="button"
