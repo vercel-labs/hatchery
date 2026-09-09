@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { PlusIcon } from "lucide-react";
 
 import { ChatMessage } from "@/components/chat-message";
+import { isBrandNewChat } from "@/components/new-chat-state";
 import { Button } from "@/components/ui/button";
 import { PromptForm } from "@/components/prompt-form";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -40,6 +41,7 @@ export function ChatView({
   onSpaceChange,
   onUnarchive,
   onCreateSandbox,
+  onCreateSpace,
 }: {
   chatId: string;
   initialMessages: ChatUIMessage[];
@@ -52,9 +54,10 @@ export function ChatView({
   attentionReason: Chat["attention_reason"];
   onMessagesChange?: (messages: ChatUIMessage[]) => void;
   onSeen: (chat: Chat) => void;
-  onSpaceChange: (spaceId: string) => void;
+  onSpaceChange: (spaceId: string) => void | Promise<void>;
   onUnarchive: () => void;
   onCreateSandbox: () => void;
+  onCreateSpace: () => void;
 }) {
   const transport = useMemo(
     () =>
@@ -142,6 +145,49 @@ export function ChatView({
       setMarkingSeen(false);
     }
   };
+
+  const brandNew = isBrandNewChat(messages.length);
+  if (brandNew && !archived) {
+    return (
+      <div className="flex min-h-0 flex-1 items-center justify-center p-6">
+        <div className="flex w-full max-w-2xl flex-col gap-3">
+          <h1 className="px-1 text-sm font-medium text-muted-foreground">
+            New chat
+          </h1>
+          {error && (
+            <Alert variant="destructive">
+              <AlertTitle>Request failed</AlertTitle>
+              <AlertDescription>{error.message}</AlertDescription>
+            </Alert>
+          )}
+          <PromptForm
+            autoFocus
+            isBusy={isStreaming}
+            traceId={traceId}
+            spaces={spaces}
+            spaceId={spaceId}
+            showAutoSpace={spaceId === null}
+            showMarkAsRead={false}
+            isMarkingAsRead={markingSeen}
+            onSubmit={({ text }) => sendMessage({ text })}
+            onStop={() => void stop()}
+            onSpaceChange={onSpaceChange}
+            onMarkAsRead={() => void markAsSeen()}
+          />
+          <div className="flex flex-wrap gap-2 px-1">
+            <Button variant="outline" onClick={onCreateSandbox}>
+              <PlusIcon data-icon="inline-start" />
+              Create sandbox manually
+            </Button>
+            <Button variant="outline" onClick={onCreateSpace}>
+              <PlusIcon data-icon="inline-start" />
+              New space
+            </Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="mx-auto flex min-h-0 w-full flex-1 flex-col">

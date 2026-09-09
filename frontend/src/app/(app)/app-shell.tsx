@@ -46,6 +46,7 @@ import {
 } from "@/lib/space-colors";
 import { cn } from "@/lib/utils";
 import { ChatView } from "@/components/chat";
+import { newChatRequest } from "@/components/new-chat-state";
 import { SandboxForm } from "@/components/sandbox-form";
 import { SpaceColorPicker } from "@/components/space-color-picker";
 import { TerminalPane, type SandboxWorkspace } from "@/components/terminal-pane";
@@ -385,9 +386,7 @@ export function AppShell() {
     const res = await apiFetch("/api/chats", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        space_id: selectedSpace?.id ?? sortSpaceId ?? spaces?.[0]?.id,
-      }),
+      body: JSON.stringify(newChatRequest()),
     });
     if (!res.ok) return;
     const chat: Chat = await res.json();
@@ -780,9 +779,10 @@ export function AppShell() {
             onChatChanged={refreshChats}
             onChatUpdated={updateChat}
             onSpaceChange={(spaceId) =>
-              void assignChatSpace(selectedChat, spaceId)
+              assignChatSpace(selectedChat, spaceId)
             }
             onUnarchive={() => void setChatArchived(selectedChat, false)}
+            onCreateSpace={() => setAddingSpace(true)}
             onSpaceAssigned={(spaceId) =>
               setChats((current) => {
                 if (
@@ -1489,6 +1489,7 @@ function LiveChat({
   onChatUpdated,
   onSpaceChange,
   onUnarchive,
+  onCreateSpace,
   onSpaceAssigned,
 }: {
   chat: Chat;
@@ -1496,8 +1497,9 @@ function LiveChat({
   warning?: string;
   onChatChanged: () => void;
   onChatUpdated: (chat: Chat) => void;
-  onSpaceChange: (spaceId: string) => void;
+  onSpaceChange: (spaceId: string) => void | Promise<void>;
   onUnarchive: () => void;
+  onCreateSpace: () => void;
   onSpaceAssigned: (spaceId: string) => void;
 }) {
   const [initialMessages, setInitialMessages] = useState<
@@ -1625,6 +1627,7 @@ function LiveChat({
             onSpaceChange={onSpaceChange}
             onUnarchive={onUnarchive}
             onCreateSandbox={() => setShowSandboxForm(true)}
+            onCreateSpace={onCreateSpace}
           />
         </div>
         {sandboxes.length > 0 && !showTerminal && (

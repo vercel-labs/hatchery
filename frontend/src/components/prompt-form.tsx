@@ -20,6 +20,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { AUTO_SPACE_VALUE } from "@/components/new-chat-state";
 import { braintrustTraceUrl } from "@/lib/braintrust";
 import type { Space } from "@/lib/api";
 import { resolveSpaceColor } from "@/lib/space-colors";
@@ -33,6 +34,8 @@ export function PromptForm({
   spaceId,
   showMarkAsRead,
   isMarkingAsRead,
+  showAutoSpace = false,
+  autoFocus = false,
   onSubmit,
   onStop,
   onSpaceChange,
@@ -44,19 +47,22 @@ export function PromptForm({
   spaceId: string | null;
   showMarkAsRead: boolean;
   isMarkingAsRead: boolean;
+  showAutoSpace?: boolean;
+  autoFocus?: boolean;
   onSubmit: (message: { text: string }) => void;
   onStop: () => void;
-  onSpaceChange: (spaceId: string) => void;
+  onSpaceChange: (spaceId: string) => void | Promise<void>;
   onMarkAsRead: () => void;
 }) {
   const [input, setInput] = React.useState("");
   const [traceCopied, setTraceCopied] = React.useState(false);
+  const [isChangingSpace, setIsChangingSpace] = React.useState(false);
   const selectedSpace = spaces.find((space) => space.id === spaceId);
 
   function handleSubmit(event?: React.FormEvent) {
     event?.preventDefault();
     const text = input.trim();
-    if (!text || isBusy) return;
+    if (!text || isBusy || isChangingSpace) return;
     onSubmit({ text });
     setInput("");
   }
@@ -65,6 +71,7 @@ export function PromptForm({
     <form onSubmit={handleSubmit}>
       <InputGroup>
         <InputGroupTextarea
+          autoFocus={autoFocus}
           placeholder="What should we build?"
           className="p-3.5"
           value={input}
@@ -81,11 +88,17 @@ export function PromptForm({
           }}
         />
         <InputGroupAddon align="block-end">
-          {spaceId && (
+          {(spaceId || showAutoSpace) && (
             <Select
-              value={spaceId}
+              disabled={isChangingSpace}
+              value={spaceId ?? AUTO_SPACE_VALUE}
               onValueChange={(nextSpaceId) => {
-                if (nextSpaceId) onSpaceChange(nextSpaceId);
+                if (nextSpaceId && nextSpaceId !== AUTO_SPACE_VALUE) {
+                  setIsChangingSpace(true);
+                  Promise.resolve(onSpaceChange(nextSpaceId)).finally(() =>
+                    setIsChangingSpace(false),
+                  );
+                }
               }}
             >
               <SelectTrigger
@@ -94,19 +107,26 @@ export function PromptForm({
                 className="h-6 max-w-44 rounded-xl border-transparent bg-secondary px-2 text-secondary-foreground hover:bg-secondary/80"
               >
                 <SelectValue>
-                  <span
-                    className="size-2 shrink-0 rounded-full"
-                    style={{
-                      backgroundColor: resolveSpaceColor(selectedSpace?.color),
-                    }}
-                  />
-                  <span className="truncate">
-                    {selectedSpace?.name ?? "Assign space"}
-                  </span>
+                  {selectedSpace ? (
+                    <>
+                      <span
+                        className="size-2 shrink-0 rounded-full"
+                        style={{
+                          backgroundColor: resolveSpaceColor(selectedSpace.color),
+                        }}
+                      />
+                      <span className="truncate">{selectedSpace.name}</span>
+                    </>
+                  ) : (
+                    <span className="truncate">Auto</span>
+                  )}
                 </SelectValue>
               </SelectTrigger>
               <SelectContent align="start">
                 <SelectGroup>
+                  {showAutoSpace && (
+                    <SelectItem value={AUTO_SPACE_VALUE}>Auto</SelectItem>
+                  )}
                   {spaces.map((space) => (
                     <SelectItem key={space.id} value={space.id}>
                       <span
@@ -185,7 +205,7 @@ export function PromptForm({
               size="icon-sm"
               variant="default"
               aria-label="Submit"
-              disabled={!input.trim()}
+              disabled={!input.trim() || isChangingSpace}
             >
               <ArrowUpIcon />
             </InputGroupButton>
