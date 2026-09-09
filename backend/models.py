@@ -87,4 +87,5 @@ class Chat(pydantic.BaseModel):
     artifact: str | None = None  # report text or issue/pr url
     attention_reason: AttentionReason | None = None
     archived_at: str | None = None
+    telemetry_span: dict[str, typing.Any] | None = None
     created_at: str

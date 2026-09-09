@@ -113,6 +113,34 @@ async def get(chat_id: str) -> models.Chat | None:
         return _read_chat(chat_id)
 
 
+async def set_telemetry_span_if_absent(
+    chat_id: str, telemetry_span: dict
+) -> models.Chat | None:
+    """Persist one immutable trace root, returning the winning chat state."""
+    if store.use_postgres():
+        from store import db
+
+        row = await (await db.pool()).fetchrow(
+            "UPDATE hatchery_chats SET data = jsonb_set(data, '{telemetry_span}', $2::jsonb) "
+            "WHERE id = $1 AND (data->'telemetry_span' IS NULL "
+            "OR data->'telemetry_span' = 'null'::jsonb) "
+            "RETURNING data",
+            chat_id,
+            json.dumps(telemetry_span),
+        )
+        if row is not None:
+            return _chat(row["data"])
+        return await get(chat_id)
+    with _lock:
+        chat = _read_chat(chat_id)
+        if chat is None:
+            return None
+        if chat.telemetry_span is None:
+            chat.telemetry_span = telemetry_span
+            _write_chat(chat)
+        return chat
+
+
 async def list_all() -> list[models.Chat]:
     """Every chat, newest first (the sidebar list)."""
     if store.use_postgres():

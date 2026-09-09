@@ -5,6 +5,7 @@ import json
 import ai
 import pydantic
 
+from agent import telemetry
 import models
 from store import chats, events
 import worker
@@ -96,14 +97,15 @@ async def suggest(space: models.Space) -> Launch:
 
 
 async def create(chat_id: str, launch: Launch) -> worker.Worker:
-    chat = await chats.get(chat_id)
-    created = await worker.create(
-        chat_id,
-        worker.WorkerSpec(**launch.model_dump()),
-        user_id=chat.user_id if chat is not None else None,
-    )
-    await events.append(chat_id, "ui", {"type": "sandbox.changed"})
-    return created
+    async with telemetry.use_chat(chat_id):
+        chat = await chats.get(chat_id)
+        created = await worker.create(
+            chat_id,
+            worker.WorkerSpec(**launch.model_dump()),
+            user_id=chat.user_id if chat is not None else None,
+        )
+        await events.append(chat_id, "ui", {"type": "sandbox.changed"})
+        return created
 
 
 async def list_all(chat_id: str) -> list[worker.Worker]:
@@ -111,31 +113,35 @@ async def list_all(chat_id: str) -> list[worker.Worker]:
 
 
 async def destroy(chat_id: str, sandbox_id: str) -> None:
-    record = await worker.get(sandbox_id)
-    if record is None or record.chat_id != chat_id:
-        raise ValueError("sandbox does not belong to this chat")
-    await worker.destroy(sandbox_id)
-    await events.append(chat_id, "ui", {"type": "sandbox.changed"})
+    async with telemetry.use_chat(chat_id):
+        record = await worker.get(sandbox_id)
+        if record is None or record.chat_id != chat_id:
+            raise ValueError("sandbox does not belong to this chat")
+        await worker.destroy(sandbox_id)
+        await events.append(chat_id, "ui", {"type": "sandbox.changed"})
 
 
 async def launch_task(chat_id: str, sandbox_id: str, prompt: str, model: str) -> worker.Task:
-    task = await worker.launch_task(chat_id, sandbox_id, prompt, model)
-    await events.append(
-        chat_id,
-        "ui",
-        {
-            "type": "task.changed",
-            "subagent_id": task.id,
-            "sandbox_id": task.worker_id,
-            "state": task.status,
-        },
-    )
-    return task
+    async with telemetry.use_chat(chat_id):
+        task = await worker.launch_task(chat_id, sandbox_id, prompt, model)
+        await events.append(
+            chat_id,
+            "ui",
+            {
+                "type": "task.changed",
+                "subagent_id": task.id,
+                "sandbox_id": task.worker_id,
+                "state": task.status,
+            },
+        )
+        return task
 
 
 async def send_task_input(chat_id: str, task_id: str, prompt: str) -> worker.Task:
-    return await worker.send_task_input(chat_id, task_id, prompt)
+    async with telemetry.use_chat(chat_id):
+        return await worker.send_task_input(chat_id, task_id, prompt)
 
 
 async def cancel_task(chat_id: str, task_id: str) -> worker.Task:
-    return await worker.cancel_task(chat_id, task_id)
+    async with telemetry.use_chat(chat_id):
+        return await worker.cancel_task(chat_id, task_id)

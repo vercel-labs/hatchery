@@ -28,6 +28,7 @@ class TurnInput(pydantic.BaseModel):
 class PreparedTurn(pydantic.BaseModel):
     history: list[ai.messages.Message]
     linked: bool
+    telemetry_span: dict[str, typing.Any] | None = None
     cached_reply: str | None = None
 
 
@@ -35,41 +36,48 @@ class PreparedTurn(pydantic.BaseModel):
 async def prepare_turn(turn: TurnInput) -> PreparedTurn:
     """Load canonical history and recover a committed worker reply if present."""
     from app import server
-    from agent import dispatcher
+    from agent import dispatcher, telemetry
     from store import chats
     import worker
 
-    stored = await server._transcript(turn.chat_id)
-    linked = bool(await chats.bindings(turn.chat_id))
-    cached_reply = None
-    if turn.task_id is not None:
-        task = await worker.get_task(turn.chat_id, turn.task_id)
-        if task is None:
-            raise ValueError("unknown subagent completion")
-        cached_reply = task.completion_message
-        if not cached_reply and task.completion_sequence is not None:
-            marker = f"subagent_result_{task.id}_{task.completion_sequence}"
-            result_index = next(
-                (index for index, message in enumerate(stored) if message.id == marker),
-                -1,
+    async with telemetry.use_chat(turn.chat_id) as trace:
+        async with ai.experimental_telemetry.span("hatchery.prepare_turn") as span:
+            span.set_attrs(
+                {"chat.id": turn.chat_id, "turn.id": turn.turn_id},
+                origin=turn.origin,
             )
-            cached_reply = next(
-                (
-                    message.text
-                    for message in reversed(stored[result_index + 1 :])
-                    if message.role == "assistant" and message.text
-                ),
-                None,
+            stored = await server._transcript(turn.chat_id)
+            linked = bool(await chats.bindings(turn.chat_id))
+            cached_reply = None
+            if turn.task_id is not None:
+                task = await worker.get_task(turn.chat_id, turn.task_id)
+                if task is None:
+                    raise ValueError("unknown subagent completion")
+                cached_reply = task.completion_message
+                if not cached_reply and task.completion_sequence is not None:
+                    marker = f"subagent_result_{task.id}_{task.completion_sequence}"
+                    result_index = next(
+                        (index for index, message in enumerate(stored) if message.id == marker),
+                        -1,
+                    )
+                    cached_reply = next(
+                        (
+                            message.text
+                            for message in reversed(stored[result_index + 1 :])
+                            if message.role == "assistant" and message.text
+                        ),
+                        None,
+                    )
+            space = await server._space_for_chat(turn.chat_id)
+            return PreparedTurn(
+                history=[
+                    ai.system_message(dispatcher.system_prompt(space, linked=linked)),
+                    *stored,
+                ],
+                linked=linked,
+                telemetry_span=trace.model_dump(mode="json") if trace else None,
+                cached_reply=cached_reply,
             )
-    space = await server._space_for_chat(turn.chat_id)
-    return PreparedTurn(
-        history=[
-            ai.system_message(dispatcher.system_prompt(space, linked=linked)),
-            *stored,
-        ],
-        linked=linked,
-        cached_reply=cached_reply,
-    )
 
 
 @workflow.step
@@ -535,7 +543,10 @@ async def commit_messages(
 @workflow.step
 async def ship_spans(spans: list[ai.experimental_telemetry.Span]) -> None:
     """Ship telemetry collected in the replayable workflow body."""
+    from agent import telemetry
+
     await ai.experimental_telemetry.push_all(spans)
+    telemetry.flush()
 
 
 @workflow.step(max_retries=0)
@@ -598,27 +609,46 @@ async def run_turn(turn: TurnInput) -> None:
     await emit_turn_event(turn.chat_id, "turn.started")
     try:
         prepared = await prepare_turn(turn)
-        if prepared.cached_reply:
-            replies = [prepared.cached_reply]
-        else:
-            agent = DurableDispatcher(
-                turn.chat_id, writer, turn.turn_id, linked=prepared.linked
-            )
-            collector = ai.experimental_telemetry.DictSink()
-            token = current_agent.set(agent)
-            try:
-                async with (
-                    ai.experimental_telemetry.use_sink(collector),
-                    agent.run(ai.get_model(MODEL_ID), prepared.history) as result,
-                ):
-                    async for _ in result:
-                        pass
-                    added = result.messages[len(prepared.history) :]
-            finally:
-                current_agent.reset(token)
+        parent = (
+            ai.experimental_telemetry.Span[
+                ai.experimental_telemetry.CustomSpanData
+            ].model_validate(prepared.telemetry_span)
+            if prepared.telemetry_span
+            else None
+        )
+        collector = ai.experimental_telemetry.DictSink()
+        try:
+            async with (
+                ai.experimental_telemetry.use_span(parent),
+                ai.experimental_telemetry.use_sink(collector),
+                ai.experimental_telemetry.span("hatchery.turn") as span,
+            ):
+                span.set_attrs(
+                    {"chat.id": turn.chat_id, "turn.id": turn.turn_id},
+                    origin=turn.origin,
+                    workflow_run_id=run_id,
+                    task_id=turn.task_id or "",
+                )
+                if prepared.cached_reply:
+                    replies = [prepared.cached_reply]
+                else:
+                    agent = DurableDispatcher(
+                        turn.chat_id, writer, turn.turn_id, linked=prepared.linked
+                    )
+                    token = current_agent.set(agent)
+                    try:
+                        async with agent.run(
+                            ai.get_model(MODEL_ID), prepared.history
+                        ) as result:
+                            async for _ in result:
+                                pass
+                            added = result.messages[len(prepared.history) :]
+                    finally:
+                        current_agent.reset(token)
+                    replies = await commit_messages(turn.chat_id, added)
+        finally:
             if collector.finished_spans:
                 await ship_spans(collector.finished_spans)
-            replies = await commit_messages(turn.chat_id, added)
         await deliver_replies(turn, replies)
         await finish_turn(turn, run_id, "completed")
         await write_lifecycle_event(writer, lifecycle_event("turn.completed", turn))

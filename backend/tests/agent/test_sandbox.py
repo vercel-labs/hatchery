@@ -1,3 +1,5 @@
+import contextlib
+
 import pytest
 
 import models
@@ -81,6 +83,11 @@ async def test_sandbox_operations_delegate_with_chat_scope(monkeypatch):
         seen.update(chat_id=chat_id, spec=spec, user_id=user_id)
         return "created"
 
+    @contextlib.asynccontextmanager
+    async def use_chat(_chat_id):
+        yield None
+
+    monkeypatch.setattr(sandbox.telemetry, "use_chat", use_chat)
     monkeypatch.setattr(sandbox.chats, "get", get)
     monkeypatch.setattr(sandbox.worker, "create", create)
 
@@ -118,6 +125,11 @@ async def test_launch_task_immediately_invalidates_ui(monkeypatch):
         )
         return task
 
+    @contextlib.asynccontextmanager
+    async def use_chat(_chat_id):
+        yield None
+
+    monkeypatch.setattr(sandbox.telemetry, "use_chat", use_chat)
     monkeypatch.setattr(sandbox.worker, "launch_task", launch_task)
 
     created = await sandbox.launch_task("chat_1", "wrk_1", "fix it", "openai/test")
