@@ -839,8 +839,10 @@ async def test_hub_lands_inbound_in_one_chat(monkeypatch):
     stored = await events.read(chat.id, "messages")
     assert len(stored) == 2
     assert delivered == [
+        (chat.id, channels.protocol.MESSAGE_RECEIVED),
         (chat.id, channels.protocol.SPACE_ASSIGNING),
         (chat.id, channels.protocol.SPACE_ASSIGNED),
+        (chat.id, channels.protocol.MESSAGE_RECEIVED),
     ]
     assert started == [
         (chat.id, "channel", None),
@@ -954,7 +956,7 @@ async def test_slack_hub_ignores_unconnected_sender(monkeypatch):
     assert await chats.list_all() == []
 
 
-async def test_slack_hub_rejects_takeover_without_appending_or_invoking(monkeypatch):
+async def test_slack_hub_accepts_linked_participant_without_changing_owner(monkeypatch):
     async def classify(prompt, metadata, candidates):
         return candidates[0]
 
@@ -974,12 +976,12 @@ async def test_slack_hub_rejects_takeover_without_appending_or_invoking(monkeypa
     first = channels.Inbound(
         token="C1:1.0",
         text="first",
-        state={"team_id": "T1", "user_id": "U1"},
+        state={"team_id": "T1", "channel_id": "C1", "thread_ts": "1.0", "user_id": "U1"},
     )
     second = channels.Inbound(
         token="C1:1.0",
-        text="takeover",
-        state={"team_id": "T1", "user_id": "U2"},
+        text="follow up",
+        state={"team_id": "T1", "channel_id": "C1", "thread_ts": "1.0", "user_id": "U2"},
     )
 
     await server.bot.hub.dispatch("slack", first)
@@ -987,10 +989,84 @@ async def test_slack_hub_rejects_takeover_without_appending_or_invoking(monkeypa
     await server.bot.hub.dispatch("slack", second)
 
     assert chat.user_id == "user_1"
-    assert len(await events.read(chat.id, "messages")) == 1
-    assert runs == [chat.id]
+    assert len(await events.read(chat.id, "messages")) == 2
+    assert runs == [chat.id, chat.id]
     [binding] = await chats.bindings(chat.id)
-    assert binding.state["user_id"] == "U1"
+    assert binding.state["user_id"] == "U2"
+
+
+async def test_linked_message_syncs_to_other_channel_and_ui(monkeypatch):
+    class FakeChannel:
+        def __init__(self, name):
+            self.name = name
+            self.delivered = []
+
+        async def on_event(self, event, state):
+            self.delivered.append((event, state))
+
+    async def slack_user(_team_id, _slack_user_id):
+        return "user_2"
+
+    async def get_user(_user_id):
+        return {"id": "user_2", "name": "John Business", "email": "test@vercel.com"}
+
+    async def run(_chat_id):
+        raise AssertionError("an unaddressed follow-up must not invoke the dispatcher")
+
+    monkeypatch.setattr(server.connections.auth_store, "slack_user", slack_user)
+    monkeypatch.setattr(server.connections.auth_store, "get_user", get_user)
+    monkeypatch.setattr(server, "_run_inbound_turn", run)
+    slack_channel = FakeChannel("slack")
+    github_channel = FakeChannel("github")
+    monkeypatch.setitem(server.bot.channels, "slack", slack_channel)
+    monkeypatch.setitem(server.bot.channels, "github", github_channel)
+
+    space = await server.spaces.default()
+    chat = await chats.create(space.id, "shared", user_id="user_1")
+    await chats.bind(
+        "slack:T1:C1:1.0",
+        chat.id,
+        "slack",
+        {"team_id": "T1", "channel_id": "C1", "thread_ts": "1.0"},
+    )
+    await chats.bind(
+        "github:repo:1:issue:7",
+        chat.id,
+        "github",
+        {"owner": "acme", "repo": "repo", "kind": "issue", "number": 7},
+    )
+
+    await server.bot.hub.dispatch(
+        "slack",
+        channels.Inbound(
+            token="C1:1.0",
+            text='<slack_message sender="U2">follow up</slack_message>',
+            state={
+                "team_id": "T1",
+                "channel_id": "C1",
+                "thread_ts": "1.0",
+                "user_id": "U2",
+                "message_id": "1.1",
+                "display_text": "follow up",
+            },
+            invoke=False,
+        ),
+    )
+
+    assert slack_channel.delivered == []
+    [(mirrored, _)] = github_channel.delivered
+    assert mirrored.type == channels.protocol.MESSAGE_RECEIVED
+    assert mirrored.data["message"] == "follow up"
+    assert mirrored.data["author"] == "John Business"
+    [stored] = [
+        ai.messages.Message.model_validate(data)
+        for _, data in await events.read(chat.id, "messages")
+    ]
+    assert stored.provider_metadata["hatchery"] == {
+        "origin": "slack",
+        "author": "John Business",
+        "display_text": "follow up",
+    }
 
 
 async def test_hub_can_store_without_invoking_then_wake_without_persisting(monkeypatch):
@@ -1073,7 +1149,7 @@ async def test_ambiguous_repo_classifies_then_runs_original_request(monkeypatch)
             "fix the docs",
             {
                 "origin": "github",
-                "author": "octocat",
+                "author": "test@vercel.com",
                 "repo": "vercel/repo",
                 "channel_state": {"kind": "issue", "sender": "octocat", "sender_id": "42"},
             },
@@ -1081,6 +1157,7 @@ async def test_ambiguous_repo_classifies_then_runs_original_request(monkeypatch)
         )
     ]
     assert [event.type for _, event in emitted] == [
+        channels.protocol.MESSAGE_RECEIVED,
         channels.protocol.SPACE_ASSIGNING,
         channels.protocol.SPACE_ASSIGNED,
     ]
@@ -1348,7 +1425,9 @@ async def test_ui_turn_is_mirrored_to_bound_channel(monkeypatch):
         ]
         assert channel.delivered[0][0].data == {
             "message": "continue in UI",
+            "message_id": ui[0].id,
             "origin": "ui",
+            "author": "User",
         }
         assert channel.delivered[0][1] == {"thread": "1"}
         stored = [

@@ -1,6 +1,7 @@
 """The dispatcher coordinates coding work in Vercel Sandboxes."""
 
 import typing
+import uuid
 
 import ai
 
@@ -25,8 +26,14 @@ report completion or failure, ask for missing input, or send a follow-up to the
 subagent when appropriate. Do not call check_subagent for information already
 included in the result. Call require_attention with result_available when giving
 the human a final result that needs review, or blocked when work cannot continue
-without human input. Do not call it while routine follow-up work continues. Be
-terse and concrete."""
+without human input. Do not call it while routine follow-up work continues.
+
+When asked to notify people, call find_channels and find_people first. Use only
+exact destination and person IDs returned by those tools; never invent handles.
+Then call send_message. It sends the notification and links that Slack or GitHub
+thread to this chat, so future replies are shared across every linked channel.
+Ask for clarification instead of guessing between ambiguous matches. Be terse
+and concrete."""
 
 
 def system_prompt(space: models.Space) -> str:
@@ -57,7 +64,39 @@ def model() -> ai.Model:
 
 def agent_for(chat: dict) -> ai.Agent:
     """Build worker tools scoped to one chat."""
+    from channels import destinations
+
     chat_id = chat["id"]
+    delivery_key = str(uuid.uuid4())
+
+    @ai.tool
+    async def find_channels(
+        provider: typing.Literal["slack", "github"], query: str
+    ) -> list[dict]:
+        """Find Slack channels or GitHub issues and pull requests."""
+        return await destinations.find_channels(chat_id, provider, query)
+
+    @ai.tool
+    async def find_people(query: str) -> list[dict]:
+        """Find linked people and return Hatchery person IDs."""
+        return await destinations.find_people(chat_id, query)
+
+    @ai.tool
+    async def send_message(
+        provider: typing.Literal["slack", "github"],
+        destination: str,
+        text: str,
+        people: list[str] | None = None,
+    ) -> dict:
+        """Notify an exact destination and link its thread to this chat."""
+        return await destinations.send_message(
+            chat_id,
+            provider,
+            destination,
+            text,
+            people,
+            delivery_key=delivery_key,
+        )
 
     @ai.tool
     async def create_sandbox(
@@ -138,5 +177,8 @@ def agent_for(chat: dict) -> ai.Agent:
             message_subagent,
             check_subagent,
             require_attention,
+            find_channels,
+            find_people,
+            send_message,
         ]
     )

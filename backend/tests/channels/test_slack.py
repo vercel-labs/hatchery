@@ -27,9 +27,10 @@ def connect_stub(monkeypatch):
 
 
 class FakeBus:
-    def __init__(self) -> None:
+    def __init__(self, bound: dict | None = None) -> None:
         self.dispatched: list[channels.Inbound] = []
         self.seen: set[str] = set()
+        self.bound = bound
 
     async def dispatch(self, inbound: channels.Inbound) -> None:
         self.dispatched.append(inbound)
@@ -39,6 +40,9 @@ class FakeBus:
             return False
         self.seen.add(key)
         return True
+
+    async def binding(self, token: str) -> dict | None:
+        return self.bound
 
 
 def forwarded(payload: dict, auth: str = "Bearer good", extra_headers: dict | None = None) -> channels.Webhook:
@@ -99,7 +103,10 @@ async def test_app_mention_dispatches_with_thread_token_and_attribution():
     assert '<slack_message channel="C1"' in inbound.text
     assert 'sender="U1"' in inbound.text
     assert inbound.title == "slack: hello"
-    assert inbound.state == {"channel_id": "C1", "thread_ts": "100.1", "team_id": "T1", "user_id": "U1"}
+    assert inbound.state == {
+        "channel_id": "C1", "thread_ts": "100.1", "team_id": "T1", "user_id": "U1",
+        "message_id": "100.1", "display_text": "<@UBOT> hello", "author": "U1",
+    }
 
 
 async def test_thread_reply_reuses_thread_root_token():
@@ -265,12 +272,11 @@ async def test_ignores_plain_channel_message_bots_and_self():
         assert bus.dispatched == [], event
 
 
-async def test_dedupes_event_id():
+async def test_webhook_retries_keep_stable_message_id_for_hub_dedupe():
     bus = FakeBus()
     await handled(forwarded(envelope(mention(), event_id="Ev1")), bus)
     await handled(forwarded(envelope(mention(), event_id="Ev1")), bus)
-    await handled(forwarded(envelope(mention(), event_id="Ev2")), bus)
-    assert len(bus.dispatched) == 1  # the second event id still names the same Slack message
+    assert [item.state["message_id"] for item in bus.dispatched] == ["100.1", "100.1"]
 
 
 def api_channel(calls: list) -> slack.SlackChannel:
@@ -340,39 +346,22 @@ async def test_intermediate_reply_becomes_opaque_status():
     assert params == {"channel_id": "C1", "thread_ts": "100.1", "status": "is working..."}
 
 
-async def test_ui_message_uses_slack_user_profile_with_ui_attribution():
+async def test_message_from_another_surface_has_attribution():
     calls: list[httpx.Request] = []
+    channel = api_channel(calls)
+    event = channels.event(
+        channels.protocol.MESSAGE_RECEIVED,
+        message="continue here",
+        origin="github",
+        author="John Business",
+    )
+    await channel.on_event(event, state())
 
-    def responder(request: httpx.Request) -> httpx.Response:
-        calls.append(request)
-        if request.url.path == "/api/users.info":
-            return httpx.Response(
-                200,
-                json={
-                    "ok": True,
-                    "user": {"profile": {"display_name": "Andrey", "image_72": "https://img/andrey.png"}},
-                },
-            )
-        return httpx.Response(200, json={"ok": True})
-
-    channel = slack.channel(connector="slack/e2e-bot", transport=httpx.MockTransport(responder))
-    slack_state = {**state(), "team_id": "T1", "user_id": "U1"}
-    event = channels.event(channels.protocol.MESSAGE_RECEIVED, message="continue here", origin="ui")
-    await channel.on_event(event, slack_state)
-    await channel.on_event(event, slack_state)
-
-    assert [request.url.path for request in calls] == [
-        "/api/users.info",
-        "/api/chat.postMessage",
-        "/api/chat.postMessage",
-    ]
-    params = dict(urllib.parse.parse_qsl(calls[1].read().decode()))
+    params = dict(urllib.parse.parse_qsl(calls[0].read().decode()))
     assert params == {
         "channel": "C1",
         "thread_ts": "100.1",
-        "text": "continue here",
-        "username": "Andrey · via Hatchery UI",
-        "icon_url": "https://img/andrey.png",
+        "text": "John Business · via GitHub\n\ncontinue here",
     }
 
 

@@ -184,6 +184,46 @@ async def require_attention_step(
     return {"reason": reason}
 
 
+@workflow.step
+async def find_channels_step(
+    chat_id: str, provider: typing.Literal["slack", "github"], query: str
+) -> list[dict] | dict:
+    from channels import destinations
+
+    try:
+        return await destinations.find_channels(chat_id, provider, query)
+    except destinations.SlackScopeRequired as error:
+        return error.result
+
+
+@workflow.step
+async def find_people_step(chat_id: str, query: str) -> list[dict]:
+    from channels import destinations
+
+    return await destinations.find_people(chat_id, query)
+
+
+@workflow.step(max_retries=0)
+async def send_message_step(
+    chat_id: str,
+    provider: typing.Literal["slack", "github"],
+    destination: str,
+    text: str,
+    people: list[str] | None,
+    delivery_key: str,
+) -> dict:
+    from channels import destinations
+
+    return await destinations.send_message(
+        chat_id,
+        provider,
+        destination,
+        text,
+        people,
+        delivery_key=delivery_key,
+    )
+
+
 current_agent: contextvars.ContextVar["DurableDispatcher"] = contextvars.ContextVar(
     "current_agent"
 )
@@ -261,6 +301,39 @@ async def require_attention(
     return await require_attention_step(current_agent.get().chat_id, reason)
 
 
+@ai.tool
+async def find_channels(
+    provider: typing.Literal["slack", "github"], query: str
+) -> list[dict] | dict:
+    """Find Slack channels or GitHub issues and pull requests."""
+    return await find_channels_step(current_agent.get().chat_id, provider, query)
+
+
+@ai.tool
+async def find_people(query: str) -> list[dict]:
+    """Find linked people and return Hatchery person IDs."""
+    return await find_people_step(current_agent.get().chat_id, query)
+
+
+@ai.tool
+async def send_message(
+    provider: typing.Literal["slack", "github"],
+    destination: str,
+    text: str,
+    people: list[str] | None = None,
+) -> dict:
+    """Notify an exact destination and link its thread to this chat."""
+    agent = current_agent.get()
+    return await send_message_step(
+        agent.chat_id,
+        provider,
+        destination,
+        text,
+        people,
+        agent.turn_id,
+    )
+
+
 TOOLS = [
     create_sandbox,
     list_sandboxes,
@@ -268,6 +341,9 @@ TOOLS = [
     message_subagent,
     check_subagent,
     require_attention,
+    find_channels,
+    find_people,
+    send_message,
 ]
 
 

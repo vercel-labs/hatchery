@@ -43,6 +43,7 @@ async def test_worker_tools_are_chat_scoped(monkeypatch):
     assert set(tools) == {
         "create_sandbox", "list_sandboxes", "create_subagent",
         "message_subagent", "check_subagent", "require_attention",
+        "find_channels", "find_people", "send_message",
     }
     assert await tools["list_sandboxes"].fn() == []
     assert seen["chat_id"] == "chat_1"

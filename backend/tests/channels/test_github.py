@@ -26,9 +26,10 @@ def connect_stub(monkeypatch):
 
 
 class FakeBus:
-    def __init__(self) -> None:
+    def __init__(self, bound: dict | None = None) -> None:
         self.dispatched: list[channels.Inbound] = []
         self.seen: set[str] = set()
+        self.bound = bound
 
     async def dispatch(self, inbound: channels.Inbound) -> None:
         self.dispatched.append(inbound)
@@ -38,6 +39,9 @@ class FakeBus:
             return False
         self.seen.add(key)
         return True
+
+    async def binding(self, token: str) -> dict | None:
+        return self.bound
 
 
 def forwarded(payload: dict, event: str, delivery: str = "d1", auth: str = "Bearer good") -> channels.Webhook:
@@ -128,12 +132,17 @@ async def test_ignores_no_mention_bots_own_marker_and_other_events():
         assert bus.dispatched == []
 
 
-async def test_dedupes_delivery_id():
-    bus = FakeBus()
-    await handled(forwarded(issue_comment(), "issue_comment", delivery="d1"), bus)
-    await handled(forwarded(issue_comment(), "issue_comment", delivery="d1"), bus)
-    await handled(forwarded(issue_comment(), "issue_comment", delivery="d2"), bus)
-    assert len(bus.dispatched) == 2
+async def test_unmentioned_reply_dispatches_only_for_bound_thread():
+    unbound = FakeBus()
+    await handled(forwarded(issue_comment(body="follow up"), "issue_comment"), unbound)
+    assert unbound.dispatched == []
+
+    bound = FakeBus(bound={"number": 5})
+    await handled(forwarded(issue_comment(body="follow up"), "issue_comment"), bound)
+    [inbound] = bound.dispatched
+    assert inbound.invoke is False
+    assert inbound.state["message_id"] == 900
+    assert inbound.state["display_text"] == "follow up"
 
 
 def api_channel(calls: list) -> github.GitHubChannel:

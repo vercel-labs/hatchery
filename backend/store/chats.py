@@ -270,6 +270,73 @@ async def finish(chat_id: str, status: str, artifact: str | None = None) -> mode
         return chat
 
 
+async def binding(token: str) -> Binding | None:
+    """Look up one exact external conversation binding."""
+    if store.use_postgres():
+        from store import db
+
+        row = await (await db.pool()).fetchrow(
+            "SELECT * FROM hatchery_bindings WHERE token = $1", token
+        )
+        if row is None:
+            return None
+        return Binding(
+            token=token,
+            chat_id=row["chat_id"],
+            channel=row["channel"],
+            state=json.loads(row["state"])
+            if isinstance(row["state"], str)
+            else row["state"],
+        )
+    with _lock:
+        data = _read_bindings().get(token)
+        return Binding(token=token, **data) if data is not None else None
+
+
+async def bind(token: str, chat_id: str, channel: str, state: dict) -> Binding:
+    """Attach an external conversation to an existing chat without transferring it."""
+    if store.use_postgres():
+        from store import db
+
+        async with (await db.pool()).acquire() as conn, conn.transaction():
+            if not await conn.fetchval(
+                "SELECT id FROM hatchery_chats WHERE id = $1", chat_id
+            ):
+                raise ValueError("chat does not exist")
+            row = await conn.fetchrow(
+                "INSERT INTO hatchery_bindings (token, chat_id, channel, state) "
+                "VALUES ($1, $2, $3, $4::jsonb) ON CONFLICT (token) DO UPDATE "
+                "SET state = hatchery_bindings.state || EXCLUDED.state "
+                "WHERE hatchery_bindings.chat_id = EXCLUDED.chat_id "
+                "AND hatchery_bindings.channel = EXCLUDED.channel RETURNING *",
+                token,
+                chat_id,
+                channel,
+                json.dumps(state),
+            )
+            if row is None:
+                raise ValueError("destination is already linked to another chat")
+            saved = (
+                json.loads(row["state"])
+                if isinstance(row["state"], str)
+                else row["state"]
+            )
+            return Binding(token=token, chat_id=chat_id, channel=channel, state=saved)
+    with _lock:
+        if _read_chat(chat_id) is None:
+            raise ValueError("chat does not exist")
+        bindings_ = _read_bindings()
+        existing = bindings_.get(token)
+        if existing is not None:
+            if existing["chat_id"] != chat_id or existing["channel"] != channel:
+                raise ValueError("destination is already linked to another chat")
+            state = {**existing.get("state", {}), **state}
+        result = Binding(token=token, chat_id=chat_id, channel=channel, state=state)
+        bindings_[token] = result.model_dump(exclude={"token"})
+        _write_bindings(bindings_)
+        return result
+
+
 async def claim(
     token: str,
     channel: str,

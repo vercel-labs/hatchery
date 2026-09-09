@@ -81,7 +81,6 @@ class SlackChannel:
         self.name = name
         self._connector = connector or os.environ.get("SLACK_CONNECTOR", "")
         self._client = httpx.AsyncClient(base_url="https://slack.com/api", transport=transport)
-        self._profiles: dict[tuple[str, str], tuple[str, str]] = {}
 
     async def handle(self, webhook: channels.Webhook, bus: channels.Bus) -> channels.Ack:
         try:
@@ -106,9 +105,6 @@ class SlackChannel:
         inbound = self._gate(payload, event)
         candidate = self._thread_candidate(payload, event)
         if inbound is None and candidate is None:
-            return channels.Ack()
-        event_id = payload.get("event_id")
-        if event_id and not await bus.dedupe(str(event_id)):
             return channels.Ack()
         if inbound is not None:
             return channels.Ack(work=self._sync_thread(payload, event, inbound, bus, invoke=True))
@@ -168,6 +164,9 @@ class SlackChannel:
             "thread_ts": thread_ts,
             "team_id": payload.get("team_id", ""),
             "user_id": event.get("user", ""),
+            "message_id": ts,
+            "display_text": html.unescape(str(event.get("text", ""))),
+            "author": event.get("user", ""),
         }
         return channels.Inbound(token=f"{channel_id}:{thread_ts}", text=text, state=state)
 
@@ -179,16 +178,27 @@ class SlackChannel:
         bus: channels.Bus,
         invoke: bool | None,
     ) -> None:
+        binding = await bus.binding(
+            f"{inbound.state['team_id']}:{inbound.token}"
+        )
         is_thread = bool(event.get("thread_ts")) and event.get("channel_type") != "im"
         messages = [event]
         if is_thread:
-            body = await self._api(
-                "conversations.replies",
-                channel=inbound.state["channel_id"],
-                ts=inbound.state["thread_ts"],
-                limit="100",
-            )
-            messages = body.get("messages") or [event]
+            messages = []
+            params = {
+                "channel": inbound.state["channel_id"],
+                "ts": inbound.state["thread_ts"],
+                "limit": "100",
+            }
+            while True:
+                body = await self._api("conversations.replies", **params)
+                messages.extend(body.get("messages") or [])
+                cursor = (body.get("response_metadata") or {}).get("next_cursor", "").strip()
+                if not cursor:
+                    break
+                params["cursor"] = cursor
+            if not any(str(item.get("ts", "")) == str(event.get("ts", "")) for item in messages):
+                messages.append(event)
 
         newest_ts = str(event.get("ts", ""))
         transcript = [
@@ -209,15 +219,18 @@ class SlackChannel:
             or any(user_id and f"<@{user_id}>" in str(message.get("text", "")) for user_id in bot_user_ids)
             for message in messages
         )
-        if invoke is None and not subscribed:
+        if invoke is None and binding is None and not subscribed:
             return
-        should_invoke = bool(invoke)
         trigger_stored = False
         for message in messages:
             ts = str(message.get("ts", ""))
-            if not ts or message.get("bot_id") or message.get("user") in bot_user_ids:
-                continue
-            if not await bus.dedupe(f"message:{inbound.state['channel_id']}:{ts}"):
+            if (
+                not ts
+                or not message.get("user")
+                or message.get("bot_id")
+                or message.get("user") in bot_user_ids
+                or message.get("subtype") not in (None, "file_share")
+            ):
                 continue
             synced = self._inbound(payload, {**message, "channel": inbound.state["channel_id"], "thread_ts": inbound.state["thread_ts"]})
             if synced is None:
@@ -273,8 +286,19 @@ class SlackChannel:
             )
         elif event.type == channels.protocol.STATUS_UPDATED:
             await self._set_status(state, str(event.data.get("status", ""))[:STATUS_LIMIT])
-        elif event.type == channels.protocol.MESSAGE_RECEIVED and event.data.get("origin") == "ui":
-            await self._post_ui_message(state, str(event.data.get("message", ""))[:TEXT_LIMIT])
+        elif event.type == channels.protocol.MESSAGE_RECEIVED:
+            text = str(event.data.get("message", ""))
+            if text:
+                origin = str(event.data.get("origin", "ui"))
+                source = {
+                    "ui": "Hatchery UI",
+                    "slack": "Slack",
+                    "github": "GitHub",
+                }.get(origin, origin)
+                author = event.data.get("author") or "User"
+                await self._post(
+                    state, f"{author} · via {source}\n\n{text}"[:TEXT_LIMIT]
+                )
         elif event.type == channels.protocol.MESSAGE_COMPLETED:
             if event.data.get("final", True):
                 await self._post(state, str(event.data.get("message", ""))[:TEXT_LIMIT])
@@ -282,29 +306,6 @@ class SlackChannel:
                 await self._set_status(state, "is working...")
         elif event.type == channels.protocol.TURN_FAILED:
             await self._post(state, f"something went wrong: {event.data.get('error', 'unknown error')}")
-
-    async def _post_ui_message(self, state: dict, text: str) -> None:
-        if not text:
-            return
-        key = (str(state.get("team_id", "")), str(state.get("user_id", "")))
-        profile = self._profiles.get(key)
-        if profile is None:
-            body = await self._api("users.info", user=key[1])
-            user = body.get("user") or {}
-            details = user.get("profile") or {}
-            name = details.get("display_name") or details.get("real_name") or user.get("real_name") or user.get("name") or "User"
-            profile = (str(name), str(details.get("image_72") or details.get("image_48") or ""))
-            self._profiles[key] = profile
-        name, icon_url = profile
-        params = {
-            "channel": state["channel_id"],
-            "thread_ts": state["thread_ts"],
-            "text": text,
-            "username": f"{name} · via Hatchery UI",
-        }
-        if icon_url:
-            params["icon_url"] = icon_url
-        await self._api("chat.postMessage", **params)
 
     async def _set_status(self, state: dict, status: str) -> None:
         await self._api(
