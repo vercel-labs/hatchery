@@ -12,6 +12,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { braintrustTraceUrl } from "@/lib/braintrust";
 
 // Trimmed port of seal's prompt-form: text only, no attachments or model
 // select.
@@ -28,9 +29,6 @@ export function PromptForm({
 }) {
   const [input, setInput] = React.useState("");
   const [traceCopied, setTraceCopied] = React.useState(false);
-  const traceUrl = traceId
-    ? `https://www.braintrust.dev/app/${encodeURIComponent("anbuzin's projects")}/p/braintrust-coffee-flame/logs?r=${encodeURIComponent(traceId)}`
-    : null;
 
   function handleSubmit(event?: React.FormEvent) {
     event?.preventDefault();
@@ -60,7 +58,7 @@ export function PromptForm({
           }}
         />
         <InputGroupAddon align="block-end">
-          {traceUrl && (
+          {traceId && (
             <Tooltip>
               <TooltipTrigger
                 render={
@@ -69,13 +67,15 @@ export function PromptForm({
                     size="icon-xs"
                     aria-label="Copy Braintrust trace URL"
                     onClick={() => {
-                      void navigator.clipboard.writeText(traceUrl).then(
-                        () => {
-                          setTraceCopied(true);
-                          window.setTimeout(() => setTraceCopied(false), 2000);
-                        },
-                        () => window.alert("Could not copy the Braintrust trace URL."),
-                      );
+                      void braintrustTraceUrl(traceId)
+                        .then((url) => navigator.clipboard.writeText(url))
+                        .then(
+                          () => {
+                            setTraceCopied(true);
+                            window.setTimeout(() => setTraceCopied(false), 2000);
+                          },
+                          () => window.alert("Could not copy the Braintrust trace URL."),
+                        );
                     }}
                   >
                     <svg
