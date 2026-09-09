@@ -783,16 +783,9 @@ export function AppShell() {
         <header className="flex h-14 items-center gap-2 border-b px-4">
           <SidebarTrigger />
           <Separator orientation="vertical" className="h-4" />
-          {selection && (
-            <Dot
-              color={
-                selectedSpace?.color ??
-                (selectedChat ? colorOf(selectedChat.space_id) : undefined)
-              }
-            />
-          )}
           <span className="min-w-0 flex-1 truncate text-sm font-medium">
-            {selectedSpace?.name ?? selectedChat?.title ?? "hatchery"}
+            {selectedSpace?.name ??
+              (selectedChat ? chatSidebarText(selectedChat).label : "hatchery")}
           </span>
           {selectedChat?.space_id && spaces && (
             <Select

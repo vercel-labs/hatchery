@@ -40,9 +40,11 @@ test("combines the persisted author and possessive fragment", () => {
   });
 });
 
-test("combines the persisted author and verb fragment", () => {
+test("provides the real chat name instead of the placeholder title", () => {
   assert.equal(
-    chatSidebarText(chat({ topic: "wants to rewire slack" })).label,
+    chatSidebarText(
+      chat({ title: "new chat", topic: "wants to rewire slack" }),
+    ).label,
     "Ada wants to rewire slack",
   );
 });
