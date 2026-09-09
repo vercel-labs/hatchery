@@ -1,7 +1,13 @@
 "use client";
 
 import { getToolName } from "ai";
-import { BanIcon, CheckIcon, ShieldAlertIcon, XIcon } from "lucide-react";
+import {
+  BanIcon,
+  CheckIcon,
+  ChevronDownIcon,
+  ShieldAlertIcon,
+  XIcon,
+} from "lucide-react";
 import { type ReactNode, useLayoutEffect, useRef, useState } from "react";
 
 import { toolDetailTabs } from "@/components/parts/tool-detail-tabs";
@@ -164,7 +170,7 @@ export function ToolPart({ part }: { part: ChatToolPart }) {
           <span
             aria-hidden={inputStreaming}
             className={cn(
-              "ml-auto grid transition-[grid-template-columns,opacity] duration-300 ease-out motion-reduce:transition-none",
+              "grid transition-[grid-template-columns,opacity] duration-300 ease-out motion-reduce:transition-none",
               inputStreaming
                 ? "pointer-events-none grid-cols-[0fr] opacity-0"
                 : "grid-cols-[1fr] opacity-100",
@@ -173,10 +179,14 @@ export function ToolPart({ part }: { part: ChatToolPart }) {
             <span className="overflow-hidden">
               <CollapsibleTrigger
                 aria-label={`${name} details`}
-                className="rounded-sm text-xs underline-offset-4 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring/50"
+                className="group flex items-center gap-1 rounded-sm underline-offset-4 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring/50"
                 disabled={inputStreaming}
               >
                 details
+                <ChevronDownIcon
+                  aria-hidden="true"
+                  className="size-3.5 transition-transform duration-200 group-data-panel-open:rotate-180 motion-reduce:transition-none"
+                />
               </CollapsibleTrigger>
             </span>
           </span>
@@ -203,7 +213,10 @@ export function ToolPart({ part }: { part: ChatToolPart }) {
 
       {detailTabs.length > 0 && !inputStreaming && (
         <CollapsibleContent className="h-[var(--collapsible-panel-height)] overflow-hidden transition-[height,opacity] duration-200 ease-out motion-reduce:transition-none data-ending-style:h-0 data-ending-style:opacity-0 data-starting-style:h-0 data-starting-style:opacity-0">
-          <Tabs className="gap-1.5 px-1.5 pt-1.5" defaultValue={detailTabs[0]}>
+          <Tabs
+            className="gap-1.5 pr-1.5 pl-[1.875rem] pt-1.5"
+            defaultValue={detailTabs[0]}
+          >
             <TabsList aria-label={`${name} details`} variant="plain">
               {detailTabs.map((tab) => (
                 <TabsTrigger key={tab} value={tab}>
@@ -213,7 +226,7 @@ export function ToolPart({ part }: { part: ChatToolPart }) {
             </TabsList>
             {input != null && (
               <TabsContent
-                className="max-h-64 overflow-auto font-mono text-xs text-muted-foreground"
+                className="max-h-64 overflow-x-hidden overflow-y-auto font-mono text-xs text-muted-foreground"
                 value="input"
               >
                 <Payload value={input} />
@@ -221,7 +234,7 @@ export function ToolPart({ part }: { part: ChatToolPart }) {
             )}
             {output != null && (
               <TabsContent
-                className="max-h-64 overflow-auto font-mono text-xs"
+                className="max-h-64 overflow-x-hidden overflow-y-auto font-mono text-xs text-muted-foreground"
                 value="output"
               >
                 <Payload value={output} />
@@ -229,7 +242,7 @@ export function ToolPart({ part }: { part: ChatToolPart }) {
             )}
             {error != null && (
               <TabsContent
-                className="max-h-64 overflow-auto font-mono text-xs text-destructive"
+                className="max-h-64 overflow-x-hidden overflow-y-auto font-mono text-xs text-muted-foreground"
                 value="error"
               >
                 <Payload value={error} />
