@@ -476,11 +476,11 @@ export function AppShell() {
   return (
     <SidebarProvider className="h-svh overflow-hidden">
       <Sidebar>
-        <SidebarHeader className="p-2">
+        <SidebarHeader className="h-14 p-2">
           <DropdownMenu>
             <DropdownMenuTrigger
               render={
-                <SidebarMenuButton size="lg" className="h-auto">
+                <SidebarMenuButton size="lg" className="h-full py-0">
                   <Avatar size="sm">
                     <AvatarImage src={user.picture ?? undefined} alt="" />
                     <AvatarFallback>
