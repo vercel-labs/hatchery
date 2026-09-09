@@ -280,7 +280,7 @@ async def find_people(chat_id: str, query: str) -> list[dict]:
     return found
 
 
-async def send_message(
+async def start_thread(
     chat_id: str,
     provider: Provider,
     destination: str,
@@ -315,6 +315,8 @@ async def send_message(
             "status": "unknown",
             "detail": "Delivery was already attempted. Check the destination before retrying.",
         }
+    if await chats.bindings(chat_id):
+        raise ValueError("this chat is already linked; reply inline instead")
 
     async with _client(provider) as client:
         mentions = []

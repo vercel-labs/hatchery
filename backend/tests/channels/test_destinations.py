@@ -108,7 +108,7 @@ async def test_finds_linked_people_without_exposing_credentials(directory):
     ]
 
 
-async def test_slack_send_mentions_person_and_binds_new_thread(directory, monkeypatch):
+async def test_start_slack_thread_mentions_person_and_binds(directory, monkeypatch):
     requests = []
 
     @contextlib.asynccontextmanager
@@ -117,7 +117,7 @@ async def test_slack_send_mentions_person_and_binds_new_thread(directory, monkey
             yield value
 
     monkeypatch.setattr(destinations, "_client", client)
-    result = await destinations.send_message(
+    result = await destinations.start_thread(
         directory.id,
         "slack",
         "T1/C1",
@@ -136,7 +136,7 @@ async def test_slack_send_mentions_person_and_binds_new_thread(directory, monkey
     assert posted["text"] == "<@U2> Build finished"
 
 
-async def test_github_send_mentions_person_and_binds_issue(directory, monkeypatch):
+async def test_start_github_thread_mentions_person_and_binds_issue(directory, monkeypatch):
     requests = []
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -164,7 +164,7 @@ async def test_github_send_mentions_person_and_binds_issue(directory, monkeypatc
             yield value
 
     monkeypatch.setattr(destinations, "_client", client)
-    result = await destinations.send_message(
+    result = await destinations.start_thread(
         directory.id,
         "github",
         "acme/hatchery#7",
@@ -183,7 +183,7 @@ async def test_github_send_mentions_person_and_binds_issue(directory, monkeypatc
     assert "@johnbusiness Please review @\u200bteam" in json.loads(posted.read())["body"]
 
 
-async def test_slack_send_replay_does_not_post_twice(directory, monkeypatch):
+async def test_start_thread_replay_does_not_post_twice(directory, monkeypatch):
     requests = []
 
     @contextlib.asynccontextmanager
@@ -193,8 +193,18 @@ async def test_slack_send_replay_does_not_post_twice(directory, monkeypatch):
 
     monkeypatch.setattr(destinations, "_client", client)
     arguments = (directory.id, "slack", "T1/C1", "Done", ["john"])
-    first = await destinations.send_message(*arguments, delivery_key="turn_1")
-    second = await destinations.send_message(*arguments, delivery_key="turn_1")
+    first = await destinations.start_thread(*arguments, delivery_key="turn_1")
+    second = await destinations.start_thread(*arguments, delivery_key="turn_1")
 
     assert second == first
     assert [path for path, _ in requests].count("/chat.postMessage") == 1
+
+    with pytest.raises(ValueError, match="reply inline"):
+        await destinations.start_thread(
+            directory.id,
+            "slack",
+            "T1/C1",
+            "A different notification",
+            ["john"],
+            delivery_key="turn_2",
+        )

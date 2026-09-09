@@ -1308,35 +1308,9 @@ async def test_first_ui_prompt_classifies_before_dispatcher(monkeypatch):
         seen["stream"] = (run_id, turn_id)
         yield 'data: {"type":"finish"}\n\n'
 
-    class FakeRun:
-        def __init__(self, history):
-            self.messages = [*history, ai.assistant_message("dispatched")]
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            return None
-
-    class FakeAgent:
-        def run(self, model, history):
-            seen["history"] = history
-            return FakeRun(history)
-
-    async def fake_sse(result):
-        yield 'data: {"type":"finish"}\n\n'
-
     monkeypatch.setattr(server.classifier, "classify", classify)
-
-    def agent_for(record):
-        return FakeAgent()
-
-    flush = mock.Mock()
-    monkeypatch.setattr(server.dispatcher, "agent_for", agent_for)
-    monkeypatch.setattr(server.ai.ui.ai_sdk, "to_sse", fake_sse)
     monkeypatch.setattr(server.durable, "start_turn", start_turn)
     monkeypatch.setattr(server.agent_stream, "to_sse", durable_sse)
-    monkeypatch.setattr(server.telemetry, "flush", flush)
     ui = ai.ui.ai_sdk.to_ui_messages([ai.user_message("fix the docs")])
     async with client() as c:
         response = await c.post(
@@ -1369,35 +1343,9 @@ async def test_ui_turn_is_mirrored_to_bound_channel(monkeypatch):
         async def on_event(self, event, state):
             self.delivered.append((event, state))
 
-    class FakeRun:
-        def __init__(self, history):
-            self.messages = [
-                *history,
-                ai.assistant_message("I will handle that."),
-                ai.assistant_message("answer from AI"),
-            ]
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            return None
-
-    class FakeAgent:
-        def run(self, model, history):
-            return FakeRun(history)
-
-    async def fake_sse(result):
-        yield 'data: {"type":"finish"}\n\n'
-
     channel = FakeChannel()
     previous = server.bot.channels.get("fake")
     server.bot.channels["fake"] = channel
-    monkeypatch.setattr(
-        server.dispatcher, "agent_for", lambda record: FakeAgent()
-    )
-    monkeypatch.setattr(server.ai.ui.ai_sdk, "to_sse", fake_sse)
-
     async def start_turn(chat_id, origin, task_id=None):
         return server.turns.ActiveTurn("turn_1", "run_1", origin, task_id, 0)
 
@@ -2098,45 +2046,3 @@ async def test_tty_bridge_maps_connection_failure(monkeypatch):
     await server._bridge_tty(ws, type("Worker", (), {"id": "wrk_1"})(), "task_1")
 
     assert ws.closed == (1011, "upstream connection failed")
-
-
-async def test_dispatcher_turn_flushes_telemetry(monkeypatch):
-    space = await server.spaces.default()
-    chat = await chats.create(space.id, "trace me")
-    await events.append(
-        chat.id, "messages", ai.user_message("hello").model_dump(mode="json")
-    )
-
-    class FakeRun:
-        def __init__(self, history):
-            self.messages = [
-                *history,
-                ai.assistant_message("I will inspect that."),
-                ai.assistant_message("done"),
-            ]
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            return None
-
-        def __aiter__(self):
-            return self
-
-        async def __anext__(self):
-            raise StopAsyncIteration
-
-    class FakeAgent:
-        def run(self, model, history):
-            return FakeRun(history)
-
-    flush = mock.Mock()
-    monkeypatch.setattr(server.dispatcher, "agent_for", lambda record: FakeAgent())
-    monkeypatch.setattr(server.telemetry, "flush", flush)
-
-    assert await server._run_dispatcher_turn(chat.id, {"id": chat.id}) == [
-        "I will inspect that.",
-        "done",
-    ]
-    flush.assert_called_once_with()

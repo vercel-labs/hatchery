@@ -27,6 +27,7 @@ class TurnInput(pydantic.BaseModel):
 
 class PreparedTurn(pydantic.BaseModel):
     history: list[ai.messages.Message]
+    linked: bool
     cached_reply: str | None = None
 
 
@@ -35,9 +36,11 @@ async def prepare_turn(turn: TurnInput) -> PreparedTurn:
     """Load canonical history and recover a committed worker reply if present."""
     from app import server
     from agent import dispatcher
+    from store import chats
     import worker
 
     stored = await server._transcript(turn.chat_id)
+    linked = bool(await chats.bindings(turn.chat_id))
     cached_reply = None
     if turn.task_id is not None:
         task = await worker.get_task(turn.chat_id, turn.task_id)
@@ -60,7 +63,11 @@ async def prepare_turn(turn: TurnInput) -> PreparedTurn:
             )
     space = await server._space_for_chat(turn.chat_id)
     return PreparedTurn(
-        history=[ai.system_message(dispatcher.system_prompt(space)), *stored],
+        history=[
+            ai.system_message(dispatcher.system_prompt(space, linked=linked)),
+            *stored,
+        ],
+        linked=linked,
         cached_reply=cached_reply,
     )
 
@@ -204,7 +211,7 @@ async def find_people_step(chat_id: str, query: str) -> list[dict]:
 
 
 @workflow.step(max_retries=0)
-async def send_message_step(
+async def start_thread_step(
     chat_id: str,
     provider: typing.Literal["slack", "github"],
     destination: str,
@@ -214,7 +221,7 @@ async def send_message_step(
 ) -> dict:
     from channels import destinations
 
-    return await destinations.send_message(
+    return await destinations.start_thread(
         chat_id,
         provider,
         destination,
@@ -316,15 +323,15 @@ async def find_people(query: str) -> list[dict]:
 
 
 @ai.tool
-async def send_message(
+async def start_thread(
     provider: typing.Literal["slack", "github"],
     destination: str,
     text: str,
     people: list[str] | None = None,
 ) -> dict:
-    """Notify an exact destination and link its thread to this chat."""
+    """Start a linked thread at an exact destination."""
     agent = current_agent.get()
-    return await send_message_step(
+    result = await start_thread_step(
         agent.chat_id,
         provider,
         destination,
@@ -332,9 +339,12 @@ async def send_message(
         people,
         agent.turn_id,
     )
+    if result.get("status") == "sent":
+        agent.linked = True
+    return result
 
 
-TOOLS = [
+BASE_TOOLS = [
     create_sandbox,
     list_sandboxes,
     create_subagent,
@@ -343,7 +353,6 @@ TOOLS = [
     require_attention,
     find_channels,
     find_people,
-    send_message,
 ]
 
 
@@ -355,16 +364,26 @@ class DurableDispatcher(ai.Agent):
         chat_id: str,
         writer: vercel.workflow.WorkflowWritable,
         turn_id: str | None = None,
+        *,
+        linked: bool = False,
     ) -> None:
-        super().__init__(tools=TOOLS)
+        super().__init__(
+            tools=[*BASE_TOOLS, *([] if linked else [start_thread])]
+        )
         self.chat_id = chat_id
         self.turn_id = turn_id or "turn_unknown"
         self.writer = writer
+        self.linked = linked
 
     async def loop(
         self, context: ai.Context
     ) -> collections.abc.AsyncGenerator[ai.events.AgentEvent]:
         while context.keep_running():
+            if self.linked:
+                context.tools = [
+                    tool for tool in context.tools if tool.name != "start_thread"
+                ]
+                context._agent_tools_by_name.pop("start_thread", None)
             assistant_message = await llm_step(context, self.writer)
             context.add(assistant_message)
             yield ai.events.StreamEnd(message=assistant_message)
@@ -582,7 +601,9 @@ async def run_turn(turn: TurnInput) -> None:
         if prepared.cached_reply:
             replies = [prepared.cached_reply]
         else:
-            agent = DurableDispatcher(turn.chat_id, writer, turn.turn_id)
+            agent = DurableDispatcher(
+                turn.chat_id, writer, turn.turn_id, linked=prepared.linked
+            )
             collector = ai.experimental_telemetry.DictSink()
             token = current_agent.set(agent)
             try:

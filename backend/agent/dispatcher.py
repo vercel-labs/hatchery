@@ -1,13 +1,7 @@
-"""The dispatcher coordinates coding work in Vercel Sandboxes."""
-
-import typing
-import uuid
-
-import ai
+"""Prompt for the durable dispatcher."""
 
 import models
-from agent import sandbox
-import worker
+
 
 SYSTEM = """\
 You are hatchery's dispatcher. You coordinate coding work; you never write
@@ -26,23 +20,33 @@ report completion or failure, ask for missing input, or send a follow-up to the
 subagent when appropriate. Do not call check_subagent for information already
 included in the result. Call require_attention with result_available when giving
 the human a final result that needs review, or blocked when work cannot continue
-without human input. Do not call it while routine follow-up work continues.
+without human input. Do not call it while routine follow-up work continues. Be
+terse and concrete."""
 
+START_THREAD = """\
 When asked to notify people, call find_channels and find_people first. Use only
 exact destination and person IDs returned by those tools; never invent handles.
-Then call send_message. It sends the notification and links that Slack or GitHub
-thread to this chat, so future replies are shared across every linked channel.
-Ask for clarification instead of guessing between ambiguous matches. Be terse
-and concrete."""
+Then call start_thread. It sends the first notification and links that Slack or
+GitHub thread to this chat. Ask for clarification instead of guessing between
+ambiguous matches."""
+
+REPLY_INLINE = """\
+This conversation is already linked to an external thread. Do not start another
+thread. Reply normally without a notification tool call; your inline response
+will be delivered to every linked channel."""
 
 
-def system_prompt(space: models.Space) -> str:
+def system_prompt(space: models.Space, *, linked: bool = False) -> str:
     description = space.about.strip() or "No description provided."
     repositories = "\n".join(f"- {repo}" for repo in space.repos) or "- None"
     resources = "\n".join(
-        f"- {resource.title} ({resource.kind}): {resource.url}" for resource in space.resources
+        f"- {resource.title} ({resource.kind}): {resource.url}"
+        for resource in space.resources
     ) or "- None"
+    communication = REPLY_INLINE if linked else START_THREAD
     return f"""{SYSTEM}
+
+{communication}
 
 You are working in this space:
 - Name: {space.name}
@@ -56,129 +60,3 @@ Available repositories:
 
 Attached resources:
 {resources}"""
-
-
-def model() -> ai.Model:
-    return ai.get_model("openai/gpt-5.6-sol")
-
-
-def agent_for(chat: dict) -> ai.Agent:
-    """Build worker tools scoped to one chat."""
-    from channels import destinations
-
-    chat_id = chat["id"]
-    delivery_key = str(uuid.uuid4())
-
-    @ai.tool
-    async def find_channels(
-        provider: typing.Literal["slack", "github"], query: str
-    ) -> list[dict]:
-        """Find Slack channels or GitHub issues and pull requests."""
-        return await destinations.find_channels(chat_id, provider, query)
-
-    @ai.tool
-    async def find_people(query: str) -> list[dict]:
-        """Find linked people and return Hatchery person IDs."""
-        return await destinations.find_people(chat_id, query)
-
-    @ai.tool
-    async def send_message(
-        provider: typing.Literal["slack", "github"],
-        destination: str,
-        text: str,
-        people: list[str] | None = None,
-    ) -> dict:
-        """Notify an exact destination and link its thread to this chat."""
-        return await destinations.send_message(
-            chat_id,
-            provider,
-            destination,
-            text,
-            people,
-            delivery_key=delivery_key,
-        )
-
-    @ai.tool
-    async def create_sandbox(
-        repos: list[str] | None = None,
-        setup_script: str | None = None,
-        ports: list[int] | None = None,
-        branch: str | None = None,
-        git_sha: str | None = None,
-        title: str = "sandbox",
-        size: worker.SandboxSize = "small",
-    ) -> ai.StreamingStatusTool[typing.Any]:
-        """Create a persistent sandbox. Use big only for heavier development and tests."""
-        launch = sandbox.Launch(
-            repos=list(repos or []), setup_script=setup_script, ports=list(ports or []),
-            branch=branch, git_sha=git_sha, title=title, size=size,
-        )
-        yield "creating sandbox…"
-        created = await sandbox.create(chat_id, launch)
-        yield created.model_dump(exclude={"daemon_token"})
-
-    @ai.tool
-    async def list_sandboxes() -> list[dict[str, typing.Any]]:
-        """List this chat's reusable coding sandboxes."""
-        return [item.model_dump(exclude={"daemon_token"}) for item in await sandbox.list_all(chat_id)]
-
-    @ai.tool
-    async def create_subagent(
-        sandbox_id: str,
-        task: str,
-        model: str = "openai/gpt-5.6-sol",
-    ) -> ai.StreamingStatusTool[typing.Any]:
-        """Start an fx subagent in a sandbox."""
-        yield "dispatching subagent…"
-        created = await sandbox.launch_task(chat_id, sandbox_id, task, model)
-        yield {
-            "subagent_id": created.id,
-            "task_id": created.id,
-            "sandbox_id": created.worker_id,
-            "state": created.status,
-        }
-
-    @ai.tool
-    async def message_subagent(
-        message: str,
-        subagent_id: str | None = None,
-    ) -> dict[str, typing.Any]:
-        """Send a revision, follow-up, or answer to an existing subagent."""
-        task = await worker.get_task(chat_id, subagent_id)
-        if task is None:
-            raise ValueError("no subagent can accept a message")
-        updated = await sandbox.send_task_input(chat_id, task.id, message)
-        return {"subagent_id": updated.id, "state": updated.status}
-
-    @ai.tool
-    async def check_subagent(
-        subagent_id: str | None = None,
-        after: int | None = None,
-        limit: int = 20,
-    ) -> dict[str, typing.Any]:
-        """Read durable subagent state and recent events."""
-        return await worker.task_status(chat_id, subagent_id, after, limit)
-
-    @ai.tool
-    async def require_attention(reason: models.AttentionReason) -> dict[str, str]:
-        """Mark this chat as needing human review or input."""
-        from store import chats, events
-
-        if await chats.set_attention(chat_id, reason) is None:
-            raise ValueError("unknown chat")
-        await events.append(chat_id, "ui", {"type": "chat.changed"})
-        return {"reason": reason}
-
-    return ai.Agent(
-        tools=[
-            create_sandbox,
-            list_sandboxes,
-            create_subagent,
-            message_subagent,
-            check_subagent,
-            require_attention,
-            find_channels,
-            find_people,
-            send_message,
-        ]
-    )

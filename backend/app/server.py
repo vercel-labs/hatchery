@@ -38,7 +38,7 @@ import models
 import store
 import vercel.functions
 import vercel.queue
-from agent import classifier, dispatcher, durable, sandbox, stream as agent_stream, telemetry, topic
+from agent import classifier, durable, sandbox, stream as agent_stream, telemetry, topic
 import worker
 from worker import protocol as worker_protocol
 from channels import github, slack
@@ -1474,33 +1474,6 @@ async def _run_inbound_turn(chat_id: str) -> None:
     """Start one durable dispatcher turn after the channel has been acknowledged."""
     async with turns.run(chat_id):
         await durable.start_turn(chat_id, "channel")
-
-
-async def _run_dispatcher_turn(
-    chat_id: str, record: dict, wake: ai.messages.Message | None = None
-) -> list[str]:
-    """Run a dispatcher turn; wake context is model-only, never persisted."""
-    stored = await _transcript(chat_id)
-    space = await _space_for_chat(chat_id)
-    history = [ai.system_message(dispatcher.system_prompt(space)), *stored]
-    if wake is not None:
-        history.append(wake)
-    agent = dispatcher.agent_for(record)
-    try:
-        async with agent.run(dispatcher.model(), history) as result:
-            async for _ in result:
-                pass
-            added = result.messages[len(history) :]
-            for message in added:
-                await events.append(chat_id, "messages", message.model_dump(mode="json"))
-    finally:
-        telemetry.flush()
-    messages = [
-        message.text
-        for message in added
-        if message.role == "assistant" and message.text
-    ]
-    return messages or ["subagent completion recorded"]
 
 
 app.include_router(bot.router)
