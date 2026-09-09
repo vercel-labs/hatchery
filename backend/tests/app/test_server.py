@@ -1343,6 +1343,14 @@ async def test_ui_turn_is_mirrored_to_bound_channel(monkeypatch):
         async def on_event(self, event, state):
             self.delivered.append((event, state))
 
+    async def get_user(user_id):
+        assert user_id == "user_1"
+        return {
+            "id": "user_1",
+            "slack": {"team_id": "T1", "user_id": "U1"},
+        }
+
+    monkeypatch.setattr(server.connections.auth_store, "get_user", get_user)
     channel = FakeChannel()
     previous = server.bot.channels.get("fake")
     server.bot.channels["fake"] = channel
@@ -1356,7 +1364,15 @@ async def test_ui_turn_is_mirrored_to_bound_channel(monkeypatch):
     monkeypatch.setattr(server.agent_stream, "to_sse", durable_sse)
     try:
         space = await server.spaces.default()
-        chat, _ = await chats.claim("fake:thread", "fake", space.id, "thread", {"thread": "1"})
+        chat, _ = await chats.claim(
+            "fake:thread",
+            "fake",
+            space.id,
+            "thread",
+            {"thread": "1"},
+            user_id="user_1",
+            author_display_name="Andrey Buzin",
+        )
         ui = ai.ui.ai_sdk.to_ui_messages([ai.user_message("continue in UI")])
         async with client() as c:
             response = await c.post(
@@ -1375,7 +1391,9 @@ async def test_ui_turn_is_mirrored_to_bound_channel(monkeypatch):
             "message": "continue in UI",
             "message_id": ui[0].id,
             "origin": "ui",
-            "author": "User",
+            "author": "Andrey Buzin",
+            "slack_team_id": "T1",
+            "slack_user_id": "U1",
         }
         assert channel.delivered[0][1] == {"thread": "1"}
         stored = [

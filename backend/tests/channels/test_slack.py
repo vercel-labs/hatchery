@@ -346,6 +346,56 @@ async def test_intermediate_reply_becomes_opaque_status():
     assert params == {"channel_id": "C1", "thread_ts": "100.1", "status": "is working..."}
 
 
+async def test_ui_message_uses_slack_profile_and_avatar():
+    calls: list[httpx.Request] = []
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if request.url.path == "/api/users.info":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "user": {
+                        "profile": {
+                            "display_name": "Andrey",
+                            "image_72": "https://img/andrey.png",
+                        }
+                    },
+                },
+            )
+        return httpx.Response(200, json={"ok": True})
+
+    channel = slack.channel(
+        connector="slack/e2e-bot", transport=httpx.MockTransport(responder)
+    )
+    slack_state = {**state(), "team_id": "T1"}
+    event = channels.event(
+        channels.protocol.MESSAGE_RECEIVED,
+        message="continue here",
+        origin="ui",
+        author="Andrey Buzin",
+        slack_team_id="T1",
+        slack_user_id="U1",
+    )
+    await channel.on_event(event, slack_state)
+    await channel.on_event(event, slack_state)
+
+    assert [request.url.path for request in calls] == [
+        "/api/users.info",
+        "/api/chat.postMessage",
+        "/api/chat.postMessage",
+    ]
+    params = dict(urllib.parse.parse_qsl(calls[1].read().decode()))
+    assert params == {
+        "channel": "C1",
+        "thread_ts": "100.1",
+        "text": "continue here",
+        "username": "Andrey · via Hatchery UI",
+        "icon_url": "https://img/andrey.png",
+    }
+
+
 async def test_message_from_another_surface_has_attribution():
     calls: list[httpx.Request] = []
     channel = api_channel(calls)

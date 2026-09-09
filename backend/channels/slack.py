@@ -81,6 +81,7 @@ class SlackChannel:
         self.name = name
         self._connector = connector or os.environ.get("SLACK_CONNECTOR", "")
         self._client = httpx.AsyncClient(base_url="https://slack.com/api", transport=transport)
+        self._profiles: dict[tuple[str, str], tuple[str, str]] = {}
 
     async def handle(self, webhook: channels.Webhook, bus: channels.Bus) -> channels.Ack:
         try:
@@ -288,7 +289,13 @@ class SlackChannel:
             await self._set_status(state, str(event.data.get("status", ""))[:STATUS_LIMIT])
         elif event.type == channels.protocol.MESSAGE_RECEIVED:
             text = str(event.data.get("message", ""))
-            if text:
+            if text and event.data.get("origin") == "ui" and event.data.get(
+                "slack_team_id"
+            ) == state.get("team_id") and event.data.get("slack_user_id"):
+                await self._post_ui_message(
+                    state, text[:TEXT_LIMIT], str(event.data["slack_user_id"])
+                )
+            elif text:
                 origin = str(event.data.get("origin", "ui"))
                 source = {
                     "ui": "Hatchery UI",
@@ -306,6 +313,38 @@ class SlackChannel:
                 await self._set_status(state, "is working...")
         elif event.type == channels.protocol.TURN_FAILED:
             await self._post(state, f"something went wrong: {event.data.get('error', 'unknown error')}")
+
+    async def _post_ui_message(
+        self, state: dict, text: str, slack_user_id: str
+    ) -> None:
+        key = (str(state.get("team_id", "")), slack_user_id)
+        profile = self._profiles.get(key)
+        if profile is None:
+            body = await self._api("users.info", user=slack_user_id)
+            user = body.get("user") or {}
+            details = user.get("profile") or {}
+            name = (
+                details.get("display_name")
+                or details.get("real_name")
+                or user.get("real_name")
+                or user.get("name")
+                or "User"
+            )
+            profile = (
+                str(name),
+                str(details.get("image_72") or details.get("image_48") or ""),
+            )
+            self._profiles[key] = profile
+        name, icon_url = profile
+        params = {
+            "channel": state["channel_id"],
+            "thread_ts": state["thread_ts"],
+            "text": text,
+            "username": f"{name} · via Hatchery UI",
+        }
+        if icon_url:
+            params["icon_url"] = icon_url
+        await self._api("chat.postMessage", **params)
 
     async def _set_status(self, state: dict, status: str) -> None:
         await self._api(

@@ -851,6 +851,15 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                     stored.append(message)
                     known.add(message.id)
                     received.append(message)
+            slack_attribution = {}
+            if received and current.user_id:
+                user = await connections.auth_store.get_user(current.user_id)
+                identity = (user or {}).get("slack") or {}
+                if identity.get("team_id") and identity.get("user_id"):
+                    slack_attribution = {
+                        "slack_team_id": identity["team_id"],
+                        "slack_user_id": identity["user_id"],
+                    }
             for message in received:
                 await _emit(
                     request.chat_id,
@@ -860,6 +869,7 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                         message_id=message.id,
                         origin="ui",
                         author=current.author_display_name or "User",
+                        **slack_attribution,
                     ),
                 )
 
