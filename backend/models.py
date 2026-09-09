@@ -7,19 +7,33 @@ import pydantic
 
 AttentionReason = typing.Literal["result_available", "blocked"]
 AccentColor = typing.Literal[
+    "blue-600",
     "blue-700",
+    "blue-800",
     "blue-900",
+    "red-600",
     "red-700",
+    "red-800",
     "red-900",
+    "amber-600",
     "amber-700",
+    "amber-800",
     "amber-900",
+    "green-600",
     "green-700",
+    "green-800",
     "green-900",
+    "teal-600",
     "teal-700",
+    "teal-800",
     "teal-900",
+    "purple-600",
     "purple-700",
+    "purple-800",
     "purple-900",
+    "pink-600",
     "pink-700",
+    "pink-800",
     "pink-900",
 ]
 

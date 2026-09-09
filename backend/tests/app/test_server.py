@@ -285,11 +285,18 @@ async def test_space_create_accepts_only_explicit_accent_ids():
     accent_colors = [
         f"{family}-{shade}"
         for family in ("blue", "red", "amber", "green", "teal", "purple", "pink")
-        for shade in ("700", "900")
+        for shade in ("600", "700", "800", "900")
     ]
     async with client() as c:
         selected = [
             await c.post("/api/spaces", json={"name": color, "color": color})
+            for color in accent_colors
+        ]
+        updated = [
+            await c.patch(
+                f"/api/spaces/{selected[0].json()['id']}",
+                json={"name": "updated", "about": "", "color": color},
+            )
             for color in accent_colors
         ]
         bare = await c.post("/api/spaces", json={"name": "legacy", "color": "teal"})
@@ -299,6 +306,8 @@ async def test_space_create_accepts_only_explicit_accent_ids():
 
     assert [response.json()["color"] for response in selected] == accent_colors
     assert all(response.status_code == 200 for response in selected)
+    assert [response.json()["color"] for response in updated] == accent_colors
+    assert all(response.status_code == 200 for response in updated)
     assert bare.status_code == 422
     assert custom.status_code == 422
 

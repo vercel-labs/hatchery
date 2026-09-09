@@ -8,7 +8,7 @@ export const ACCENT_FAMILIES = [
   "pink",
 ] as const;
 
-export const ACCENT_SHADES = ["700", "900"] as const;
+export const ACCENT_SHADES = ["600", "700", "800", "900"] as const;
 
 export const ACCENT_COLORS = ACCENT_FAMILIES.flatMap((family) =>
   ACCENT_SHADES.map((shade) => `${family}-${shade}` as AccentColor),
