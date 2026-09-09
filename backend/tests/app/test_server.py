@@ -546,6 +546,32 @@ async def test_chat_create_and_list(monkeypatch):
     assert listed[0]["author_display_name"] == "Ada Lovelace"
 
 
+async def test_chat_create_retries_one_client_generated_id():
+    request = {"id": "chat_123456789abc", "space_id": None}
+    async with client() as c:
+        first = await c.post("/api/chats", json=request)
+        second = await c.post("/api/chats", json=request)
+        listed = (await c.get("/api/chats")).json()
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json() == second.json()
+    assert [item["id"] for item in listed] == ["chat_123456789abc"]
+
+
+async def test_chat_create_rejects_conflicting_client_generated_id():
+    await chats.create_once(
+        "chat_123456789abc", None, "new chat", user_id="user_other"
+    )
+    async with client() as c:
+        response = await c.post("/api/chats", json={"id": "chat_123456789abc"})
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "chat id conflicts with an existing chat"
+    }
+
+
 async def test_chat_archive_and_unarchive():
     chat = await chats.create(None, "work", user_id="user_test")
 
@@ -722,29 +748,32 @@ async def test_chat_events_replay_after_cursor():
 
 
 async def test_chat_messages_from_store():
+    chat = await chats.create(None, "messages", user_id="user_test")
     for message in (ai.user_message("hi"), ai.assistant_message("hello")):
-        await events.append("chat_x", "messages", message.model_dump(mode="json"))
+        await events.append(chat.id, "messages", message.model_dump(mode="json"))
     async with client() as c:
-        ui = (await c.get("/api/chats/chat_x/messages")).json()
-        empty = (await c.get("/api/chats/chat_empty/messages")).json()
+        ui = (await c.get(f"/api/chats/{chat.id}/messages")).json()
+        missing = await c.get("/api/chats/chat_missing/messages")
     assert [m["role"] for m in ui] == ["user", "assistant"]
     assert ui[0]["parts"][0]["text"] == "hi"
-    assert empty == []
+    assert missing.status_code == 404
+    assert missing.json() == {"detail": "unknown chat"}
 
 
 async def test_chat_messages_hide_slack_envelope_and_mark_origin():
+    chat = await chats.create(None, "slack message", user_id="user_test")
     text = (
         '<slack_message channel="C1" thread_ts="1.0" ts="1.1" sender="U1" team="T1">\n'
         "hello &lt;-&gt; slack\n</slack_message>"
     )
-    await events.append("chat_x", "messages", ai.user_message(text).model_dump(mode="json"))
+    await events.append(chat.id, "messages", ai.user_message(text).model_dump(mode="json"))
 
     async with client() as c:
-        [message] = (await c.get("/api/chats/chat_x/messages")).json()
+        [message] = (await c.get(f"/api/chats/{chat.id}/messages")).json()
 
     assert message["parts"][0]["text"] == "hello <-> slack"
     assert message["metadata"]["origin"] == "slack"
-    stored = await events.read("chat_x", "messages")
+    stored = await events.read(chat.id, "messages")
     assert ai.messages.Message.model_validate(stored[0][1]).text == text
 
 
@@ -765,6 +794,24 @@ def test_dedupe_tool_history_repairs_old_ui_duplicates():
     assert len(repaired) == 2
     assert repaired[0].tool_calls[0].tool_call_id == "call_1"
     assert repaired[1].tool_results[0].tool_call_id == "call_1"
+
+
+async def test_ui_post_hides_another_users_chat():
+    chat = await chats.create(None, "private", user_id="user_other")
+    message = ai.ui.ai_sdk.to_ui_messages([ai.user_message("secret")])[0]
+
+    async with client() as c:
+        response = await c.post(
+            "/api/chat",
+            json={
+                "chat_id": chat.id,
+                "messages": [message.model_dump(mode="json")],
+            },
+        )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "unknown chat"}
+    assert await events.read(chat.id, "messages") == []
 
 
 async def test_archived_chat_rejects_ui_post_before_persisting(monkeypatch):
@@ -838,6 +885,26 @@ async def test_archived_chat_rejects_inbound_with_explanation(monkeypatch):
             True,
         )
     ]
+
+
+async def test_draft_sandbox_suggestion_needs_no_chat(monkeypatch):
+    space = await server.spaces.create("draft")
+    seen = []
+
+    async def suggest(selected):
+        seen.append(selected.id)
+        return server.sandbox.Launch(title="draft sandbox")
+
+    monkeypatch.setattr(server.sandbox, "suggest", suggest)
+    async with client() as c:
+        response = await c.get(
+            "/api/sandboxes/suggestion", params={"space_id": space.id}
+        )
+
+    assert response.status_code == 200
+    assert response.json()["title"] == "draft sandbox"
+    assert seen == [space.id]
+    assert await chats.list_all() == []
 
 
 async def test_archived_chat_rejects_manual_sandbox(monkeypatch):
@@ -1423,9 +1490,9 @@ async def test_ui_turn_is_mirrored_to_bound_channel(monkeypatch):
             self.delivered.append((event, state))
 
     async def get_user(user_id):
-        assert user_id == "user_1"
+        assert user_id == "user_test"
         return {
-            "id": "user_1",
+            "id": "user_test",
             "slack": {"team_id": "T1", "user_id": "U1"},
         }
 
@@ -1449,7 +1516,7 @@ async def test_ui_turn_is_mirrored_to_bound_channel(monkeypatch):
             space.id,
             "thread",
             {"thread": "1"},
-            user_id="user_1",
+            user_id="user_test",
             author_display_name="Andrey Buzin",
         )
         ui = ai.ui.ai_sdk.to_ui_messages([ai.user_message("continue in UI")])

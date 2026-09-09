@@ -49,7 +49,7 @@ export function PromptForm({
   isMarkingAsRead: boolean;
   showAutoSpace?: boolean;
   autoFocus?: boolean;
-  onSubmit: (message: { text: string }) => void;
+  onSubmit: (message: { text: string }) => void | Promise<void>;
   onStop: () => void;
   onSpaceChange: (spaceId: string) => void | Promise<void>;
   onMarkAsRead: () => void;
@@ -59,12 +59,14 @@ export function PromptForm({
   const [isChangingSpace, setIsChangingSpace] = React.useState(false);
   const selectedSpace = spaces.find((space) => space.id === spaceId);
 
-  function handleSubmit(event?: React.FormEvent) {
+  async function handleSubmit(event?: React.FormEvent) {
     event?.preventDefault();
     const text = input.trim();
     if (!text || isBusy || isChangingSpace) return;
-    onSubmit({ text });
-    setInput("");
+    try {
+      await onSubmit({ text });
+      setInput("");
+    } catch {}
   }
 
   return (

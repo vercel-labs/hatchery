@@ -7,6 +7,7 @@ import { ChatMessage } from "@/components/chat-message";
 import { isBrandNewChat } from "@/components/new-chat-state";
 import { Button } from "@/components/ui/button";
 import { PromptForm } from "@/components/prompt-form";
+import { SandboxForm } from "@/components/sandbox-form";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   Empty,
@@ -26,6 +27,94 @@ import { apiBase, apiFetch, type Chat, type Space } from "@/lib/api";
 import { submissionLabel } from "@/components/chat-status";
 import type { ChatUIMessage } from "@/lib/messages";
 
+export function NewChatView({
+  spaces,
+  onPersist,
+  onQueueInitialMessage,
+  onOpenChat,
+  onCreateSpace,
+  isCurrent,
+}: {
+  spaces: Space[];
+  onPersist: (spaceId: string | null) => Promise<Chat>;
+  onQueueInitialMessage: (chatId: string, text: string) => void;
+  onOpenChat: (chatId: string) => void;
+  onCreateSpace: () => void;
+  isCurrent: () => boolean;
+}) {
+  const [spaceId, setSpaceId] = useState<string | null>(null);
+  const [showSandboxForm, setShowSandboxForm] = useState(false);
+  const [persisting, setPersisting] = useState(false);
+  const [error, setError] = useState("");
+  const submitting = useRef(false);
+
+  const submit = async ({ text }: { text: string }) => {
+    if (submitting.current) throw new Error("Chat creation is already in progress");
+    submitting.current = true;
+    setPersisting(true);
+    setError("");
+    try {
+      const chat = await onPersist(spaceId);
+      if (!isCurrent()) return;
+      onQueueInitialMessage(chat.id, text);
+      onOpenChat(chat.id);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not create chat");
+      submitting.current = false;
+      setPersisting(false);
+      throw reason;
+    }
+  };
+
+  return (
+    <div className="flex min-h-0 flex-1 items-center justify-center p-6">
+      <div className="flex w-full max-w-2xl flex-col gap-3">
+        <h1 className="px-1 text-sm font-medium text-muted-foreground">
+          New chat
+        </h1>
+        {error && (
+          <Alert variant="destructive">
+            <AlertTitle>Request failed</AlertTitle>
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
+        <PromptForm
+          autoFocus
+          isBusy={persisting}
+          traceId={null}
+          spaces={spaces}
+          spaceId={spaceId}
+          showAutoSpace
+          showMarkAsRead={false}
+          isMarkingAsRead={false}
+          onSubmit={submit}
+          onStop={() => {}}
+          onSpaceChange={(nextSpaceId) => setSpaceId(nextSpaceId)}
+          onMarkAsRead={() => {}}
+        />
+        <div className="flex flex-wrap gap-2 px-1">
+          <Button variant="outline" onClick={() => setShowSandboxForm(true)}>
+            <PlusIcon data-icon="inline-start" />
+            Create sandbox manually
+          </Button>
+          <Button variant="outline" onClick={onCreateSpace}>
+            <PlusIcon data-icon="inline-start" />
+            New space
+          </Button>
+        </div>
+      </div>
+      <SandboxForm
+        spaceId={spaceId}
+        open={showSandboxForm}
+        onOpenChange={setShowSandboxForm}
+        onPersist={() => onPersist(spaceId)}
+        onCreated={(_sandboxId, chatId) => onOpenChat(chatId)}
+        isCurrent={isCurrent}
+      />
+    </div>
+  );
+}
+
 export function ChatView({
   chatId,
   initialMessages,
@@ -36,6 +125,8 @@ export function ChatView({
   traceId,
   archived,
   attentionReason,
+  initialMessage,
+  onInitialMessageStarted,
   onMessagesChange,
   onSeen,
   onSpaceChange,
@@ -52,6 +143,8 @@ export function ChatView({
   traceId: string | null;
   archived: boolean;
   attentionReason: Chat["attention_reason"];
+  initialMessage?: string;
+  onInitialMessageStarted?: () => void;
   onMessagesChange?: (messages: ChatUIMessage[]) => void;
   onSeen: (chat: Chat) => void;
   onSpaceChange: (spaceId: string) => void | Promise<void>;
@@ -91,8 +184,16 @@ export function ChatView({
   });
 
   const attachedGeneration = useRef(streamGeneration);
+  const initialMessageSent = useRef(false);
   const [markingSeen, setMarkingSeen] = useState(false);
   const [seenError, setSeenError] = useState("");
+
+  useEffect(() => {
+    if (!initialMessage || initialMessageSent.current) return;
+    initialMessageSent.current = true;
+    onInitialMessageStarted?.();
+    void sendMessage({ text: initialMessage });
+  }, [initialMessage, onInitialMessageStarted, sendMessage]);
 
   useEffect(() => {
     onMessagesChange?.(messages);
@@ -169,7 +270,9 @@ export function ChatView({
             showAutoSpace={spaceId === null}
             showMarkAsRead={false}
             isMarkingAsRead={markingSeen}
-            onSubmit={({ text }) => sendMessage({ text })}
+            onSubmit={({ text }) => {
+              void sendMessage({ text });
+            }}
             onStop={() => void stop()}
             onSpaceChange={onSpaceChange}
             onMarkAsRead={() => void markAsSeen()}
@@ -271,7 +374,9 @@ export function ChatView({
             spaceId={spaceId}
             showMarkAsRead={Boolean(attentionReason)}
             isMarkingAsRead={markingSeen}
-            onSubmit={({ text }) => sendMessage({ text })}
+            onSubmit={({ text }) => {
+              void sendMessage({ text });
+            }}
             onStop={() => void stop()}
             onSpaceChange={onSpaceChange}
             onMarkAsRead={() => void markAsSeen()}

@@ -53,8 +53,11 @@ import {
   resolveSpaceColor,
 } from "@/lib/space-colors";
 import { cn } from "@/lib/utils";
-import { ChatView } from "@/components/chat";
-import { newChatRequest } from "@/components/new-chat-state";
+import { ChatView, NewChatView } from "@/components/chat";
+import {
+  createChatPersister,
+  type NewChatRequest,
+} from "@/components/new-chat-state";
 import { SandboxForm } from "@/components/sandbox-form";
 import { SpaceColorPicker } from "@/components/space-color-picker";
 import { TerminalPane, type SandboxWorkspace } from "@/components/terminal-pane";
@@ -229,6 +232,15 @@ export function AppShell() {
     requiresAttention: false,
     spaceId: null,
   });
+  const [newChatGeneration, setNewChatGeneration] = useState(0);
+  const newChatGenerationRef = useRef(0);
+  const draftPersister = useRef<
+    ((spaceId: string | null) => Promise<Chat>) | null
+  >(null);
+  const [pendingInitialMessage, setPendingInitialMessage] = useState<{
+    chatId: string;
+    text: string;
+  } | null>(null);
 
   const disconnectGitHub = async () => {
     if (!window.confirm("Disconnect GitHub? Active sandboxes will lose repository access.")) {
@@ -392,17 +404,49 @@ export function AppShell() {
     refreshingChats.current = false;
   }, []);
 
-  const createChat = async () => {
-    const res = await apiFetch("/api/chats", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(newChatRequest()),
-    });
-    if (!res.ok) return;
-    const chat: Chat = await res.json();
-    setChats((prev) => [chat, ...(prev ?? [])]);
-    router.push(`/chats/${encodeURIComponent(chat.id)}`);
+  const persistDraftChat = useCallback((spaceId: string | null) => {
+    if (!draftPersister.current) {
+      draftPersister.current = createChatPersister(
+        async (request: NewChatRequest) => {
+          const response = await apiFetch("/api/chats", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(request),
+          });
+          if (!response.ok) {
+            const body = await response.json().catch(() => ({}));
+            throw new Error(body.detail ?? "Could not create chat");
+          }
+          const chat: Chat = await response.json();
+          setChats((current) => [
+            chat,
+            ...(current ?? []).filter((item) => item.id !== chat.id),
+          ]);
+          return chat;
+        },
+      );
+    }
+    return draftPersister.current(spaceId);
+  }, []);
+
+  const openNewChat = () => {
+    draftPersister.current = null;
+    setPendingInitialMessage(null);
+    newChatGenerationRef.current += 1;
+    setNewChatGeneration(newChatGenerationRef.current);
+    if (pathname !== "/") router.push("/");
   };
+
+  const openPersistedChat = useCallback(
+    (chatId: string) => {
+      router.replace(`/chats/${encodeURIComponent(chatId)}`);
+    },
+    [router],
+  );
+
+  const queueInitialMessage = useCallback((chatId: string, text: string) => {
+    setPendingInitialMessage({ chatId, text });
+  }, []);
 
   const setChatArchived = async (chat: Chat, archived: boolean) => {
     const res = await apiFetch(`/api/chats/${chat.id}/archive`, {
@@ -739,7 +783,7 @@ export function AppShell() {
                 <SidebarGroupAction
                   title="New chat"
                   aria-label="New chat"
-                  onClick={createChat}
+                  onClick={openNewChat}
                 >
                   <PlusIcon />
                 </SidebarGroupAction>
@@ -893,7 +937,11 @@ export function AppShell() {
           <Separator orientation="vertical" className="h-4" />
           <span className="min-w-0 flex-1 truncate text-sm font-medium">
             {selectedSpace?.name ??
-              (selectedChat ? chatSidebarText(selectedChat).label : "hatchery")}
+              (selectedChat
+                ? chatSidebarText(selectedChat).label
+                : selection
+                  ? "hatchery"
+                  : "New chat")}
           </span>
         </header>
         {selectedChat && !failed ? (
@@ -902,6 +950,16 @@ export function AppShell() {
             chat={selectedChat}
             spaces={spaces ?? []}
             warning={selectedWarning?.warning}
+            initialMessage={
+              pendingInitialMessage?.chatId === selectedChat.id
+                ? pendingInitialMessage.text
+                : undefined
+            }
+            onInitialMessageStarted={() =>
+              setPendingInitialMessage((current) =>
+                current?.chatId === selectedChat.id ? null : current,
+              )
+            }
             onChatChanged={refreshChats}
             onChatUpdated={updateChat}
             onSpaceChange={(spaceId) =>
@@ -928,7 +986,7 @@ export function AppShell() {
             }
           />
         ) : (
-          <div className="flex-1 overflow-y-auto p-6 md:p-10">
+          <div className="flex flex-1 overflow-y-auto p-6 md:p-10">
             {failed ? (
               <Empty>
                 <EmptyHeader>
@@ -962,14 +1020,18 @@ export function AppShell() {
                 </EmptyHeader>
               </Empty>
             ) : (
-              <Empty>
-                <EmptyHeader>
-                  <EmptyTitle>Nothing selected</EmptyTitle>
-                  <EmptyDescription>
-                    Pick a space or a chat from the sidebar.
-                  </EmptyDescription>
-                </EmptyHeader>
-              </Empty>
+              <NewChatView
+                key={newChatGeneration}
+                spaces={spaces ?? []}
+                onPersist={persistDraftChat}
+                onQueueInitialMessage={queueInitialMessage}
+                onOpenChat={openPersistedChat}
+                onCreateSpace={() => setAddingSpace(true)}
+                isCurrent={() =>
+                  window.location.pathname === "/" &&
+                  newChatGenerationRef.current === newChatGeneration
+                }
+              />
             )}
           </div>
         )}
@@ -1611,6 +1673,8 @@ function LiveChat({
   chat,
   spaces,
   warning,
+  initialMessage,
+  onInitialMessageStarted,
   onChatChanged,
   onChatUpdated,
   onSpaceChange,
@@ -1621,6 +1685,8 @@ function LiveChat({
   chat: Chat;
   spaces: Space[];
   warning?: string;
+  initialMessage?: string;
+  onInitialMessageStarted?: () => void;
   onChatChanged: () => void;
   onChatUpdated: (chat: Chat) => void;
   onSpaceChange: (spaceId: string) => void | Promise<void>;
@@ -1748,6 +1814,8 @@ function LiveChat({
             traceId={chat.telemetry_span?.trace_id ?? null}
             archived={chat.archived_at !== null}
             attentionReason={chat.attention_reason}
+            initialMessage={initialMessage}
+            onInitialMessageStarted={onInitialMessageStarted}
             onMessagesChange={onMessagesChange}
             onSeen={onChatUpdated}
             onSpaceChange={onSpaceChange}

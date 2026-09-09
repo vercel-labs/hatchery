@@ -708,6 +708,7 @@ async def list_chats(request: fastapi.Request) -> list[models.Chat]:
 
 
 class CreateChatRequest(pydantic.BaseModel):
+    id: str | None = pydantic.Field(default=None, pattern=r"^chat_[0-9a-f]{12}$")
     title: str = "new chat"
     space_id: str | None = None
 
@@ -720,6 +721,17 @@ async def create_chat(request: CreateChatRequest, http_request: fastapi.Request)
         found = [await spaces.default()]
     if request.space_id is not None and not any(space.id == request.space_id for space in found):
         raise fastapi.HTTPException(404, "unknown space")
+    if request.id is not None:
+        try:
+            return await chats.create_once(
+                request.id,
+                request.space_id,
+                request.title,
+                user_id=user["id"] if user is not None else None,
+                author_display_name=_user_display_name(user),
+            )
+        except ValueError as error:
+            raise fastapi.HTTPException(409, str(error)) from error
     return await chats.create(
         request.space_id,
         request.title,
@@ -808,6 +820,8 @@ async def chat_events(
 @app.get("/api/chats/{chat_id}/messages")
 async def chat_messages(chat_id: str) -> list[ai.ui.ai_sdk.UIMessage]:
     """The stored transcript as UI messages, with internal messages hidden."""
+    if await chats.get(chat_id) is None:
+        raise fastapi.HTTPException(404, "unknown chat")
     transcript = [
         message
         for message in await _transcript(chat_id)
@@ -852,13 +866,22 @@ class ChatRequest(pydantic.BaseModel):
 
 
 @app.post("/api/chat")
-async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
+async def chat(
+    request: ChatRequest, http_request: fastapi.Request
+) -> fastapi.responses.StreamingResponse:
     """Persist the user input, then attach to its durable workflow stream."""
     incoming, _ = ai.ui.ai_sdk.to_messages(request.messages)
     try:
         async with turns.run(request.chat_id):
             current = await chats.get(request.chat_id)
             if current is None:
+                raise fastapi.HTTPException(404, "unknown chat")
+            user = http_request.state.user
+            if current.user_id is None and current.trigger == "ui":
+                current = await chats.claim_user(
+                    current.id, user["id"], _user_display_name(user)
+                ) or current
+            if current.user_id != user["id"]:
                 raise fastapi.HTTPException(404, "unknown chat")
             if current.archived_at is not None:
                 raise fastapi.HTTPException(
@@ -984,6 +1007,19 @@ def _dedupe_tool_history(messages: list[ai.messages.Message]) -> list[ai.message
         if parts:
             repaired.append(message if len(parts) == len(message.parts) else message.model_copy(update={"parts": parts}))
     return repaired
+
+
+@app.get("/api/sandboxes/suggestion")
+async def suggest_draft_sandbox(space_id: str | None = None) -> sandbox.Launch:
+    space = await spaces.get(space_id) if space_id else None
+    if space_id is not None and space is None:
+        raise fastapi.HTTPException(404, "unknown space")
+    if space is None:
+        found = await spaces.list_all()
+        space = found[0] if found else await spaces.default()
+    async with ai.experimental_telemetry.span("sandbox.suggest") as span:
+        span.set_attrs({"space.id": space.id})
+        return await sandbox.suggest(space)
 
 
 @app.get("/api/chats/{chat_id}/sandboxes/suggestion")
