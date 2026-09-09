@@ -35,7 +35,35 @@ async def test_durable_tools_keep_effects_non_retriable():
     assert durable.create_subagent_step.max_retries == 0
     assert durable.message_subagent_step.max_retries == 0
     assert durable.require_attention_step.max_retries == 0
+    assert durable.start_thread_step.max_retries == 0
     assert durable.deliver_replies.max_retries == 0
+
+
+def test_start_thread_tool_is_removed_for_linked_chats():
+    class Writer:
+        async def write(self, value):
+            pass
+
+    unlinked = durable.DurableDispatcher("chat_1", Writer())
+    linked = durable.DurableDispatcher("chat_1", Writer(), linked=True)
+
+    assert "start_thread" in {tool.name for tool in unlinked.tools}
+    assert "start_thread" not in {tool.name for tool in linked.tools}
+
+
+async def test_prepare_turn_detects_linked_chat():
+    from store import spaces
+
+    space = await spaces.default()
+    chat = await chats.create(space.id, "linked")
+    await chats.bind("slack:T1:C1:1.0", chat.id, "slack", {})
+
+    prepared = await durable.prepare_turn.func(
+        durable.TurnInput(chat_id=chat.id, origin="ui")
+    )
+
+    assert prepared.linked is True
+    assert "Reply normally without a notification tool call" in prepared.history[0].text
 
 
 async def test_custom_loop_uses_context_and_workflow_stream(monkeypatch):
@@ -88,6 +116,33 @@ async def test_tools_read_trusted_chat_id_from_current_agent(monkeypatch):
 
     assert calls == ["chat_1"]
     assert durable.list_sandboxes.tool.spec.params["properties"] == {}
+
+
+async def test_start_thread_uses_trusted_chat_and_turn_ids(monkeypatch):
+    calls = []
+
+    async def step(*args):
+        calls.append(args)
+        return {"status": "sent"}
+
+    class Writer:
+        async def write(self, value):
+            pass
+
+    monkeypatch.setattr(durable, "start_thread_step", step)
+    agent = durable.DurableDispatcher("chat_trusted", Writer(), "turn_1")
+    token = durable.current_agent.set(agent)
+    try:
+        assert await durable.start_thread.fn(
+            "slack", "T1/C1", "done", ["user_1"]
+        ) == {"status": "sent"}
+        assert agent.linked is True
+    finally:
+        durable.current_agent.reset(token)
+
+    assert calls == [
+        ("chat_trusted", "slack", "T1/C1", "done", ["user_1"], "turn_1")
+    ]
 
 
 async def test_durable_require_attention_uses_trusted_chat_id(monkeypatch):

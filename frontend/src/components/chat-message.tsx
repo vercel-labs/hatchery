@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { TextPart } from "@/components/parts/text-part";
 import { ToolPart } from "@/components/parts/tool-part";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
-import { Message, MessageContent } from "@/components/ui/message";
+import { Message, MessageContent, MessageHeader } from "@/components/ui/message";
 import { getFreshParts } from "@/lib/messages";
 import type { ChatMessagePart, ChatUIMessage } from "@/lib/messages";
 
@@ -59,13 +59,16 @@ export function ChatMessage({ message }: { message: ChatUIMessage }) {
     return (
       <Message align="end">
         <MessageContent>
+          {(message.metadata?.author || message.metadata?.origin) && (
+            <MessageHeader>
+              {message.metadata.author}
+              {message.metadata.author && message.metadata.origin && " · "}
+              {message.metadata.origin &&
+                `via ${{ slack: "Slack", github: "GitHub", ui: "UI" }[message.metadata.origin]}`}
+            </MessageHeader>
+          )}
           {text.trim() && (
             <Bubble align="end" variant="muted" data-message-role="user">
-              {message.metadata?.origin === "slack" && (
-                <span className="self-end px-1 text-xs text-muted-foreground">
-                  via slack
-                </span>
-              )}
               <BubbleContent>
                 <TextPart
                   text={text}

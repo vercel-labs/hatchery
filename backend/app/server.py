@@ -14,6 +14,7 @@ _StoreHub (dedupe, claim binding, append); no turn runs on inbound yet.
 import asyncio
 import contextlib
 import datetime
+import hashlib
 import hmac
 import html
 import json
@@ -37,7 +38,7 @@ import models
 import store
 import vercel.functions
 import vercel.queue
-from agent import classifier, dispatcher, durable, sandbox, stream as agent_stream, telemetry, topic
+from agent import classifier, durable, sandbox, stream as agent_stream, telemetry, topic
 import worker
 from worker import protocol as worker_protocol
 from channels import github, slack
@@ -99,17 +100,25 @@ class _StoreHub:
             if channel == "slack":
                 token = f"slack:{inbound.state['team_id']}:{inbound.token}"
                 legacy_token = f"slack:{inbound.token}"
-            chat, created = await chats.claim(
-                token,
-                channel,
-                None,
-                title,
-                inbound.state,
-                user_id=user_id,
-                author_display_name=_user_display_name(user),
-                legacy_token=legacy_token,
-            )
-            if user_id is not None and chat.user_id != user_id:
+            linked = await chats.binding(token)
+            if linked is not None:
+                chat = await chats.get(linked.chat_id)
+                if chat is None:
+                    raise ValueError("binding refers to a missing chat")
+                await chats.bind(token, chat.id, channel, inbound.state)
+                created = False
+            else:
+                chat, created = await chats.claim(
+                    token,
+                    channel,
+                    None,
+                    title,
+                    inbound.state,
+                    user_id=user_id,
+                    author_display_name=_user_display_name(user),
+                    legacy_token=legacy_token,
+                )
+            if linked is None and user_id is not None and chat.user_id != user_id:
                 span.set_attrs(ignored="owned_by_another_user", **{"chat.id": chat.id})
                 return
             async with turns.run(chat.id):
@@ -125,43 +134,58 @@ class _StoreHub:
                         "This chat is archived. Unarchive it in Hatchery before posting.",
                     )
                     return
-                if created:
-                    if inbound.persist:
-                        await events.append(
-                            chat.id, "messages", ai.user_message(inbound.text).model_dump(mode="json")
-                        )
-                        await events.append(chat.id, "ui", {"type": "messages.changed"})
-                    await _classify_chat(
-                        chat.id,
-                        inbound.text,
-                        {
-                            "origin": channel,
-                            "author": _inbound_author(inbound),
-                            "repo": inbound.repo,
-                            "channel_state": inbound.state,
-                        },
-                        found,
-                    )
-                    chat = await chats.get(chat.id) or chat
-                    _spawn(_name_chat(chat.id, inbound.text))
-                elif chat.space_id is None:
-                    await _classify_chat(
-                        chat.id,
-                        inbound.text,
-                        {
-                            "origin": channel,
-                            "author": _inbound_author(inbound),
-                            "repo": inbound.repo,
-                            "channel_state": inbound.state,
-                        },
-                        found,
-                    )
-                    chat = await chats.get(chat.id) or chat
-                elif inbound.persist:
+                source_id = str(inbound.state.get("message_id", ""))
+                message = ai.user_message(inbound.text)
+                if source_id:
+                    message.id = "inbound_" + hashlib.sha256(
+                        f"{token}:{source_id}".encode()
+                    ).hexdigest()
+                author = _user_display_name(user) or _inbound_author(inbound)
+                display_text = str(inbound.state.get("display_text", inbound.text))
+                message.provider_metadata = {
+                    "hatchery": {
+                        "origin": channel,
+                        "author": author,
+                        "display_text": display_text,
+                    }
+                }
+                known = {saved.id for saved in await _transcript(chat.id)}
+                stored = inbound.persist and message.id not in known
+                if stored:
                     await events.append(
-                        chat.id, "messages", ai.user_message(inbound.text).model_dump(mode="json")
+                        chat.id, "messages", message.model_dump(mode="json")
                     )
                     await events.append(chat.id, "ui", {"type": "messages.changed"})
+                    await _emit(
+                        chat.id,
+                        channels.event(
+                            channels.protocol.MESSAGE_RECEIVED,
+                            message=display_text,
+                            message_id=message.id,
+                            origin=channel,
+                            author=author,
+                            source_binding=token,
+                        ),
+                    )
+                elif inbound.persist and message.id in known:
+                    span.set_attrs(ignored="duplicate_message", **{"chat.id": chat.id})
+                    return
+
+                if chat.space_id is None:
+                    await _classify_chat(
+                        chat.id,
+                        inbound.text,
+                        {
+                            "origin": channel,
+                            "author": author,
+                            "repo": inbound.repo,
+                            "channel_state": inbound.state,
+                        },
+                        found,
+                    )
+                    chat = await chats.get(chat.id) or chat
+                if created:
+                    _spawn(_name_chat(chat.id, inbound.text))
                 span.set_attrs({"space.id": chat.space_id or ""}, invoke=inbound.invoke)
                 log.info("inbound %s -> %s chat %s", channel, "new" if created else "existing", chat.id)
                 if inbound.invoke:
@@ -169,6 +193,10 @@ class _StoreHub:
 
     async def dedupe(self, key: str) -> bool:
         return await chats.dedupe(key)
+
+    async def binding(self, channel: str, token: str) -> dict | None:
+        binding = await chats.binding(f"{channel}:{token}")
+        return binding.state if binding is not None else None
 
 
 def _user_display_name(user: dict | None) -> str | None:
@@ -760,17 +788,34 @@ async def chat_messages(chat_id: str) -> list[ai.ui.ai_sdk.UIMessage]:
         != "subagent_result"
     ]
     messages = ai.ui.ai_sdk.to_ui_messages(transcript)
+    metadata = {
+        message.id: (message.provider_metadata or {}).get("hatchery", {})
+        for message in transcript
+    }
     for message in messages:
         if message.role != "user":
             continue
+        source = metadata.get(message.id, {})
+        if source.get("origin"):
+            message.metadata = {
+                key: source[key]
+                for key in ("origin", "author")
+                if key in source
+            }
         for part in message.parts:
             if getattr(part, "type", None) != "text":
                 continue
-            match = re.fullmatch(r'<slack_message\b[^>]*>\s*(.*?)\s*</slack_message>', part.text, re.DOTALL)
-            if match is None:
+            if "display_text" in source:
+                part.text = source["display_text"]
                 continue
-            part.text = html.unescape(match.group(1))
-            message.metadata = {**(message.metadata or {}), "origin": "slack"}
+            for tag, origin in (("slack_message", "slack"), ("github_context", "github")):
+                match = re.fullmatch(
+                    rf'<{tag}\b[^>]*>\s*(.*?)\s*</{tag}>', part.text, re.DOTALL
+                )
+                if match:
+                    part.text = html.unescape(match.group(1)) if origin == "slack" else match.group(1)
+                    message.metadata = {**(message.metadata or {}), "origin": origin}
+                    break
     return messages
 
 
@@ -809,13 +854,25 @@ async def chat(request: ChatRequest) -> fastapi.responses.StreamingResponse:
                     stored.append(message)
                     known.add(message.id)
                     received.append(message)
+            slack_attribution = {}
+            if received and current.user_id:
+                user = await connections.auth_store.get_user(current.user_id)
+                identity = (user or {}).get("slack") or {}
+                if identity.get("team_id") and identity.get("user_id"):
+                    slack_attribution = {
+                        "slack_team_id": identity["team_id"],
+                        "slack_user_id": identity["user_id"],
+                    }
             for message in received:
                 await _emit(
                     request.chat_id,
                     channels.event(
                         channels.protocol.MESSAGE_RECEIVED,
                         message=message.text,
+                        message_id=message.id,
                         origin="ui",
+                        author=current.author_display_name or "User",
+                        **slack_attribution,
                     ),
                 )
 
@@ -1405,6 +1462,8 @@ async def _emit(chat_id: str, event: channels.Event) -> list[str]:
         )
         failures = []
         for binding in bindings:
+            if binding.token == event.data.get("source_binding"):
+                continue
             channel = bot.channels.get(binding.channel)
             if channel is None:
                 continue
@@ -1428,33 +1487,6 @@ async def _run_inbound_turn(chat_id: str) -> None:
     """Start one durable dispatcher turn after the channel has been acknowledged."""
     async with turns.run(chat_id):
         await durable.start_turn(chat_id, "channel")
-
-
-async def _run_dispatcher_turn(
-    chat_id: str, record: dict, wake: ai.messages.Message | None = None
-) -> list[str]:
-    """Run a dispatcher turn; wake context is model-only, never persisted."""
-    stored = await _transcript(chat_id)
-    space = await _space_for_chat(chat_id)
-    history = [ai.system_message(dispatcher.system_prompt(space)), *stored]
-    if wake is not None:
-        history.append(wake)
-    agent = dispatcher.agent_for(record)
-    try:
-        async with agent.run(dispatcher.model(), history) as result:
-            async for _ in result:
-                pass
-            added = result.messages[len(history) :]
-            for message in added:
-                await events.append(chat_id, "messages", message.model_dump(mode="json"))
-    finally:
-        telemetry.flush()
-    messages = [
-        message.text
-        for message in added
-        if message.role == "assistant" and message.text
-    ]
-    return messages or ["subagent completion recorded"]
 
 
 app.include_router(bot.router)

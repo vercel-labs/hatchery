@@ -70,6 +70,8 @@ class Bus(typing.Protocol):
 
     async def dedupe(self, key: str) -> bool: ...
 
+    async def binding(self, token: str) -> dict | None: ...
+
 
 class Hub(typing.Protocol):
     """Where inbound messages land; the store/agent side implements this."""
@@ -77,6 +79,8 @@ class Hub(typing.Protocol):
     async def dispatch(self, channel: str, inbound: "Inbound") -> None: ...
 
     async def dedupe(self, key: str) -> bool: ...
+
+    async def binding(self, channel: str, token: str) -> dict | None: ...
 
 
 class Channel(typing.Protocol):
@@ -135,6 +139,9 @@ class _Bus:
 
     async def dedupe(self, key: str) -> bool:
         return await self._hub.dedupe(f"{self._channel}:{key}")
+
+    async def binding(self, token: str) -> dict | None:
+        return await self._hub.binding(self._channel, token)
 
 
 async def _await(coro: typing.Coroutine) -> None:

@@ -87,6 +87,26 @@ async def get_user(user_id: str) -> dict | None:
     return json.loads(raw) if isinstance(raw, str) else dict(raw)
 
 
+async def list_people() -> list[dict]:
+    """Read identity fields only; never expose stored credentials."""
+    rows = await (await db.pool()).fetch(
+        "SELECT jsonb_build_object("
+        "'id', id, 'name', data->>'name', 'username', data->>'username', "
+        "'email', data->>'email', "
+        "'slack', jsonb_build_object('team_id', data->'slack'->>'team_id', "
+        "'user_id', data->'slack'->>'user_id', 'user', data->'slack'->>'user'), "
+        "'github', jsonb_build_object('id', data->'github'->>'id', "
+        "'login', data->'github'->>'login', 'name', data->'github'->>'name')"
+        ") AS person FROM hatchery_users ORDER BY id"
+    )
+    return [
+        json.loads(row["person"])
+        if isinstance(row["person"], str)
+        else dict(row["person"])
+        for row in rows
+    ]
+
+
 async def save_connection(user_id: str, name: str, connection: dict) -> None:
     await (await db.pool()).execute(
         "UPDATE hatchery_users SET data = jsonb_set(data, ARRAY[$2], $3::jsonb) WHERE id = $1",

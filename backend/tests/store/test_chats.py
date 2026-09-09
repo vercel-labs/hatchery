@@ -1,6 +1,8 @@
 import asyncio
 import json
 
+import pytest
+
 import store
 from store import chats, spaces
 
@@ -19,6 +21,29 @@ async def test_claim_creates_then_reuses():
     assert second.trigger == "slack:C1:100.1"
     [binding] = await chats.bindings(first.id)
     assert binding.state == {"channel_id": "C1", "user_id": "U2"}  # merged
+
+
+async def test_bind_attaches_existing_chat_and_updates_state():
+    chat = await chats.create(None, "notify")
+    first = await chats.bind(
+        "slack:T1:C1:1.0", chat.id, "slack", {"channel_id": "C1", "user_id": "U1"}
+    )
+    second = await chats.bind(
+        "slack:T1:C1:1.0", chat.id, "slack", {"user_id": "U2", "message_id": "1.1"}
+    )
+
+    assert first.chat_id == chat.id
+    assert second.state == {"channel_id": "C1", "user_id": "U2", "message_id": "1.1"}
+    assert await chats.binding(first.token) == second
+
+
+async def test_bind_refuses_to_transfer_external_thread():
+    first = await chats.create(None, "first")
+    second = await chats.create(None, "second")
+    await chats.bind("github:repo:1:issue:7", first.id, "github", {})
+
+    with pytest.raises(ValueError, match="another chat"):
+        await chats.bind("github:repo:1:issue:7", second.id, "github", {})
 
 
 async def test_claim_sets_owner_and_rejects_owner_state_takeover():

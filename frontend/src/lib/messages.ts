@@ -18,7 +18,7 @@ export type HatcheryTools = {
 };
 
 export type ChatUIMessage = UIMessage<
-  { origin?: "slack" },
+  { origin?: "slack" | "github" | "ui"; author?: string },
   {
     reload: unknown;
     "space-assignment": {

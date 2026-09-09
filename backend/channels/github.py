@@ -86,21 +86,32 @@ class GitHubChannel:
         inbound = self._gate(event_name, payload)
         if inbound is None:
             return channels.Ack(200, '{"ok": true, "ignored": true}')
-        delivery = webhook.headers.get("x-github-delivery", "")
-        if delivery and not await bus.dedupe(delivery):
-            return channels.Ack()
+        if not inbound.invoke and await bus.binding(inbound.token) is None:
+            return channels.Ack(200, '{"ok": true, "ignored": true}')
         return channels.Ack(work=bus.dispatch(inbound))
 
     def _gate(self, event_name: str, payload: dict) -> channels.Inbound | None:
         comment = payload.get("comment") or {}
-        sender = payload.get("sender") or {}
+        sender = comment.get("user") or payload.get("sender") or {}
         body = comment.get("body", "")
-        if not self._bot_name or sender.get("type") == "Bot" or MARKER in body:
+        if (
+            sender.get("type") == "Bot"
+            or (payload.get("sender") or {}).get("type") == "Bot"
+            or MARKER in body
+            or not sender.get("login")
+            or not comment.get("id")
+        ):
             return None
-        mention = re.compile(rf"@{re.escape(self._bot_name)}(?=$|[^A-Za-z0-9_-])", re.IGNORECASE)
-        if not mention.search(body):
-            return None
-        message = mention.sub("", body).strip()
+        mention = (
+            re.compile(
+                rf"@{re.escape(self._bot_name)}(?=$|[^A-Za-z0-9_-])",
+                re.IGNORECASE,
+            )
+            if self._bot_name
+            else None
+        )
+        invoke = bool(mention and mention.search(body))
+        message = mention.sub("", body).strip() if mention else body.strip()
 
         repository = payload.get("repository") or {}
         repository_id = repository.get("id")
@@ -136,6 +147,9 @@ class GitHubChannel:
             "root_comment_id": root,
             "comment_id": comment.get("id"),
             "sender_id": str(sender.get("id", "")),
+            "message_id": comment["id"],
+            "display_text": message,
+            "author": sender["login"],
         }
         return channels.Inbound(
             token=token,
@@ -143,11 +157,23 @@ class GitHubChannel:
             state=state,
             title=f"{owner}/{repo}#{number}",
             repo=f"{owner}/{repo}",
+            invoke=invoke,
         )
 
     async def on_event(self, event: channels.Event, state: dict) -> None:
         if event.type == channels.protocol.TURN_STARTED:
             await self._react(state)
+        elif event.type == channels.protocol.MESSAGE_RECEIVED:
+            text = str(event.data.get("message", ""))
+            if text:
+                origin = str(event.data.get("origin", "ui"))
+                source = {
+                    "ui": "Hatchery UI",
+                    "slack": "Slack",
+                    "github": "GitHub",
+                }.get(origin, origin)
+                author = event.data.get("author") or "User"
+                await self._comment(state, f"{author} · via {source}\n\n{text}")
         elif event.type == channels.protocol.MESSAGE_COMPLETED:
             await self._comment(state, str(event.data.get("message", "")))
         elif event.type == channels.protocol.TURN_FAILED:
