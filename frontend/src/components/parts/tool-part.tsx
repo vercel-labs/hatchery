@@ -4,11 +4,24 @@ import { getToolName } from "ai";
 import { BanIcon, CheckIcon, ShieldAlertIcon, XIcon } from "lucide-react";
 import { type ReactNode, useLayoutEffect, useRef, useState } from "react";
 
+import { toolDetailTabs } from "@/components/parts/tool-detail-tabs";
 import {
   toolPayload,
   type ToolPayloadValue,
 } from "@/components/parts/tool-payload";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import { Spinner } from "@/components/ui/spinner";
+import {
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from "@/components/ui/tabs";
+import { cn } from "@/lib/utils";
 import type { ChatToolPart } from "@/lib/messages";
 
 function status(part: ChatToolPart): { icon: ReactNode; label: string } {
@@ -124,7 +137,7 @@ function Payload({ value }: { value: ToolPayloadValue }) {
 }
 
 // Generic tool renderer (seal's fallback ToolPart, approvals stripped —
-// hatchery has no gated tools yet): status row, input, streamed output.
+// hatchery has no gated tools yet): status row, live input, folded results.
 export function ToolPart({ part }: { part: ChatToolPart }) {
   const name = getToolName(part);
   const { icon, label } = status(part);
@@ -133,29 +146,98 @@ export function ToolPart({ part }: { part: ChatToolPart }) {
     part.state === "output-available" && part.output != null
       ? toolPayload(part.output)
       : null;
+  const error =
+    part.state === "output-error" ? toolPayload(part.errorText) : null;
+  const inputStreaming = part.state === "input-streaming";
+  const detailTabs = toolDetailTabs({
+    hasInput: input != null,
+    result: output != null ? "output" : error != null ? "error" : null,
+  });
 
   return (
-    <>
+    <Collapsible defaultOpen={false}>
       <div className="flex items-center gap-2 px-1.5 text-sm text-muted-foreground">
         {icon}
         <span className="font-medium text-foreground">{name}</span>
         <span>{label}</span>
+        {detailTabs.length > 0 && (
+          <span
+            aria-hidden={inputStreaming}
+            className={cn(
+              "ml-auto grid transition-[grid-template-columns,opacity] duration-300 ease-out motion-reduce:transition-none",
+              inputStreaming
+                ? "pointer-events-none grid-cols-[0fr] opacity-0"
+                : "grid-cols-[1fr] opacity-100",
+            )}
+          >
+            <span className="overflow-hidden">
+              <CollapsibleTrigger
+                aria-label={`${name} details`}
+                className="rounded-sm text-xs underline-offset-4 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring/50"
+                disabled={inputStreaming}
+              >
+                details
+              </CollapsibleTrigger>
+            </span>
+          </span>
+        )}
       </div>
+
       {input != null && (
-        <div className="max-h-24 overflow-auto px-1.5 font-mono text-xs text-muted-foreground">
-          <Payload value={input} />
+        <div
+          aria-hidden={!inputStreaming}
+          className={cn(
+            "grid transition-[grid-template-rows,opacity] duration-300 ease-out motion-reduce:transition-none",
+            inputStreaming
+              ? "grid-rows-[1fr] opacity-100"
+              : "grid-rows-[0fr] opacity-0",
+          )}
+        >
+          <div className="min-h-0 overflow-hidden">
+            <div className="max-h-24 overflow-auto px-1.5 font-mono text-xs text-muted-foreground">
+              <Payload value={input} />
+            </div>
+          </div>
         </div>
       )}
-      {output != null && (
-        <div className="max-h-64 overflow-auto rounded-lg bg-muted p-2 font-mono text-xs">
-          <Payload value={output} />
-        </div>
+
+      {detailTabs.length > 0 && !inputStreaming && (
+        <CollapsibleContent className="h-[var(--collapsible-panel-height)] overflow-hidden transition-[height,opacity] duration-200 ease-out motion-reduce:transition-none data-ending-style:h-0 data-ending-style:opacity-0 data-starting-style:h-0 data-starting-style:opacity-0">
+          <Tabs className="gap-1.5 px-1.5 pt-1.5" defaultValue={detailTabs[0]}>
+            <TabsList aria-label={`${name} details`} variant="plain">
+              {detailTabs.map((tab) => (
+                <TabsTrigger key={tab} value={tab}>
+                  {tab}
+                </TabsTrigger>
+              ))}
+            </TabsList>
+            {input != null && (
+              <TabsContent
+                className="max-h-64 overflow-auto font-mono text-xs text-muted-foreground"
+                value="input"
+              >
+                <Payload value={input} />
+              </TabsContent>
+            )}
+            {output != null && (
+              <TabsContent
+                className="max-h-64 overflow-auto font-mono text-xs"
+                value="output"
+              >
+                <Payload value={output} />
+              </TabsContent>
+            )}
+            {error != null && (
+              <TabsContent
+                className="max-h-64 overflow-auto font-mono text-xs text-destructive"
+                value="error"
+              >
+                <Payload value={error} />
+              </TabsContent>
+            )}
+          </Tabs>
+        </CollapsibleContent>
       )}
-      {part.state === "output-error" && (
-        <div className="max-h-64 overflow-auto px-1.5 font-mono text-xs text-destructive">
-          <Payload value={toolPayload(part.errorText)!} />
-        </div>
-      )}
-    </>
+    </Collapsible>
   );
 }
