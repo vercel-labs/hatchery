@@ -129,6 +129,10 @@ export function ToolPart({ part }: { part: ChatToolPart }) {
   const name = getToolName(part);
   const { icon, label } = status(part);
   const input = part.input == null ? null : toolPayload(part.input);
+  const output =
+    part.state === "output-available" && part.output != null
+      ? toolPayload(part.output)
+      : null;
 
   return (
     <>
@@ -142,12 +146,10 @@ export function ToolPart({ part }: { part: ChatToolPart }) {
           <Payload value={input} />
         </div>
       )}
-      {part.state === "output-available" && part.output != null && (
-        <pre className="max-h-64 overflow-auto rounded-lg bg-muted p-2 font-mono text-xs break-all whitespace-pre-wrap">
-          {typeof part.output === "string"
-            ? part.output
-            : JSON.stringify(part.output, null, 2)}
-        </pre>
+      {output != null && (
+        <div className="max-h-64 overflow-auto rounded-lg bg-muted p-2 font-mono text-xs">
+          <Payload value={output} />
+        </div>
       )}
       {part.state === "output-error" && (
         <div className="max-h-64 overflow-auto px-1.5 font-mono text-xs text-destructive">
