@@ -82,14 +82,6 @@ import {
   FieldLabel,
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import {
   Sheet,
@@ -123,15 +115,6 @@ type Selection =
   | { kind: "space"; id: string }
   | { kind: "chat"; id: string }
   | null;
-
-function Dot({ color }: { color: string | undefined }) {
-  return (
-    <span
-      className="size-2 shrink-0 rounded-full"
-      style={{ backgroundColor: resolveSpaceColor(color) }}
-    />
-  );
-}
 
 function ChatOriginIcon({ trigger }: { trigger: string }) {
   const path = trigger.startsWith("slack:")
@@ -787,36 +770,18 @@ export function AppShell() {
             {selectedSpace?.name ??
               (selectedChat ? chatSidebarText(selectedChat).label : "hatchery")}
           </span>
-          {selectedChat?.space_id && spaces && (
-            <Select
-              value={selectedChat.space_id}
-              onValueChange={(spaceId) => {
-                if (spaceId) void assignChatSpace(selectedChat, spaceId);
-              }}
-            >
-              <SelectTrigger size="sm" aria-label="Chat space">
-                <SelectValue placeholder="Assign space" />
-              </SelectTrigger>
-              <SelectContent align="end">
-                <SelectGroup>
-                  {spaces.map((space) => (
-                    <SelectItem key={space.id} value={space.id}>
-                      <Dot color={space.color} />
-                      {space.name}
-                    </SelectItem>
-                  ))}
-                </SelectGroup>
-              </SelectContent>
-            </Select>
-          )}
         </header>
         {selectedChat && !failed ? (
           <LiveChat
             key={selectedChat.id}
             chat={selectedChat}
+            spaces={spaces ?? []}
             warning={selectedWarning?.warning}
             onChatChanged={refreshChats}
             onChatUpdated={updateChat}
+            onSpaceChange={(spaceId) =>
+              void assignChatSpace(selectedChat, spaceId)
+            }
             onUnarchive={() => void setChatArchived(selectedChat, false)}
             onSpaceAssigned={(spaceId) =>
               setChats((current) => {
@@ -1518,16 +1483,20 @@ function EditableResource({
 // Keyed by chat.id at the call site so useChat remounts per chat.
 function LiveChat({
   chat,
+  spaces,
   warning,
   onChatChanged,
   onChatUpdated,
+  onSpaceChange,
   onUnarchive,
   onSpaceAssigned,
 }: {
   chat: Chat;
+  spaces: Space[];
   warning?: string;
   onChatChanged: () => void;
   onChatUpdated: (chat: Chat) => void;
+  onSpaceChange: (spaceId: string) => void;
   onUnarchive: () => void;
   onSpaceAssigned: (spaceId: string) => void;
 }) {
@@ -1645,6 +1614,7 @@ function LiveChat({
             chatId={chat.id}
             initialMessages={initialMessages}
             spaceId={chat.space_id}
+            spaces={spaces}
             messageRevision={messageRevision}
             streamGeneration={streamGeneration}
             traceId={chat.telemetry_span?.trace_id ?? null}
@@ -1652,6 +1622,7 @@ function LiveChat({
             attentionReason={chat.attention_reason}
             onMessagesChange={onMessagesChange}
             onSeen={onChatUpdated}
+            onSpaceChange={onSpaceChange}
             onUnarchive={onUnarchive}
             onCreateSandbox={() => setShowSandboxForm(true)}
           />
