@@ -17,9 +17,13 @@ test("replaces output with error details for a failed tool", () => {
   ]);
 });
 
-test("omits unavailable detail tabs", () => {
+test("keeps single-tab and empty selections valid", () => {
   assert.deepEqual(toolDetailTabs({ hasInput: true, result: null }), ["input"]);
   assert.deepEqual(toolDetailTabs({ hasInput: false, result: "output" }), [
     "output",
   ]);
+  assert.deepEqual(toolDetailTabs({ hasInput: false, result: "error" }), [
+    "error",
+  ]);
+  assert.deepEqual(toolDetailTabs({ hasInput: false, result: null }), []);
 });

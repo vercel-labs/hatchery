@@ -51,7 +51,7 @@ function status(part: ChatToolPart): { icon: ReactNode; label: string } {
         : { icon: <CheckIcon className="size-4" />, label: "done" };
     case "output-error":
       return {
-        icon: <XIcon className="size-4 text-destructive" />,
+        icon: <XIcon className="size-4" />,
         label: "failed",
       };
     case "output-denied":
@@ -159,14 +159,15 @@ export function ToolPart({ part }: { part: ChatToolPart }) {
     hasInput: input != null,
     result: output != null ? "output" : error != null ? "error" : null,
   });
+  const defaultDetailTab = detailTabs[0];
 
   return (
     <Collapsible defaultOpen={false}>
-      <div className="flex items-center gap-2 px-1.5 text-sm text-muted-foreground">
+      <div className="flex items-center gap-2 px-1.5 text-sm text-muted-foreground/60">
         {icon}
-        <span className="font-medium text-foreground">{name}</span>
+        <span className="font-medium text-muted-foreground">{name}</span>
         <span>{label}</span>
-        {detailTabs.length > 0 && (
+        {defaultDetailTab && (
           <span
             aria-hidden={inputStreaming}
             className={cn(
@@ -179,10 +180,9 @@ export function ToolPart({ part }: { part: ChatToolPart }) {
             <span className="overflow-hidden">
               <CollapsibleTrigger
                 aria-label={`${name} details`}
-                className="group flex items-center gap-1 rounded-sm underline-offset-4 outline-none hover:underline focus-visible:ring-2 focus-visible:ring-ring/50"
+                className="group flex size-6 items-center justify-center rounded-md outline-none hover:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/50"
                 disabled={inputStreaming}
               >
-                details
                 <ChevronDownIcon
                   aria-hidden="true"
                   className="size-3.5 transition-transform duration-200 group-data-panel-open:rotate-180 motion-reduce:transition-none"
@@ -211,11 +211,11 @@ export function ToolPart({ part }: { part: ChatToolPart }) {
         </div>
       )}
 
-      {detailTabs.length > 0 && !inputStreaming && (
+      {defaultDetailTab && !inputStreaming && (
         <CollapsibleContent className="h-[var(--collapsible-panel-height)] overflow-hidden transition-[height,opacity] duration-200 ease-out motion-reduce:transition-none data-ending-style:h-0 data-ending-style:opacity-0 data-starting-style:h-0 data-starting-style:opacity-0">
           <Tabs
             className="gap-1.5 pr-1.5 pl-[1.875rem] pt-1.5"
-            defaultValue={detailTabs[0]}
+            defaultValue={defaultDetailTab}
           >
             <TabsList aria-label={`${name} details`} variant="plain">
               {detailTabs.map((tab) => (
