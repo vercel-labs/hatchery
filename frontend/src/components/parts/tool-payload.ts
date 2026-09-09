@@ -4,7 +4,9 @@ export type ToolPayloadValue =
   | { type: "object"; entries: [string, ToolPayloadValue][] };
 
 function payloadValue(value: unknown): ToolPayloadValue | null {
-  if (value == null) return null;
+  if (value == null || (typeof value === "string" && value.trim() === "")) {
+    return null;
+  }
 
   if (Array.isArray(value)) {
     const values = value

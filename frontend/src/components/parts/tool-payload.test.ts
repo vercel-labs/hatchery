@@ -53,12 +53,13 @@ test("keeps long and multiline strings unchanged for CSS wrapping", () => {
   });
 });
 
-test("omits null fields and empty collections recursively", () => {
+test("omits fields without displayable content recursively", () => {
   assert.deepEqual(
     toolPayload({
       title: "sandbox",
       ports: [],
       branch: null,
+      blank: "  \n",
       metadata: { labels: [], note: null },
       nested: [{ ignored: null }, { kept: "yes" }],
     }),
@@ -81,6 +82,9 @@ test("omits null fields and empty collections recursively", () => {
       ],
     },
   );
+  assert.equal(toolPayload(" \n "), null);
+  assert.equal(toolPayload({}), null);
+  assert.equal(toolPayload([]), null);
 });
 
 test("parses JSON objects but preserves plain text and JSON scalars", () => {
