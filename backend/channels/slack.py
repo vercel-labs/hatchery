@@ -244,7 +244,22 @@ class SlackChannel:
         if invoke is not None or not trigger_stored:
             return
         try:
-            should_invoke = await self._should_invoke(transcript, newest_ts, sorted(bot_user_ids))
+            chat_id = str((binding or {}).get("_hatchery_chat_id") or "")
+            if chat_id:
+                from agent import telemetry
+
+                async with telemetry.use_chat(chat_id):
+                    async with ai.experimental_telemetry.span(
+                        "slack.thread_reply_decision"
+                    ) as span:
+                        span.set_attrs({"chat.id": chat_id})
+                        should_invoke = await self._should_invoke(
+                            transcript, newest_ts, sorted(bot_user_ids)
+                        )
+            else:
+                should_invoke = await self._should_invoke(
+                    transcript, newest_ts, sorted(bot_user_ids)
+                )
         except Exception:
             log.exception("slack thread classifier failed; stored without invoking")
             return

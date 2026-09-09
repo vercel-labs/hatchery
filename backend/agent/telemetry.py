@@ -1,5 +1,7 @@
 """Send AI SDK traces to Braintrust."""
 
+import contextlib
+import json
 import os
 import typing
 
@@ -7,6 +9,58 @@ import ai.experimental_telemetry
 import ai.experimental_telemetry.otel
 
 _adapter: ai.experimental_telemetry.otel.OtelAdapter | None = None
+
+
+@contextlib.asynccontextmanager
+async def use_chat(chat_id: str):
+    """Attach work to one durable trace shared by every turn in a chat."""
+    if not ai.experimental_telemetry.is_enabled():
+        yield None
+        return
+
+    from store import chats
+
+    chat = await chats.get(chat_id)
+    if chat is None:
+        raise ValueError(f"unknown chat {chat_id}")
+    root = (
+        ai.experimental_telemetry.Span[
+            ai.experimental_telemetry.CustomSpanData
+        ].model_validate(chat.telemetry_span)
+        if chat.telemetry_span
+        else None
+    )
+    if root is None:
+        candidate = ai.experimental_telemetry.create_span("hatchery.chat").stamp_start()
+        candidate.set_attrs(
+            {
+                "braintrust.input_json": json.dumps({"chat_id": chat.id}),
+                "braintrust.span_attributes": json.dumps({"type": "task"}),
+                "chat.id": chat.id,
+            },
+            trigger=chat.trigger,
+        )
+        candidate.stamp_end()
+        if candidate.id:
+            saved = await chats.set_telemetry_span_if_absent(
+                chat.id, candidate.model_dump(mode="json")
+            )
+            if saved is None or saved.telemetry_span is None:
+                raise ValueError(f"unknown chat {chat_id}")
+            root = ai.experimental_telemetry.Span[
+                ai.experimental_telemetry.CustomSpanData
+            ].model_validate(saved.telemetry_span)
+            if root.id == candidate.id:
+                await candidate.push()
+    current = ai.experimental_telemetry.current_span()
+    if root is None or (current is not None and current.trace_id == root.trace_id):
+        yield root
+        return
+    async with ai.experimental_telemetry.use_span(root):
+        try:
+            yield root
+        finally:
+            flush()
 
 
 class _BraintrustAdapter(ai.experimental_telemetry.otel.OtelAdapter):

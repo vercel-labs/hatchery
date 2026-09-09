@@ -27,6 +27,20 @@ def test_workflow_body_does_not_import_side_effect_modules():
     assert not imported
 
 
+async def test_ship_spans_flushes_before_step_exit(monkeypatch):
+    calls = []
+
+    async def push_all(spans):
+        calls.append(("push", spans))
+
+    monkeypatch.setattr(ai.experimental_telemetry, "push_all", push_all)
+    monkeypatch.setattr("agent.telemetry.flush", lambda: calls.append(("flush", None)))
+
+    await durable.ship_spans.func([])
+
+    assert calls == [("push", []), ("flush", None)]
+
+
 async def test_durable_tools_keep_effects_non_retriable():
     assert durable.llm_step.max_retries > 0
     assert durable.list_sandboxes_step.max_retries > 0
@@ -64,6 +78,31 @@ async def test_prepare_turn_detects_linked_chat():
 
     assert prepared.linked is True
     assert "Reply normally without a notification tool call" in prepared.history[0].text
+
+
+async def test_prepare_turn_reuses_the_chat_trace():
+    from store import spaces
+
+    space = await spaces.default()
+    chat = await chats.create(space.id, "traced")
+    sink = ai.experimental_telemetry.DictSink()
+
+    async with ai.experimental_telemetry.use_sink(sink):
+        first = await durable.prepare_turn.func(
+            durable.TurnInput(chat_id=chat.id, turn_id="turn_1", origin="ui")
+        )
+        second = await durable.prepare_turn.func(
+            durable.TurnInput(chat_id=chat.id, turn_id="turn_2", origin="worker")
+        )
+
+    assert first.telemetry_span is not None
+    assert second.telemetry_span is not None
+    assert first.telemetry_span["trace_id"] == second.telemetry_span["trace_id"]
+    prepared = [
+        span for span in sink.finished_spans if span.name == "hatchery.prepare_turn"
+    ]
+    assert {span.trace_id for span in prepared} == {first.telemetry_span["trace_id"]}
+    assert {span.parent_id for span in prepared} == {first.telemetry_span["id"]}
 
 
 async def test_custom_loop_uses_context_and_workflow_stream(monkeypatch):

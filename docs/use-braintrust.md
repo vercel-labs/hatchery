@@ -1,6 +1,8 @@
 # Use Braintrust
 
-Use Braintrust to trace a Hatchery request across the dispatcher, sandbox, subagent, tools, and delivery.
+Use Braintrust to trace a Hatchery chat across its classifier, title generation, dispatcher turns, sandbox, subagents, tools, and delivery. Each chat lazily creates one durable `hatchery.chat` root; later turns and serverless invocations append children to that same trace.
+
+Ingress work before Hatchery identifies a chat, such as `channel.webhook` and `channel.route`, remains a separate trace. Correlate it by message or chat ID after routing.
 
 ## Find a trace
 
@@ -22,10 +24,12 @@ Use `--cursor CURSOR` to paginate or widen `--window` when needed. IDs are more 
 
 ## Read the trace
 
-Start at the relevant root span:
+Start at the relevant span:
 
-- `channel.webhook`: webhook receipt
-- `channel.dispatch`: channel routing
+- `hatchery.chat`: durable root shared by the whole chat
+- `channel.webhook`, `channel.route`: ingress before a chat is known
+- `channel.dispatch`: accepted channel message
+- `hatchery.classify`, `hatchery.title`: setup LLM work
 - `hatchery.turn`: dispatcher turn
 - `sandbox.provision`, `sandbox.prepare`, `sandbox.daemon.repair`: sandbox lifecycle
 - `worker.command`: Queue delivery

@@ -6,6 +6,46 @@ import opentelemetry.sdk.resources
 import opentelemetry.sdk.trace
 
 from agent import telemetry
+from store import chats
+
+
+async def test_use_chat_persists_and_reuses_one_trace():
+    chat = await chats.create(None, "trace me")
+    sink = ai.experimental_telemetry.DictSink()
+
+    async with ai.experimental_telemetry.use_sink(sink):
+        async with telemetry.use_chat(chat.id) as first:
+            async with ai.experimental_telemetry.span("first"):
+                pass
+        async with telemetry.use_chat(chat.id) as second:
+            async with ai.experimental_telemetry.span("second"):
+                pass
+
+    saved = await chats.get(chat.id)
+    assert saved is not None and saved.telemetry_span is not None
+    assert first is not None and second is not None
+    assert first.id == second.id
+    assert first.trace_id == second.trace_id
+    assert [span.name for span in sink.finished_spans].count("hatchery.chat") == 1
+    children = [span for span in sink.finished_spans if span.name in {"first", "second"}]
+    assert {span.trace_id for span in children} == {first.trace_id}
+    assert {span.parent_id for span in children} == {first.id}
+
+
+async def test_nested_use_chat_preserves_the_active_child():
+    chat = await chats.create(None, "nested")
+    sink = ai.experimental_telemetry.DictSink()
+
+    async with ai.experimental_telemetry.use_sink(sink):
+        async with telemetry.use_chat(chat.id):
+            async with ai.experimental_telemetry.span("parent") as parent:
+                async with telemetry.use_chat(chat.id):
+                    async with ai.experimental_telemetry.span("child"):
+                        pass
+
+    child = next(span for span in sink.finished_spans if span.name == "child")
+    assert child.parent_id == parent.id
+    assert child.trace_id == parent.trace_id
 
 
 def test_install_is_disabled_without_config(monkeypatch):

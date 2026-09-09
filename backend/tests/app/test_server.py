@@ -676,8 +676,14 @@ async def test_name_chat_generates_and_persists_topic(monkeypatch):
         return "Sidebar chat names"
 
     monkeypatch.setattr(server.topic, "generate", generate)
-    await server._name_chat(chat.id, "Improve chat names")
+    sink = ai.experimental_telemetry.DictSink()
+    async with ai.experimental_telemetry.use_sink(sink):
+        await server._name_chat(chat.id, "Improve chat names")
 
+    root = next(span for span in sink.finished_spans if span.name == "hatchery.chat")
+    title = next(span for span in sink.finished_spans if span.name == "hatchery.title")
+    assert title.trace_id == root.trace_id
+    assert title.parent_id == root.id
     named = await chats.get(chat.id)
     assert named is not None and named.topic == "Sidebar chat names"
     assert await events.read(chat.id, "ui") == [(0, {"type": "chat.changed"})]
@@ -1292,13 +1298,24 @@ async def test_slack_webhook_starts_durable_dispatcher_turn(monkeypatch):
             "text": "<@UBOT> inspect this",
         },
     }
-    async with client() as c:
-        response = await c.post(
-            "/channels/v1/slack", headers={"authorization": "Bearer good"}, json=payload
-        )
+    sink = ai.experimental_telemetry.DictSink()
+    async with ai.experimental_telemetry.use_sink(sink):
+        async with client() as c:
+            response = await c.post(
+                "/channels/v1/slack",
+                headers={"authorization": "Bearer good"},
+                json=payload,
+            )
 
     assert response.status_code == 200
     [chat] = await chats.list_all()
+    root = next(span for span in sink.finished_spans if span.name == "hatchery.chat")
+    unified = [
+        span
+        for span in sink.finished_spans
+        if span.name in {"channel.dispatch", "hatchery.classify"}
+    ]
+    assert {span.trace_id for span in unified} == {root.trace_id}
     assert started == [(chat.id, "channel", None)]
     assert [event.type for event, _ in delivered] == [
         channels.protocol.SPACE_ASSIGNING,
