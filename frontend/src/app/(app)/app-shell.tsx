@@ -8,6 +8,7 @@ import {
   BookMarkedIcon,
   CheckIcon,
   ChevronsUpDownIcon,
+  FilterIcon,
   FolderGitIcon,
   GitBranchIcon,
   LinkIcon,
@@ -37,7 +38,14 @@ import {
   type User,
   type VercelCLIConnection,
 } from "@/lib/api";
-import { chatAttentionLabel, chatSidebarText } from "@/lib/chat-sidebar";
+import {
+  chatAttentionFilterLabel,
+  chatAttentionLabel,
+  chatSidebarText,
+  filterSidebarChats,
+  selectSidebarSpace,
+  type ChatSidebarFilters,
+} from "@/lib/chat-sidebar";
 import type { ChatUIMessage } from "@/lib/messages";
 import {
   type AccentColor,
@@ -52,6 +60,7 @@ import { SpaceColorPicker } from "@/components/space-color-picker";
 import { TerminalPane, type SandboxWorkspace } from "@/components/terminal-pane";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -62,10 +71,13 @@ import {
 } from "@/components/ui/card";
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
@@ -213,8 +225,10 @@ export function AppShell() {
   const [vercelError, setVercelError] = useState("");
   const [savingVercel, setSavingVercel] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
-  // set by space clicks only; chat clicks leave the order alone
-  const [sortSpaceId, setSortSpaceId] = useState<string | null>(null);
+  const [chatFilters, setChatFilters] = useState<ChatSidebarFilters>({
+    requiresAttention: false,
+    spaceId: null,
+  });
 
   const disconnectGitHub = async () => {
     if (!window.confirm("Disconnect GitHub? Active sandboxes will lose repository access.")) {
@@ -315,16 +329,10 @@ export function AppShell() {
       warning.space_id === (selectedSpace?.id ?? selectedChat?.space_id),
   );
 
-  const activeSortSpaceId = selectedSpace?.id ?? sortSpaceId;
-  const activeChats = chats?.filter((chat) => chat.archived_at === null) ?? null;
-  const sortedChats =
-    activeChats && activeSortSpaceId
-      ? [...activeChats].sort(
-          (a, b) =>
-            Number(b.space_id === activeSortSpaceId) -
-            Number(a.space_id === activeSortSpaceId),
-        )
-      : activeChats;
+  const filteredChats = chats ? filterSidebarChats(chats, chatFilters) : null;
+  const filteredSpace = spaces?.find((space) => space.id === chatFilters.spaceId);
+  const activeFilterCount =
+    Number(chatFilters.requiresAttention) + Number(chatFilters.spaceId !== null);
   const archivedChats = chats
     ?.filter((chat) => chat.archived_at !== null)
     .sort((a, b) => (b.archived_at ?? "").localeCompare(a.archived_at ?? "")) ?? [];
@@ -344,7 +352,7 @@ export function AppShell() {
     const space: Space = await res.json();
     setSpaces((current) => [...(current ?? []), space]);
     router.push(`/spaces/${encodeURIComponent(space.id)}`);
-    setSortSpaceId(space.id);
+    setChatFilters((current) => selectSidebarSpace(current, space.id));
     setSpaceName("");
     setSpaceColor(null);
     setAddingSpace(false);
@@ -360,7 +368,9 @@ export function AppShell() {
     if (!res.ok) return;
     setSpaces((current) => current?.filter((item) => item.id !== space.id) ?? null);
     if (selection?.kind === "space" && selection.id === space.id) router.push("/");
-    if (sortSpaceId === space.id) setSortSpaceId(null);
+    setChatFilters((current) =>
+      current.spaceId === space.id ? selectSidebarSpace(current, null) : current,
+    );
   };
 
   const refreshingChats = useRef(false);
@@ -641,7 +651,11 @@ export function AppShell() {
                             <SidebarMenuButton
                               className="relative pl-3"
                               isActive={selectedSpace?.id === space.id}
-                              onClick={() => setSortSpaceId(space.id)}
+                              onClick={() =>
+                                setChatFilters((current) =>
+                                  selectSidebarSpace(current, space.id),
+                                )
+                              }
                               render={
                                 <Link href={`/spaces/${encodeURIComponent(space.id)}`} />
                               }
@@ -669,18 +683,125 @@ export function AppShell() {
 
               <SidebarGroup>
                 <SidebarGroupLabel>Chats</SidebarGroupLabel>
-                <SidebarGroupAction title="New chat" onClick={createChat}>
+                <DropdownMenu>
+                  <DropdownMenuTrigger
+                    render={
+                      <SidebarGroupAction
+                        className="right-9 [&>svg]:size-3"
+                        title="Filter chats"
+                        aria-label={`Filter chats${activeFilterCount ? `, ${activeFilterCount} active` : ""}`}
+                      >
+                        <FilterIcon />
+                      </SidebarGroupAction>
+                    }
+                  />
+                  <DropdownMenuContent side="right" align="start" className="w-56">
+                    <DropdownMenuGroup>
+                      <DropdownMenuLabel>Filter chats</DropdownMenuLabel>
+                      <DropdownMenuCheckboxItem
+                        checked={chatFilters.requiresAttention}
+                        onCheckedChange={(checked) =>
+                          setChatFilters((current) => ({
+                            ...current,
+                            requiresAttention: checked,
+                          }))
+                        }
+                      >
+                        {chatAttentionFilterLabel}
+                      </DropdownMenuCheckboxItem>
+                    </DropdownMenuGroup>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuGroup>
+                      <DropdownMenuLabel>Space</DropdownMenuLabel>
+                      <DropdownMenuRadioGroup
+                        value={chatFilters.spaceId ?? "__all__"}
+                        onValueChange={(value) =>
+                          setChatFilters((current) =>
+                            selectSidebarSpace(
+                              current,
+                              value === "__all__" ? null : value,
+                            ),
+                          )
+                        }
+                      >
+                        <DropdownMenuRadioItem value="__all__">
+                          All spaces
+                        </DropdownMenuRadioItem>
+                        {spaces?.map((space) => (
+                          <DropdownMenuRadioItem key={space.id} value={space.id}>
+                            {space.name}
+                          </DropdownMenuRadioItem>
+                        ))}
+                      </DropdownMenuRadioGroup>
+                    </DropdownMenuGroup>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+                <SidebarGroupAction
+                  title="New chat"
+                  aria-label="New chat"
+                  onClick={createChat}
+                >
                   <PlusIcon />
                 </SidebarGroupAction>
                 <SidebarGroupContent>
+                  {activeFilterCount > 0 && (
+                    <div className="my-3 flex flex-wrap gap-1">
+                      {chatFilters.requiresAttention && (
+                        <Badge
+                          variant="secondary"
+                          render={
+                            <button
+                              type="button"
+                              aria-label={`Remove ${chatAttentionFilterLabel} filter`}
+                              onClick={() =>
+                                setChatFilters((current) => ({
+                                  ...current,
+                                  requiresAttention: false,
+                                }))
+                              }
+                            />
+                          }
+                        >
+                          {chatAttentionFilterLabel}
+                          <XIcon data-icon="inline-end" />
+                        </Badge>
+                      )}
+                      {chatFilters.spaceId && (
+                        <Badge
+                          variant="secondary"
+                          render={
+                            <button
+                              type="button"
+                              aria-label={`Remove ${filteredSpace?.name ?? "space"} filter`}
+                              onClick={() =>
+                                setChatFilters((current) =>
+                                  selectSidebarSpace(current, null),
+                                )
+                              }
+                            />
+                          }
+                        >
+                          <span
+                            aria-hidden="true"
+                            className="size-1.5 shrink-0 rounded-full"
+                            style={{
+                              backgroundColor: resolveSpaceColor(filteredSpace?.color),
+                            }}
+                          />
+                          {filteredSpace?.name ?? "Unknown space"}
+                          <XIcon data-icon="inline-end" />
+                        </Badge>
+                      )}
+                    </div>
+                  )}
                   <SidebarMenu>
-                    {sortedChats === null
+                    {filteredChats === null
                       ? Array.from({ length: failed ? 0 : 4 }).map((_, i) => (
                           <SidebarMenuItem key={i}>
                             <SidebarMenuSkeleton />
                           </SidebarMenuItem>
                         ))
-                      : sortedChats.map((chat) => (
+                      : filteredChats.map((chat) => (
                           <ChatSidebarItem
                             key={chat.id}
                             chat={chat}
@@ -691,6 +812,11 @@ export function AppShell() {
                             }
                           />
                         ))}
+                    {filteredChats?.length === 0 && activeFilterCount > 0 && (
+                      <li className="px-2 py-4 text-sm text-muted-foreground">
+                        No chats match these filters
+                      </li>
+                    )}
                   </SidebarMenu>
                 </SidebarGroupContent>
               </SidebarGroup>
