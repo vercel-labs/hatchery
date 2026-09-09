@@ -12,23 +12,46 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { braintrustTraceUrl } from "@/lib/braintrust";
+import type { Space } from "@/lib/api";
+import { resolveSpaceColor } from "@/lib/space-colors";
 
 // Trimmed port of seal's prompt-form: text only, no attachments or model
 // select.
 export function PromptForm({
   isBusy,
   traceId,
+  spaces,
+  spaceId,
+  showMarkAsRead,
+  isMarkingAsRead,
   onSubmit,
   onStop,
+  onSpaceChange,
+  onMarkAsRead,
 }: {
   isBusy: boolean;
   traceId: string | null;
+  spaces: Space[];
+  spaceId: string | null;
+  showMarkAsRead: boolean;
+  isMarkingAsRead: boolean;
   onSubmit: (message: { text: string }) => void;
   onStop: () => void;
+  onSpaceChange: (spaceId: string) => void;
+  onMarkAsRead: () => void;
 }) {
   const [input, setInput] = React.useState("");
   const [traceCopied, setTraceCopied] = React.useState(false);
+  const selectedSpace = spaces.find((space) => space.id === spaceId);
 
   function handleSubmit(event?: React.FormEvent) {
     event?.preventDefault();
@@ -58,6 +81,45 @@ export function PromptForm({
           }}
         />
         <InputGroupAddon align="block-end">
+          {spaceId && (
+            <Select
+              value={spaceId}
+              onValueChange={(nextSpaceId) => {
+                if (nextSpaceId) onSpaceChange(nextSpaceId);
+              }}
+            >
+              <SelectTrigger
+                size="sm"
+                aria-label="Chat space"
+                className="h-6 max-w-44 rounded-xl border-transparent bg-secondary px-2 text-secondary-foreground hover:bg-secondary/80"
+              >
+                <SelectValue>
+                  <span
+                    className="size-2 shrink-0 rounded-full"
+                    style={{
+                      backgroundColor: resolveSpaceColor(selectedSpace?.color),
+                    }}
+                  />
+                  <span className="truncate">
+                    {selectedSpace?.name ?? "Assign space"}
+                  </span>
+                </SelectValue>
+              </SelectTrigger>
+              <SelectContent align="start">
+                <SelectGroup>
+                  {spaces.map((space) => (
+                    <SelectItem key={space.id} value={space.id}>
+                      <span
+                        className="size-2 shrink-0 rounded-full"
+                        style={{ backgroundColor: resolveSpaceColor(space.color) }}
+                      />
+                      {space.name}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+          )}
           {traceId && (
             <Tooltip>
               <TooltipTrigger
@@ -96,13 +158,23 @@ export function PromptForm({
               </TooltipContent>
             </Tooltip>
           )}
+          <span className="ml-auto" />
+          {showMarkAsRead && (
+            <InputGroupButton
+              type="button"
+              size="xs"
+              disabled={isMarkingAsRead}
+              onClick={onMarkAsRead}
+            >
+              {isMarkingAsRead ? "Marking as read…" : "Mark as read"}
+            </InputGroupButton>
+          )}
           {isBusy ? (
             <InputGroupButton
               type="button"
               size="icon-sm"
               variant="outline"
               aria-label="Stop"
-              className="ml-auto"
               onClick={onStop}
             >
               <SquareIcon />
@@ -113,7 +185,6 @@ export function PromptForm({
               size="icon-sm"
               variant="default"
               aria-label="Submit"
-              className="ml-auto"
               disabled={!input.trim()}
             >
               <ArrowUpIcon />

@@ -21,7 +21,7 @@ import {
   MessageScrollerProvider,
   MessageScrollerViewport,
 } from "@/components/ui/message-scroller";
-import { apiBase, apiFetch, type Chat } from "@/lib/api";
+import { apiBase, apiFetch, type Chat, type Space } from "@/lib/api";
 import { submissionLabel } from "@/components/chat-status";
 import type { ChatUIMessage } from "@/lib/messages";
 
@@ -29,6 +29,7 @@ export function ChatView({
   chatId,
   initialMessages,
   spaceId,
+  spaces,
   messageRevision,
   streamGeneration,
   traceId,
@@ -36,12 +37,14 @@ export function ChatView({
   attentionReason,
   onMessagesChange,
   onSeen,
+  onSpaceChange,
   onUnarchive,
   onCreateSandbox,
 }: {
   chatId: string;
   initialMessages: ChatUIMessage[];
   spaceId: string | null;
+  spaces: Space[];
   messageRevision: number;
   streamGeneration: number;
   traceId: string | null;
@@ -49,6 +52,7 @@ export function ChatView({
   attentionReason: Chat["attention_reason"];
   onMessagesChange?: (messages: ChatUIMessage[]) => void;
   onSeen: (chat: Chat) => void;
+  onSpaceChange: (spaceId: string) => void;
   onUnarchive: () => void;
   onCreateSandbox: () => void;
 }) {
@@ -203,18 +207,6 @@ export function ChatView({
             <AlertDescription>{seenError}</AlertDescription>
           </Alert>
         )}
-        {attentionReason && (
-          <div className="flex justify-end">
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={markingSeen}
-              onClick={markAsSeen}
-            >
-              {markingSeen ? "Marking as seen…" : "Mark as seen"}
-            </Button>
-          </div>
-        )}
         {archived ? (
           <Alert>
             <AlertTitle>This chat is archived</AlertTitle>
@@ -229,8 +221,14 @@ export function ChatView({
           <PromptForm
             isBusy={isStreaming}
             traceId={traceId}
+            spaces={spaces}
+            spaceId={spaceId}
+            showMarkAsRead={Boolean(attentionReason)}
+            isMarkingAsRead={markingSeen}
             onSubmit={({ text }) => sendMessage({ text })}
             onStop={() => void stop()}
+            onSpaceChange={onSpaceChange}
+            onMarkAsRead={() => void markAsSeen()}
           />
         )}
       </div>
