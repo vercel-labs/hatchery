@@ -30,8 +30,8 @@ function chat(overrides: Partial<Chat> = {}): Chat {
   };
 }
 
-test("uses the Wants attention filter label", () => {
-  assert.equal(chatAttentionFilterLabel, "Wants attention");
+test("uses the Requires attention filter label", () => {
+  assert.equal(chatAttentionFilterLabel, "Requires attention");
 });
 
 test("filters active chats by attention and one space", () => {
