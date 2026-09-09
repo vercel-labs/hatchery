@@ -687,7 +687,7 @@ export function AppShell() {
                   <DropdownMenuTrigger
                     render={
                       <SidebarGroupAction
-                        className="right-9 text-sidebar-foreground/50 hover:text-sidebar-accent-foreground [&>svg]:size-3"
+                        className="right-9 [&>svg]:size-3"
                         title="Filter chats"
                         aria-label={`Filter chats${activeFilterCount ? `, ${activeFilterCount} active` : ""}`}
                       >
@@ -769,9 +769,6 @@ export function AppShell() {
                       {chatFilters.spaceId && (
                         <Badge
                           variant="secondary"
-                          style={{
-                            borderBottomColor: resolveSpaceColor(filteredSpace?.color),
-                          }}
                           render={
                             <button
                               type="button"
@@ -784,6 +781,13 @@ export function AppShell() {
                             />
                           }
                         >
+                          <span
+                            aria-hidden="true"
+                            className="size-1.5 shrink-0 rounded-full"
+                            style={{
+                              backgroundColor: resolveSpaceColor(filteredSpace?.color),
+                            }}
+                          />
                           {filteredSpace?.name ?? "Unknown space"}
                           <XIcon data-icon="inline-end" />
                         </Badge>
