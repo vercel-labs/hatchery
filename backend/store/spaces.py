@@ -7,6 +7,7 @@ fresh deployment has somewhere to land chats.
 
 import datetime
 import json
+import secrets
 import urllib.parse
 import uuid
 
@@ -24,6 +25,15 @@ CREATE TABLE IF NOT EXISTS hatchery_spaces (
 """
 
 DEFAULT_ID = "spc_hatchery"
+ACCENT_COLORS: tuple[models.AccentColor, ...] = (
+    "blue-700",
+    "red-700",
+    "amber-700",
+    "green-700",
+    "teal-700",
+    "purple-700",
+    "pink-700",
+)
 _DEFAULT_ABOUT = (
     "A workspace for repositories, instructions, and reference material.\n\n"
     "## Conventions\n\n"
@@ -46,13 +56,13 @@ async def ensure_ready() -> None:
         (store.data_dir() / "spaces").mkdir(parents=True, exist_ok=True)
 
 
-async def create(name: str) -> models.Space:
+async def create(name: str, color: models.AccentColor | None = None) -> models.Space:
     """Create an empty space."""
     return await save(
         models.Space(
             id=f"spc_{uuid.uuid4().hex[:12]}",
             name=name,
-            color="#a78bfa",
+            color=color or secrets.choice(ACCENT_COLORS),
             created_at=datetime.datetime.now(datetime.UTC).isoformat(),
         )
     )
@@ -133,7 +143,7 @@ async def default() -> models.Space:
             id=DEFAULT_ID,
             name="workspace",
             about=_DEFAULT_ABOUT,
-            color="#38bdf8",
+            color=secrets.choice(ACCENT_COLORS),
             created_at=datetime.datetime.now(datetime.UTC).isoformat(),
         )
     )

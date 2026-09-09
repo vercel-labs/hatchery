@@ -434,6 +434,7 @@ async def space_warnings(request: fastapi.Request) -> list[SpaceWarning]:
 
 class CreateSpaceRequest(pydantic.BaseModel):
     name: str
+    color: models.AccentColor | None = None
 
     @pydantic.field_validator("name")
     @classmethod
@@ -446,7 +447,7 @@ class CreateSpaceRequest(pydantic.BaseModel):
 
 @app.post("/api/spaces")
 async def create_space(request: CreateSpaceRequest) -> models.Space:
-    return await spaces.create(request.name)
+    return await spaces.create(request.name, request.color)
 
 
 @app.delete("/api/spaces/{space_id}", status_code=204)
@@ -462,6 +463,7 @@ async def delete_space(space_id: str) -> None:
 class UpdateSpaceRequest(pydantic.BaseModel):
     name: str
     about: str
+    color: models.AccentColor | None = None
 
     @pydantic.field_validator("name")
     @classmethod
@@ -477,9 +479,10 @@ async def update_space(space_id: str, request: UpdateSpaceRequest) -> models.Spa
     space = await spaces.get(space_id)
     if space is None:
         raise fastapi.HTTPException(404, "unknown space")
-    updated = models.Space.model_validate(
-        {**space.model_dump(), "name": request.name, "about": request.about}
-    )
+    values = {**space.model_dump(), "name": request.name, "about": request.about}
+    if request.color is not None:
+        values["color"] = request.color
+    updated = models.Space.model_validate(values)
     return await spaces.save(updated)
 
 

@@ -12,6 +12,7 @@ from websockets.http11 import Response
 import ai
 import ai.experimental_telemetry
 import channels
+import models
 from app import server
 from store import chats, events
 
@@ -275,8 +276,40 @@ async def test_space_create_and_delete():
     assert created.status_code == 200
     assert created.json()["name"] == "docs"
     assert created.json()["about"] == ""
+    assert created.json()["color"] in server.spaces.ACCENT_COLORS
     assert [space["id"] for space in listed] == [created.json()["id"]]
     assert deleted.status_code == 204
+
+
+async def test_space_create_accepts_only_explicit_accent_ids():
+    accent_colors = [
+        f"{family}-{shade}"
+        for family in ("blue", "red", "amber", "green", "teal", "purple", "pink")
+        for shade in ("600", "700", "800", "900")
+    ]
+    async with client() as c:
+        selected = [
+            await c.post("/api/spaces", json={"name": color, "color": color})
+            for color in accent_colors
+        ]
+        updated = [
+            await c.patch(
+                f"/api/spaces/{selected[0].json()['id']}",
+                json={"name": "updated", "about": "", "color": color},
+            )
+            for color in accent_colors
+        ]
+        bare = await c.post("/api/spaces", json={"name": "legacy", "color": "teal"})
+        custom = await c.post(
+            "/api/spaces", json={"name": "legacy", "color": "#38bdf8"}
+        )
+
+    assert [response.json()["color"] for response in selected] == accent_colors
+    assert all(response.status_code == 200 for response in selected)
+    assert [response.json()["color"] for response in updated] == accent_colors
+    assert all(response.status_code == 200 for response in updated)
+    assert bare.status_code == 422
+    assert custom.status_code == 422
 
 
 async def test_space_delete_cascades_owner_scoped_jobs():
@@ -322,6 +355,35 @@ async def test_space_update():
     assert response.json()["color"] == original.color
     assert response.json()["created_at"] == original.created_at
     assert listed[0] == response.json()
+
+
+async def test_space_update_changes_accent_and_preserves_legacy_when_omitted():
+    legacy = models.Space(
+        id="spc_legacy",
+        name="Legacy",
+        color="#38bdf8",
+        created_at="2026-09-08T00:00:00+00:00",
+    )
+    await server.spaces.save(legacy)
+
+    async with client() as c:
+        preserved = await c.patch(
+            "/api/spaces/spc_legacy", json={"name": "Legacy", "about": "unchanged"}
+        )
+        changed = await c.patch(
+            "/api/spaces/spc_legacy",
+            json={"name": "Legacy", "about": "changed", "color": "pink-900"},
+        )
+        invalid = await c.patch(
+            "/api/spaces/spc_legacy",
+            json={"name": "Legacy", "about": "changed", "color": "#fff"},
+        )
+
+    assert preserved.status_code == 200
+    assert preserved.json()["color"] == "#38bdf8"
+    assert changed.status_code == 200
+    assert changed.json()["color"] == "pink-900"
+    assert invalid.status_code == 422
 
 
 async def test_space_update_rejects_unknown_space_and_empty_name():
