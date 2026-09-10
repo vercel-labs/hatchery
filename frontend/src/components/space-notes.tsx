@@ -20,20 +20,12 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import {
-  Field,
-  FieldDescription,
-  FieldError,
-  FieldGroup,
-  FieldLabel,
-} from "@/components/ui/field";
+import { Field, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 
 type EditingNote = "new" | { filename: string; revision: number };
 type NoteItem = Note | NoteSummary;
-
-const MAX_NOTE_CONTENT_BYTES = 1_000_000;
 
 export function SpaceNotes({ spaceId }: { spaceId: string }) {
   const [notes, setNotes] = useState<NoteItem[] | null>(null);
@@ -126,13 +118,6 @@ export function SpaceNotes({ spaceId }: { spaceId: string }) {
       nextFilename.length > 100
     ) {
       setError("Use a simple .md filename, such as reviewed_issues.md.");
-      return;
-    }
-    const contentBytes = new TextEncoder().encode(JSON.stringify(content)).length - 2;
-    if (contentBytes > MAX_NOTE_CONTENT_BYTES) {
-      setError(
-        `Markdown must be at most ${MAX_NOTE_CONTENT_BYTES.toLocaleString()} JSON-encoded UTF-8 bytes; got ${contentBytes.toLocaleString()}.`,
-      );
       return;
     }
     setSaving(true);
@@ -275,9 +260,6 @@ export function SpaceNotes({ spaceId }: { spaceId: string }) {
                     className="min-h-40 resize-y font-mono"
                     aria-invalid={Boolean(error)}
                   />
-                  <FieldDescription>
-                    Up to 1,000,000 JSON-encoded UTF-8 bytes.
-                  </FieldDescription>
                   <FieldError>{error}</FieldError>
                 </Field>
                 {conflict && (
@@ -343,17 +325,19 @@ export function SpaceNotes({ spaceId }: { spaceId: string }) {
                   >
                     <span className="font-mono">{note.filename}</span>
                   </Button>
-                  {open && editing === null && "content" in note && (
+                  {open && editing === null && (
                     <>
-                      <Button
-                        variant="ghost"
-                        size="icon-xs"
-                        aria-label={`Edit ${note.filename}`}
-                        title={`Edit ${note.filename}`}
-                        onClick={() => openEditor(note)}
-                      >
-                        <PencilIcon />
-                      </Button>
+                      {"content" in note && (
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          aria-label={`Edit ${note.filename}`}
+                          title={`Edit ${note.filename}`}
+                          onClick={() => openEditor(note)}
+                        >
+                          <PencilIcon />
+                        </Button>
+                      )}
                       <Button
                         variant="ghost"
                         size="icon-xs"

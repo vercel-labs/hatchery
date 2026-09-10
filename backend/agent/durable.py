@@ -10,7 +10,7 @@ import vercel.workflow
 
 
 MODEL_ID = "openai/gpt-5.6-sol"
-NOTE_READ_CHUNK_LENGTH = 100_000
+MAX_NOTE_CONTENT_LENGTH = 9_007_199_254_740_991
 
 workflow = vercel.workflow.Workflows(
     sandbox_policy=vercel.workflow.SandboxPolicy(
@@ -242,18 +242,11 @@ async def start_thread_step(
 
 @workflow.step
 async def read_notes_step(
-    chat_id: str,
-    filename: str | None,
-    offset: int = 0,
-    expected_revision: int | None = None,
+    chat_id: str, filename: str | None
 ) -> list[dict[str, typing.Any]] | dict[str, typing.Any]:
     from app import server
     from store import notes
 
-    if offset < 0:
-        raise ValueError("offset must not be negative")
-    if offset and expected_revision is None:
-        raise ValueError("expected_revision is required when offset is nonzero")
     space = await server._space_for_chat(chat_id)
     if filename is None:
         return [
@@ -267,23 +260,7 @@ async def read_notes_step(
     note = await notes.get(space.id, filename)
     if note is None:
         return {"status": "not_found", "filename": filename}
-    if expected_revision is not None and note.revision != expected_revision:
-        return {
-            "status": "revision_changed",
-            "filename": filename,
-            "expected_revision": expected_revision,
-            "current_revision": note.revision,
-        }
-    end = min(offset + NOTE_READ_CHUNK_LENGTH, len(note.content))
-    result = note.model_dump(mode="json")
-    if offset or end < len(note.content):
-        result.update(
-            content=note.content[offset:end],
-            content_offset=offset,
-            content_length=len(note.content),
-            next_offset=end if end < len(note.content) else None,
-        )
-    return result
+    return note.model_dump(mode="json")
 
 
 @workflow.step(max_retries=0)
@@ -296,12 +273,6 @@ async def create_note_step(chat_id: str, filename: str, content: str) -> dict[st
         created = await notes.create(space.id, notes.valid_filename(filename), content)
     except notes.NoteExists:
         return {"status": "exists", "filename": filename}
-    except notes.NoteContentTooLarge as error:
-        return {
-            "status": "content_too_large",
-            "size": error.size,
-            "max_content_bytes": notes.MAX_CONTENT_BYTES,
-        }
     except notes.NoteLimitReached:
         return {"status": "limit_reached", "limit": notes.MAX_NOTES_PER_SPACE}
     return {"status": "created", **created.model_dump(mode="json")}
@@ -322,12 +293,6 @@ async def edit_note_step(
         return {
             "status": error.reason,
             **({"best_score": error.score} if error.score is not None else {}),
-        }
-    except notes.NoteContentTooLarge as error:
-        return {
-            "status": "content_too_large",
-            "size": error.size,
-            "max_content_bytes": notes.MAX_CONTENT_BYTES,
         }
     if result is None:
         return {"status": "not_found", "filename": filename}
@@ -461,31 +426,17 @@ async def read_notes(
             description="Exact .md filename to read, or omit to list note filenames"
         ),
     ] = None,
-    offset: typing.Annotated[
-        int,
-        pydantic.Field(
-            ge=0,
-            description="Character offset for the next chunk of a large note",
-        ),
-    ] = 0,
-    expected_revision: typing.Annotated[
-        int | None,
-        pydantic.Field(
-            ge=1,
-            description="Revision returned with the first chunk, required for a stable continuation",
-        ),
-    ] = None,
 ) -> list[dict[str, typing.Any]] | dict[str, typing.Any]:
-    """List this space's notes or read a markdown note in bounded chunks."""
-    return await read_notes_step(
-        current_agent.get().chat_id, filename, offset, expected_revision
-    )
+    """List this space's notes or read one complete markdown note."""
+    return await read_notes_step(current_agent.get().chat_id, filename)
 
 
 @ai.tool
 async def create_note(
     filename: typing.Annotated[str, pydantic.Field(max_length=100)],
-    content: str = "",
+    content: typing.Annotated[
+        str, pydantic.Field(max_length=MAX_NOTE_CONTENT_LENGTH)
+    ] = "",
 ) -> dict[str, typing.Any]:
     """Create a lean shared markdown note in this space."""
     return await create_note_step(current_agent.get().chat_id, filename, content)
@@ -498,12 +449,14 @@ async def edit_note(
         str,
         pydantic.Field(
             min_length=1,
+            max_length=MAX_NOTE_CONTENT_LENGTH,
             description="One unique existing snippet, preferably complete lines",
         ),
     ],
     replacement: typing.Annotated[
         str,
         pydantic.Field(
+            max_length=MAX_NOTE_CONTENT_LENGTH,
             description="Exact text to put in place of the matched snippet",
         ),
     ],

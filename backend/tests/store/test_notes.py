@@ -97,9 +97,6 @@ async def test_find_replace_rejects_missing_ambiguous_and_low_confidence_text():
             "replacement\n",
         )
     assert weak.value.reason == "low_confidence"
-    with pytest.raises(notes.FindReplaceError) as too_large:
-        notes._find_replace("y" * 20_000, "x" * 10_001, "replacement")
-    assert too_large.value.reason == "fuzzy_too_large"
     assert weak.value.score is not None
     assert (await notes.get(space.id, note.filename)).revision == 1
 
@@ -206,7 +203,7 @@ async def test_agent_and_human_edits_share_one_local_note_lock(monkeypatch):
     assert current.revision == 2
 
 
-async def test_note_create_rejects_duplicates_and_invalid_values():
+async def test_note_create_rejects_duplicates_and_invalid_values(monkeypatch):
     space = await spaces.create("notes")
     await notes.create(space.id, "foo.md")
 
@@ -222,12 +219,13 @@ async def test_note_create_rejects_duplicates_and_invalid_values():
     ):
         with pytest.raises(ValueError, match="simple .md name"):
             await notes.create(space.id, filename)
+    assert notes.MAX_CONTENT_LENGTH == 9_007_199_254_740_991
     large = await notes.create(space.id, "large.md", "x" * 32_001)
     assert len(large.content) == 32_001
-    with pytest.raises(notes.NoteContentTooLarge, match="1000000 JSON-encoded UTF-8 bytes"):
-        await notes.create(space.id, "too_large.md", "é" * 500_001)
-    with pytest.raises(notes.NoteContentTooLarge):
-        notes.validate_content("\0" * 166_667)
+
+    monkeypatch.setattr(notes, "MAX_CONTENT_LENGTH", 32_001)
+    with pytest.raises(ValueError, match="at most 32001"):
+        await notes.create(space.id, "too_large.md", "x" * 32_002)
 
 
 async def test_note_count_is_bounded(monkeypatch):

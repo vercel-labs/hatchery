@@ -394,7 +394,7 @@ async def test_space_note_routes_validate_names_conflicts_and_space():
     assert missing_space.status_code == 404
 
 
-async def test_space_note_routes_allow_modern_context_sizes_and_reject_oversize_bytes():
+async def test_space_note_routes_allow_modern_context_sizes():
     space = await server.spaces.create("large notes")
     async with client() as c:
         accepted = await c.post(
@@ -402,16 +402,17 @@ async def test_space_note_routes_allow_modern_context_sizes_and_reject_oversize_
             json={"filename": "large.md", "content": "x" * 32_001},
             headers={"origin": "http://test"},
         )
-        rejected = await c.post(
-            f"/api/spaces/{space.id}/notes",
-            json={"filename": "too_large.md", "content": "é" * 500_001},
-            headers={"origin": "http://test"},
-        )
 
     assert accepted.status_code == 201
     assert len(accepted.json()["content"]) == 32_001
-    assert rejected.status_code == 422
-    assert "1000000 JSON-encoded UTF-8 bytes" in rejected.text
+    assert (
+        server.CreateNoteRequest.model_json_schema()["properties"]["content"]["maxLength"]
+        == 9_007_199_254_740_991
+    )
+    assert (
+        server.UpdateNoteRequest.model_json_schema()["properties"]["content"]["maxLength"]
+        == 9_007_199_254_740_991
+    )
 
 
 async def test_space_create_accepts_only_explicit_accent_ids():

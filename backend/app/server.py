@@ -575,28 +575,18 @@ async def update_space_resources(
 
 class CreateNoteRequest(pydantic.BaseModel):
     filename: str
-    content: str = ""
+    content: str = pydantic.Field(default="", max_length=notes.MAX_CONTENT_LENGTH)
 
     @pydantic.field_validator("filename")
     @classmethod
     def valid_filename(cls, filename: str) -> str:
         return notes.valid_filename(filename)
 
-    @pydantic.field_validator("content")
-    @classmethod
-    def valid_content(cls, content: str) -> str:
-        return notes.validate_content(content)
-
 
 class UpdateNoteRequest(pydantic.BaseModel):
-    content: str
+    content: str = pydantic.Field(max_length=notes.MAX_CONTENT_LENGTH)
     expected_revision: int = pydantic.Field(ge=1)
     override: bool = False
-
-    @pydantic.field_validator("content")
-    @classmethod
-    def valid_content(cls, content: str) -> str:
-        return notes.validate_content(content)
 
 
 async def _note_space(space_id: str) -> models.Space:
