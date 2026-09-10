@@ -1,7 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { CheckIcon, PencilIcon, PlusIcon, XIcon } from "lucide-react";
+import {
+  CheckIcon,
+  PencilIcon,
+  PlusIcon,
+  Trash2Icon,
+  XIcon,
+} from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -9,7 +15,6 @@ import { apiFetch, type Note } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import {
   Card,
-  CardAction,
   CardContent,
   CardDescription,
   CardHeader,
@@ -19,14 +24,20 @@ import { Field, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 
+type EditingNote = "new" | { filename: string; revision: number };
+
 export function SpaceNotes({ spaceId }: { spaceId: string }) {
   const [notes, setNotes] = useState<Note[] | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
   const [loadError, setLoadError] = useState(false);
-  const [editing, setEditing] = useState<Note | "new" | null>(null);
+  const [editing, setEditing] = useState<EditingNote | null>(null);
   const [filename, setFilename] = useState("");
   const [content, setContent] = useState("");
+  const [conflict, setConflict] = useState<Note | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     let current = true;
@@ -47,14 +58,25 @@ export function SpaceNotes({ spaceId }: { spaceId: string }) {
   }, [spaceId]);
 
   const openEditor = (note: Note | "new") => {
-    setEditing(note);
+    setEditing(
+      note === "new"
+        ? "new"
+        : { filename: note.filename, revision: note.revision },
+    );
     setFilename(note === "new" ? "" : note.filename);
     setContent(note === "new" ? "" : note.content);
+    setConflict(null);
+    setConfirmingDelete(null);
     setError("");
   };
 
-  const save = async (event: React.FormEvent) => {
-    event.preventDefault();
+  const closeEditor = () => {
+    setEditing(null);
+    setConflict(null);
+    setError("");
+  };
+
+  const persist = async (override: boolean) => {
     if (editing === null) return;
     const nextFilename = filename.trim();
     if (
@@ -77,9 +99,14 @@ export function SpaceNotes({ spaceId }: { spaceId: string }) {
           method: creating ? "POST" : "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(
-            editing === "new"
+            creating
               ? { filename: nextFilename, content }
-              : { content, expected_revision: editing.revision },
+              : {
+                  content,
+                  expected_revision:
+                    override && conflict ? conflict.revision : editing.revision,
+                  override,
+                },
           ),
         },
       );
@@ -87,13 +114,12 @@ export function SpaceNotes({ spaceId }: { spaceId: string }) {
         const body = await response.json().catch(() => ({}));
         const current = body.detail?.current as Note | undefined;
         if (response.status === 409 && current) {
-          setNotes((notes) =>
-            (notes ?? []).map((note) =>
+          setNotes((found) =>
+            (found ?? []).map((note) =>
               note.filename === current.filename ? current : note,
             ),
           );
-          setEditing(current);
-          setContent(current.content);
+          setConflict(current);
         }
         throw new Error(
           typeof body.detail === "string"
@@ -102,16 +128,17 @@ export function SpaceNotes({ spaceId }: { spaceId: string }) {
         );
       }
       const saved: Note = await response.json();
-      setNotes((current) =>
+      setNotes((found) =>
         creating
-          ? [...(current ?? []), saved].sort((a, b) =>
+          ? [...(found ?? []), saved].sort((a, b) =>
               a.filename.localeCompare(b.filename),
             )
-          : (current ?? []).map((note) =>
+          : (found ?? []).map((note) =>
               note.filename === saved.filename ? saved : note,
             ),
       );
-      setEditing(null);
+      setSelected(saved.filename);
+      closeEditor();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not save note.");
     } finally {
@@ -119,21 +146,44 @@ export function SpaceNotes({ spaceId }: { spaceId: string }) {
     }
   };
 
+  const save = (event: React.FormEvent) => {
+    event.preventDefault();
+    void persist(false);
+  };
+
+  const deleteNote = async (note: Note) => {
+    setDeleting(true);
+    setError("");
+    try {
+      const response = await apiFetch(
+        `/api/spaces/${spaceId}/notes/${encodeURIComponent(note.filename)}`,
+        { method: "DELETE" },
+      );
+      if (!response.ok) throw new Error("Could not delete note.");
+      setNotes((found) =>
+        (found ?? []).filter((item) => item.filename !== note.filename),
+      );
+      setSelected(null);
+      setConfirmingDelete(null);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not delete note.");
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   return (
-    <section className="flex flex-col gap-3" aria-labelledby={`agent-notes-${spaceId}`}>
-      <div className="flex items-center justify-between gap-4">
-        <div>
-          <h2 id={`agent-notes-${spaceId}`} className="text-lg font-semibold">
-            Agent’s notes
-          </h2>
-          <p className="text-sm text-muted-foreground">
-            Lean shared context for people, agents, and periodic jobs.
-          </p>
-        </div>
+    <section className="mt-6 flex flex-col gap-3" aria-label="Notes">
+      <div className="flex justify-end">
         {editing === null && (
-          <Button variant="outline" size="sm" onClick={() => openEditor("new")}>
-            <PlusIcon data-icon="inline-start" />
-            New note
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            aria-label="Create note"
+            title="Create note"
+            onClick={() => openEditor("new")}
+          >
+            <PlusIcon />
           </Button>
         )}
       </div>
@@ -171,12 +221,28 @@ export function SpaceNotes({ spaceId }: { spaceId: string }) {
                   />
                   <FieldError>{error}</FieldError>
                 </Field>
+                {conflict && (
+                  <div className="flex flex-wrap items-center justify-end gap-2">
+                    <p className="mr-auto text-sm text-muted-foreground">
+                      Latest revision: {conflict.revision}. Overwrite only after reviewing
+                      the latest note.
+                    </p>
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      disabled={saving}
+                      onClick={() => void persist(true)}
+                    >
+                      Overwrite current version
+                    </Button>
+                  </div>
+                )}
                 <div className="flex justify-end gap-2">
                   <Button
                     type="button"
                     variant="ghost"
                     disabled={saving}
-                    onClick={() => setEditing(null)}
+                    onClick={closeEditor}
                   >
                     <XIcon data-icon="inline-start" />
                     Cancel
@@ -199,41 +265,98 @@ export function SpaceNotes({ spaceId }: { spaceId: string }) {
       {notes?.length === 0 && editing === null && (
         <p className="text-sm text-muted-foreground">No notes yet.</p>
       )}
-      {notes?.map((note) => (
-        <Card key={note.filename}>
-          <CardHeader>
-            <CardTitle className="font-mono">{note.filename}</CardTitle>
-            <CardDescription>
-              Updated {new Date(note.updated_at).toLocaleString()}
-            </CardDescription>
-            <CardAction>
-              <Button
-                variant="ghost"
-                size="icon-xs"
-                aria-label={`Edit ${note.filename}`}
-                disabled={editing !== null}
-                onClick={() => openEditor(note)}
+      {notes && notes.length > 0 && (
+        <ul className="ml-2 border-l border-border/60">
+          {notes.map((note) => {
+            const open = selected === note.filename;
+            return (
+              <li
+                key={note.filename}
+                className="relative pl-4 before:absolute before:top-3 before:left-0 before:w-3 before:border-t before:border-border/60"
               >
-                <PencilIcon />
-              </Button>
-            </CardAction>
-          </CardHeader>
-          <CardContent>
-            {note.content ? (
-              <article className="typeset typeset-docs min-w-0">
-                <ReactMarkdown
-                  remarkPlugins={[remarkGfm]}
-                  components={{ img: () => null }}
-                >
-                  {note.content}
-                </ReactMarkdown>
-              </article>
-            ) : (
-              <p className="text-sm text-muted-foreground">Empty note.</p>
-            )}
-          </CardContent>
-        </Card>
-      ))}
+                <div className="flex min-h-6 items-center gap-1 text-muted-foreground">
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    aria-expanded={open}
+                    className="h-auto justify-start px-0"
+                    disabled={editing !== null}
+                    onClick={() => {
+                      setSelected(open ? null : note.filename);
+                      setConfirmingDelete(null);
+                      setError("");
+                    }}
+                  >
+                    <span className="font-mono">{note.filename}</span>
+                  </Button>
+                  {open && editing === null && (
+                    <>
+                      <Button
+                        variant="ghost"
+                        size="icon-xs"
+                        aria-label={`Edit ${note.filename}`}
+                        title={`Edit ${note.filename}`}
+                        onClick={() => openEditor(note)}
+                      >
+                        <PencilIcon />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon-xs"
+                        aria-label={`Delete ${note.filename}`}
+                        title={`Delete ${note.filename}`}
+                        onClick={() => setConfirmingDelete(note.filename)}
+                      >
+                        <Trash2Icon />
+                      </Button>
+                    </>
+                  )}
+                </div>
+                {open && (
+                  <div className="flex flex-col gap-2 pb-3 pl-[1.875rem] text-muted-foreground">
+                    {note.content ? (
+                      <article className="typeset typeset-docs min-w-0 [--color-foreground:var(--muted-foreground)]">
+                        <ReactMarkdown
+                          remarkPlugins={[remarkGfm]}
+                          components={{ img: () => null }}
+                        >
+                          {note.content}
+                        </ReactMarkdown>
+                      </article>
+                    ) : (
+                      <p className="text-sm">Empty note.</p>
+                    )}
+                    {confirmingDelete === note.filename && (
+                      <div className="flex flex-wrap items-center gap-2 text-sm" role="group" aria-label={`Confirm deletion of ${note.filename}`}>
+                        <span>Delete this note?</span>
+                        <Button
+                          variant="ghost"
+                          size="xs"
+                          disabled={deleting}
+                          onClick={() => setConfirmingDelete(null)}
+                        >
+                          Cancel
+                        </Button>
+                        <Button
+                          variant="destructive"
+                          size="xs"
+                          disabled={deleting}
+                          onClick={() => void deleteNote(note)}
+                        >
+                          {deleting ? "Deleting" : "Delete"}
+                        </Button>
+                      </div>
+                    )}
+                    {error && editing === null && (
+                      <p className="text-sm text-destructive">{error}</p>
+                    )}
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </section>
   );
 }

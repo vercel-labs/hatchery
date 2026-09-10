@@ -586,6 +586,7 @@ class CreateNoteRequest(pydantic.BaseModel):
 class UpdateNoteRequest(pydantic.BaseModel):
     content: str = pydantic.Field(max_length=notes.MAX_CONTENT_LENGTH)
     expected_revision: int = pydantic.Field(ge=1)
+    override: bool = False
 
 
 async def _note_space(space_id: str) -> models.Space:
@@ -636,19 +637,38 @@ async def update_note(
         raise fastapi.HTTPException(422, str(error)) from error
     try:
         updated = await notes.update(
-            space_id, filename, request.content, request.expected_revision
+            space_id,
+            filename,
+            request.content,
+            request.expected_revision,
         )
     except notes.NoteConflict as error:
+        message = (
+            "This note changed again before it could be overwritten. Review the latest version and retry."
+            if request.override
+            else "This note changed after editing began. Review the latest version or explicitly overwrite it."
+        )
         raise fastapi.HTTPException(
             409,
             {
-                "message": "note changed; reload before saving",
+                "message": message,
                 "current": error.current.model_dump(mode="json"),
             },
         ) from error
     if updated is None:
         raise fastapi.HTTPException(404, "unknown note")
     return updated
+
+
+@app.delete("/api/spaces/{space_id}/notes/{filename}", status_code=204)
+async def delete_note(space_id: str, filename: str) -> None:
+    await _note_space(space_id)
+    try:
+        filename = notes.valid_filename(filename)
+    except ValueError as error:
+        raise fastapi.HTTPException(422, str(error)) from error
+    if not await notes.delete(space_id, filename):
+        raise fastapi.HTTPException(404, "unknown note")
 
 
 class JobResponse(pydantic.BaseModel):

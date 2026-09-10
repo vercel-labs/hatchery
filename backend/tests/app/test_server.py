@@ -311,6 +311,29 @@ async def test_space_notes_are_shared_space_scoped_markdown_files():
             json={"content": "stale", "expected_revision": 1},
             headers={"origin": "http://test"},
         )
+        intervening = await c.put(
+            f"/api/spaces/{first.id}/notes/reviewed_issues.md",
+            json={"content": "An intervening edit.", "expected_revision": 2},
+            headers={"origin": "http://test"},
+        )
+        raced_override = await c.put(
+            f"/api/spaces/{first.id}/notes/reviewed_issues.md",
+            json={"content": "Reviewed stale draft.", "expected_revision": 2, "override": True},
+            headers={"origin": "http://test"},
+        )
+        overridden = await c.put(
+            f"/api/spaces/{first.id}/notes/reviewed_issues.md",
+            json={"content": "Reviewed stale draft.", "expected_revision": 3, "override": True},
+            headers={"origin": "http://test"},
+        )
+        deleted = await c.delete(
+            f"/api/spaces/{first.id}/notes/reviewed_issues.md",
+            headers={"origin": "http://test"},
+        )
+        missing_delete = await c.delete(
+            f"/api/spaces/{first.id}/notes/reviewed_issues.md",
+            headers={"origin": "http://test"},
+        )
 
     assert empty.json() == []
     assert created.status_code == 201
@@ -321,6 +344,15 @@ async def test_space_notes_are_shared_space_scoped_markdown_files():
     assert updated.json()["revision"] == 2
     assert conflict.status_code == 409
     assert conflict.json()["detail"]["current"] == updated.json()
+    assert "explicitly overwrite" in conflict.json()["detail"]["message"]
+    assert intervening.json()["revision"] == 3
+    assert raced_override.status_code == 409
+    assert raced_override.json()["detail"]["current"] == intervening.json()
+    assert "changed again" in raced_override.json()["detail"]["message"]
+    assert overridden.json()["content"] == "Reviewed stale draft."
+    assert overridden.json()["revision"] == 4
+    assert deleted.status_code == 204
+    assert missing_delete.status_code == 404
     assert (await server.notes.get(second.id, "reviewed_issues.md")).content == "other"
 
 

@@ -26,6 +26,9 @@ def test_system_prompt_describes_worker_and_thread_flow():
     assert "vercel/vercel-py" in prompt
     assert "periodic job" in prompt
     assert "Keep notes very lean" in prompt
+    assert "one unique snippet" in prompt
+    assert "if a match is missing" in prompt
+    assert "ambiguous, or low confidence" in prompt
     assert "untrusted reference data" in prompt
 
 

@@ -279,7 +279,7 @@ async def create_note_step(chat_id: str, filename: str, content: str) -> dict[st
 
 @workflow.step(max_retries=0)
 async def edit_note_step(
-    chat_id: str, filename: str, content: str, expected_revision: int
+    chat_id: str, filename: str, find: str, replacement: str
 ) -> dict[str, typing.Any]:
     from app import server
     from store import notes
@@ -287,15 +287,21 @@ async def edit_note_step(
     space = await server._space_for_chat(chat_id)
     filename = notes.valid_filename(filename)
     try:
-        updated = await notes.update(space.id, filename, content, expected_revision)
-    except notes.NoteConflict as error:
+        result = await notes.find_replace(space.id, filename, find, replacement)
+    except notes.FindReplaceError as error:
         return {
-            "status": "conflict",
-            "current": error.current.model_dump(mode="json"),
+            "status": error.reason,
+            **({"best_score": error.score} if error.score is not None else {}),
         }
-    if updated is None:
+    if result is None:
         return {"status": "not_found", "filename": filename}
-    return {"status": "saved", **updated.model_dump(mode="json")}
+    updated, match, score = result
+    return {
+        "status": "saved",
+        "match": match,
+        "score": score,
+        **updated.model_dump(mode="json"),
+    }
 
 
 current_agent: contextvars.ContextVar["DurableDispatcher"] = contextvars.ContextVar(
@@ -436,12 +442,25 @@ async def create_note(
 @ai.tool
 async def edit_note(
     filename: typing.Annotated[str, pydantic.Field(max_length=100)],
-    content: typing.Annotated[str, pydantic.Field(max_length=32_000)],
-    expected_revision: typing.Annotated[int, pydantic.Field(ge=1)],
+    find: typing.Annotated[
+        str,
+        pydantic.Field(
+            min_length=1,
+            max_length=32_000,
+            description="One unique existing snippet, preferably complete lines",
+        ),
+    ],
+    replacement: typing.Annotated[
+        str,
+        pydantic.Field(
+            max_length=32_000,
+            description="Exact text to put in place of the matched snippet",
+        ),
+    ],
 ) -> dict[str, typing.Any]:
-    """Replace a note if its revision still matches the last read."""
+    """Safely replace one unique exact or high-confidence fuzzy note snippet."""
     return await edit_note_step(
-        current_agent.get().chat_id, filename, content, expected_revision
+        current_agent.get().chat_id, filename, find, replacement
     )
 
 
