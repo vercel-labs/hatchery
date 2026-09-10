@@ -50,6 +50,9 @@ async def test_durable_tools_keep_effects_non_retriable():
     assert durable.message_subagent_step.max_retries == 0
     assert durable.require_attention_step.max_retries == 0
     assert durable.start_thread_step.max_retries == 0
+    assert durable.read_notes_step.max_retries > 0
+    assert durable.create_note_step.max_retries == 0
+    assert durable.edit_note_step.max_retries == 0
     assert durable.deliver_replies.max_retries == 0
 
 
@@ -155,6 +158,37 @@ async def test_tools_read_trusted_chat_id_from_current_agent(monkeypatch):
 
     assert calls == ["chat_1"]
     assert durable.list_sandboxes.tool.spec.params["properties"] == {}
+
+
+async def test_note_tools_share_memory_with_the_current_chats_space():
+    from store import spaces
+
+    space = await spaces.create("recurring")
+    chat = await chats.create(space.id, "scheduled review")
+
+    assert {"read_notes", "create_note", "edit_note"} <= {
+        tool.name for tool in durable.BASE_TOOLS
+    }
+    assert await durable.read_notes_step.func(chat.id, None) == []
+    created = await durable.create_note_step.func(
+        chat.id, "reviewed_issues.md", "- issue 12 reviewed"
+    )
+    listed = await durable.read_notes_step.func(chat.id, None)
+    read = await durable.read_notes_step.func(chat.id, "reviewed_issues.md")
+    updated = await durable.edit_note_step.func(
+        chat.id, "reviewed_issues.md", "- issue 12 closed", read["revision"]
+    )
+
+    assert created["status"] == "created"
+    assert listed == [
+        {
+            "filename": "reviewed_issues.md",
+            "updated_at": created["updated_at"],
+        }
+    ]
+    assert read["content"] == "- issue 12 reviewed"
+    assert updated["status"] == "saved"
+    assert updated["content"] == "- issue 12 closed"
 
 
 async def test_start_thread_uses_trusted_chat_and_turn_ids(monkeypatch):

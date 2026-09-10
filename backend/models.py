@@ -63,6 +63,17 @@ class Space(pydantic.BaseModel):
         return repos
 
 
+class NoteSummary(pydantic.BaseModel):
+    filename: str
+    revision: int
+    updated_at: str
+
+
+class Note(NoteSummary):
+    space_id: str
+    content: str
+
+
 class Job(pydantic.BaseModel):
     id: str
     space_id: str

@@ -281,6 +281,81 @@ async def test_space_create_and_delete():
     assert deleted.status_code == 204
 
 
+async def test_space_notes_are_shared_space_scoped_markdown_files():
+    first = await server.spaces.create("first")
+    second = await server.spaces.create("second")
+
+    async with client() as c:
+        empty = await c.get(f"/api/spaces/{first.id}/notes")
+        created = await c.post(
+            f"/api/spaces/{first.id}/notes",
+            json={"filename": "reviewed_issues.md", "content": "# Reviewed\n"},
+            headers={"origin": "http://test"},
+        )
+        await c.post(
+            f"/api/spaces/{second.id}/notes",
+            json={"filename": "reviewed_issues.md", "content": "other"},
+            headers={"origin": "http://test"},
+        )
+        listed = await c.get(f"/api/spaces/{first.id}/notes")
+        read = await c.get(
+            f"/api/spaces/{first.id}/notes/reviewed_issues.md"
+        )
+        updated = await c.put(
+            f"/api/spaces/{first.id}/notes/reviewed_issues.md",
+            json={"content": "Only durable context.", "expected_revision": 1},
+            headers={"origin": "http://test"},
+        )
+        conflict = await c.put(
+            f"/api/spaces/{first.id}/notes/reviewed_issues.md",
+            json={"content": "stale", "expected_revision": 1},
+            headers={"origin": "http://test"},
+        )
+
+    assert empty.json() == []
+    assert created.status_code == 201
+    assert created.json()["space_id"] == first.id
+    assert listed.json() == [created.json()]
+    assert read.json() == created.json()
+    assert updated.json()["content"] == "Only durable context."
+    assert updated.json()["revision"] == 2
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["current"] == updated.json()
+    assert (await server.notes.get(second.id, "reviewed_issues.md")).content == "other"
+
+
+async def test_space_note_routes_validate_names_conflicts_and_space():
+    space = await server.spaces.create("notes")
+    async with client() as c:
+        invalid = await c.post(
+            f"/api/spaces/{space.id}/notes",
+            json={"filename": "../secret.md"},
+            headers={"origin": "http://test"},
+        )
+        created = await c.post(
+            f"/api/spaces/{space.id}/notes",
+            json={"filename": "foo.md"},
+            headers={"origin": "http://test"},
+        )
+        duplicate = await c.post(
+            f"/api/spaces/{space.id}/notes",
+            json={"filename": "foo.md"},
+            headers={"origin": "http://test"},
+        )
+        missing_note = await c.put(
+            f"/api/spaces/{space.id}/notes/missing.md",
+            json={"content": "no", "expected_revision": 1},
+            headers={"origin": "http://test"},
+        )
+        missing_space = await c.get("/api/spaces/spc_missing/notes")
+
+    assert invalid.status_code == 422
+    assert created.status_code == 201
+    assert duplicate.status_code == 409
+    assert missing_note.status_code == 404
+    assert missing_space.status_code == 404
+
+
 async def test_space_create_accepts_only_explicit_accent_ids():
     accent_colors = [
         f"{family}-{shade}"
@@ -316,6 +391,7 @@ async def test_space_delete_cascades_owner_scoped_jobs():
     space = await server.spaces.create("scheduled")
     own = await server.jobs.create(space.id, "user_test", "0 9 * * *", "Mine")
     other = await server.jobs.create(space.id, "user_other", "0 10 * * *", "Theirs")
+    await server.notes.create(space.id, "history.md", "done")
 
     async with client() as c:
         response = await c.delete(f"/api/spaces/{space.id}")
@@ -323,6 +399,7 @@ async def test_space_delete_cascades_owner_scoped_jobs():
     assert response.status_code == 204
     assert await server.jobs.get(own.id) is None
     assert await server.jobs.get(other.id) is None
+    assert await server.notes.list_for_space(space.id) == []
 
 
 async def test_space_delete_rejects_unknown_space_and_space_with_chats():

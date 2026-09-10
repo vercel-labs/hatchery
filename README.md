@@ -41,3 +41,8 @@ Scheduled jobs use five-field UTC cron expressions. Vercel calls `/api/cron` eve
 minute; set the same long random `CRON_SECRET` on the backend deployment so its
 `Authorization: Bearer` header is accepted. Local heartbeat checks can use
 `curl -H "Authorization: Bearer $CRON_SECRET" http://localhost:3000/api/cron`.
+
+Each space also has shared agent notes: a flat list of simple `.md` files shown
+under the space description. People and dispatchers can create, read, and edit
+them. Keep notes lean and durable so periodic jobs can cross-reference prior work
+without carrying full transcripts into future runs.

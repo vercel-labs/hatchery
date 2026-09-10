@@ -42,7 +42,7 @@ from agent import classifier, durable, sandbox, stream as agent_stream, telemetr
 import worker
 from worker import protocol as worker_protocol
 from channels import github, slack
-from store import chats, events, jobs, spaces, turns
+from store import chats, events, jobs, notes, spaces, turns
 
 log = logging.getLogger("app")
 _background: set[asyncio.Task] = set()
@@ -512,6 +512,7 @@ async def delete_space(space_id: str) -> None:
     if await spaces.get(space_id) is None:
         raise fastapi.HTTPException(404, "unknown space")
     await jobs.delete_for_space(space_id)
+    await notes.delete_for_space(space_id)
     await spaces.delete(space_id)
 
 
@@ -570,6 +571,84 @@ async def update_space_resources(
         }
     )
     return await spaces.save(updated)
+
+
+class CreateNoteRequest(pydantic.BaseModel):
+    filename: str
+    content: str = pydantic.Field(default="", max_length=notes.MAX_CONTENT_LENGTH)
+
+    @pydantic.field_validator("filename")
+    @classmethod
+    def valid_filename(cls, filename: str) -> str:
+        return notes.valid_filename(filename)
+
+
+class UpdateNoteRequest(pydantic.BaseModel):
+    content: str = pydantic.Field(max_length=notes.MAX_CONTENT_LENGTH)
+    expected_revision: int = pydantic.Field(ge=1)
+
+
+async def _note_space(space_id: str) -> models.Space:
+    space = await spaces.get(space_id)
+    if space is None:
+        raise fastapi.HTTPException(404, "unknown space")
+    return space
+
+
+@app.get("/api/spaces/{space_id}/notes")
+async def list_notes(space_id: str) -> list[models.Note]:
+    await _note_space(space_id)
+    return await notes.list_for_space(space_id)
+
+
+@app.get("/api/spaces/{space_id}/notes/{filename}")
+async def read_note(space_id: str, filename: str) -> models.Note:
+    await _note_space(space_id)
+    try:
+        filename = notes.valid_filename(filename)
+    except ValueError as error:
+        raise fastapi.HTTPException(422, str(error)) from error
+    found = await notes.get(space_id, filename)
+    if found is None:
+        raise fastapi.HTTPException(404, "unknown note")
+    return found
+
+
+@app.post("/api/spaces/{space_id}/notes", status_code=201)
+async def create_note(space_id: str, request: CreateNoteRequest) -> models.Note:
+    await _note_space(space_id)
+    try:
+        return await notes.create(space_id, request.filename, request.content)
+    except notes.NoteExists as error:
+        raise fastapi.HTTPException(409, "note already exists") from error
+    except notes.NoteLimitReached as error:
+        raise fastapi.HTTPException(409, "space has reached its note limit") from error
+
+
+@app.put("/api/spaces/{space_id}/notes/{filename}")
+async def update_note(
+    space_id: str, filename: str, request: UpdateNoteRequest
+) -> models.Note:
+    await _note_space(space_id)
+    try:
+        filename = notes.valid_filename(filename)
+    except ValueError as error:
+        raise fastapi.HTTPException(422, str(error)) from error
+    try:
+        updated = await notes.update(
+            space_id, filename, request.content, request.expected_revision
+        )
+    except notes.NoteConflict as error:
+        raise fastapi.HTTPException(
+            409,
+            {
+                "message": "note changed; reload before saving",
+                "current": error.current.model_dump(mode="json"),
+            },
+        ) from error
+    if updated is None:
+        raise fastapi.HTTPException(404, "unknown note")
+    return updated
 
 
 class JobResponse(pydantic.BaseModel):

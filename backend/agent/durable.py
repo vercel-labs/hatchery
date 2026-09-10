@@ -239,6 +239,65 @@ async def start_thread_step(
     )
 
 
+@workflow.step
+async def read_notes_step(
+    chat_id: str, filename: str | None
+) -> list[dict[str, typing.Any]] | dict[str, typing.Any]:
+    from app import server
+    from store import notes
+
+    space = await server._space_for_chat(chat_id)
+    if filename is None:
+        return [
+            {
+                "filename": note.filename,
+                "updated_at": note.updated_at,
+            }
+            for note in await notes.list_summaries(space.id)
+        ]
+    filename = notes.valid_filename(filename)
+    note = await notes.get(space.id, filename)
+    if note is None:
+        return {"status": "not_found", "filename": filename}
+    return note.model_dump(mode="json")
+
+
+@workflow.step(max_retries=0)
+async def create_note_step(chat_id: str, filename: str, content: str) -> dict[str, typing.Any]:
+    from app import server
+    from store import notes
+
+    space = await server._space_for_chat(chat_id)
+    try:
+        created = await notes.create(space.id, notes.valid_filename(filename), content)
+    except notes.NoteExists:
+        return {"status": "exists", "filename": filename}
+    except notes.NoteLimitReached:
+        return {"status": "limit_reached", "limit": notes.MAX_NOTES_PER_SPACE}
+    return {"status": "created", **created.model_dump(mode="json")}
+
+
+@workflow.step(max_retries=0)
+async def edit_note_step(
+    chat_id: str, filename: str, content: str, expected_revision: int
+) -> dict[str, typing.Any]:
+    from app import server
+    from store import notes
+
+    space = await server._space_for_chat(chat_id)
+    filename = notes.valid_filename(filename)
+    try:
+        updated = await notes.update(space.id, filename, content, expected_revision)
+    except notes.NoteConflict as error:
+        return {
+            "status": "conflict",
+            "current": error.current.model_dump(mode="json"),
+        }
+    if updated is None:
+        return {"status": "not_found", "filename": filename}
+    return {"status": "saved", **updated.model_dump(mode="json")}
+
+
 current_agent: contextvars.ContextVar["DurableDispatcher"] = contextvars.ContextVar(
     "current_agent"
 )
@@ -352,6 +411,40 @@ async def start_thread(
     return result
 
 
+@ai.tool
+async def read_notes(
+    filename: typing.Annotated[
+        str | None,
+        pydantic.Field(
+            description="Exact .md filename to read, or omit to list note filenames"
+        ),
+    ] = None,
+) -> list[dict[str, typing.Any]] | dict[str, typing.Any]:
+    """List this space's notes or read one complete markdown note."""
+    return await read_notes_step(current_agent.get().chat_id, filename)
+
+
+@ai.tool
+async def create_note(
+    filename: typing.Annotated[str, pydantic.Field(max_length=100)],
+    content: typing.Annotated[str, pydantic.Field(max_length=32_000)] = "",
+) -> dict[str, typing.Any]:
+    """Create a lean shared markdown note in this space."""
+    return await create_note_step(current_agent.get().chat_id, filename, content)
+
+
+@ai.tool
+async def edit_note(
+    filename: typing.Annotated[str, pydantic.Field(max_length=100)],
+    content: typing.Annotated[str, pydantic.Field(max_length=32_000)],
+    expected_revision: typing.Annotated[int, pydantic.Field(ge=1)],
+) -> dict[str, typing.Any]:
+    """Replace a note if its revision still matches the last read."""
+    return await edit_note_step(
+        current_agent.get().chat_id, filename, content, expected_revision
+    )
+
+
 BASE_TOOLS = [
     create_sandbox,
     list_sandboxes,
@@ -361,6 +454,9 @@ BASE_TOOLS = [
     require_attention,
     find_channels,
     find_people,
+    read_notes,
+    create_note,
+    edit_note,
 ]
 
 
