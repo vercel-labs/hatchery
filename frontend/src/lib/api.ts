@@ -87,6 +87,7 @@ export type Note = {
 export type Job = {
   id: string;
   space_id: string;
+  author_display_name: string | null;
   schedule: string;
   prompt: string;
   paused: boolean;

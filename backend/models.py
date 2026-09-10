@@ -78,6 +78,7 @@ class Job(pydantic.BaseModel):
     id: str
     space_id: str
     owner_id: str
+    author_display_name: str | None = None
     schedule: str
     prompt: str
     paused: bool = False

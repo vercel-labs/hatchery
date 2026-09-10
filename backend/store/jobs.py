@@ -15,31 +15,56 @@ import store
 
 _SCHEMA = """\
 CREATE TABLE IF NOT EXISTS hatchery_jobs (
-    id          TEXT PRIMARY KEY,
-    space_id    TEXT NOT NULL,
-    owner_id    TEXT NOT NULL,
-    schedule    TEXT NOT NULL,
-    prompt      TEXT NOT NULL,
-    paused      BOOLEAN NOT NULL DEFAULT FALSE,
-    next_run_at TIMESTAMPTZ NOT NULL,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    id                  TEXT PRIMARY KEY,
+    space_id            TEXT NOT NULL,
+    owner_id            TEXT NOT NULL,
+    author_display_name TEXT,
+    schedule            TEXT NOT NULL,
+    prompt              TEXT NOT NULL,
+    paused              BOOLEAN NOT NULL DEFAULT FALSE,
+    next_run_at         TIMESTAMPTZ NOT NULL,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE hatchery_jobs ADD COLUMN IF NOT EXISTS author_display_name TEXT;
+UPDATE hatchery_jobs jobs SET author_display_name = COALESCE(
+    NULLIF(BTRIM(users.data->>'name'), ''),
+    NULLIF(BTRIM(users.data->>'username'), ''),
+    NULLIF(BTRIM(users.data->>'email'), '')
+)
+FROM hatchery_users users
+WHERE jobs.owner_id = users.id AND jobs.author_display_name IS NULL;
 CREATE INDEX IF NOT EXISTS hatchery_jobs_due ON hatchery_jobs (next_run_at) WHERE NOT paused;
 
 CREATE TABLE IF NOT EXISTS hatchery_job_executions (
-    job_id        TEXT NOT NULL,
-    scheduled_for TIMESTAMPTZ NOT NULL,
-    chat_id       TEXT NOT NULL UNIQUE,
-    turn_id       TEXT NOT NULL,
-    prompt        TEXT NOT NULL,
-    run_id        TEXT,
+    job_id              TEXT NOT NULL,
+    scheduled_for       TIMESTAMPTZ NOT NULL,
+    chat_id             TEXT NOT NULL UNIQUE,
+    turn_id             TEXT NOT NULL,
+    prompt              TEXT NOT NULL,
+    author_display_name TEXT,
+    run_id              TEXT,
     lease_token   TEXT,
     lease_until   TIMESTAMPTZ,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (job_id, scheduled_for)
 );
+ALTER TABLE hatchery_job_executions ADD COLUMN IF NOT EXISTS author_display_name TEXT;
 ALTER TABLE hatchery_job_executions ADD COLUMN IF NOT EXISTS lease_token TEXT;
 ALTER TABLE hatchery_job_executions ADD COLUMN IF NOT EXISTS lease_until TIMESTAMPTZ;
+UPDATE hatchery_job_executions executions
+SET author_display_name = jobs.author_display_name
+FROM hatchery_jobs jobs
+WHERE executions.job_id = jobs.id
+    AND executions.author_display_name IS NULL
+    AND jobs.author_display_name IS NOT NULL;
+UPDATE hatchery_chats chats
+SET data = chats.data || jsonb_build_object(
+    'author_display_name', jobs.author_display_name
+)
+FROM hatchery_jobs jobs
+WHERE chats.data->>'trigger' = 'cron:' || jobs.id
+    AND chats.data->>'author_display_name' IS NULL
+    AND jobs.author_display_name IS NOT NULL;
 """
 
 _RETENTION = datetime.timedelta(days=30)
@@ -55,6 +80,7 @@ class Execution(pydantic.BaseModel):
     chat_id: str
     turn_id: str
     prompt: str
+    author_display_name: str | None = None
     run_id: str | None = None
     lease_token: str | None = None
     lease_until: datetime.datetime | None = None
@@ -85,12 +111,19 @@ async def ensure_ready() -> None:
         (store.data_dir() / "jobs").mkdir(parents=True, exist_ok=True)
 
 
-async def create(space_id: str, owner_id: str, schedule: str, prompt: str) -> models.Job:
+async def create(
+    space_id: str,
+    owner_id: str,
+    schedule: str,
+    prompt: str,
+    author_display_name: str | None = None,
+) -> models.Job:
     now = datetime.datetime.now(datetime.UTC)
     job = models.Job(
         id=f"job_{uuid.uuid4().hex[:12]}",
         space_id=space_id,
         owner_id=owner_id,
+        author_display_name=author_display_name,
         schedule=validate_schedule(schedule),
         prompt=prompt,
         paused=False,
@@ -101,9 +134,10 @@ async def create(space_id: str, owner_id: str, schedule: str, prompt: str) -> mo
         from store import db
 
         await (await db.pool()).execute(
-            "INSERT INTO hatchery_jobs (id, space_id, owner_id, schedule, prompt, paused, next_run_at, created_at) "
-            "VALUES ($1, $2, $3, $4, $5, FALSE, $6, $7)",
-            job.id, job.space_id, job.owner_id, job.schedule, job.prompt,
+            "INSERT INTO hatchery_jobs "
+            "(id, space_id, owner_id, author_display_name, schedule, prompt, paused, next_run_at, created_at) "
+            "VALUES ($1, $2, $3, $4, $5, $6, FALSE, $7, $8)",
+            job.id, job.space_id, job.owner_id, job.author_display_name, job.schedule, job.prompt,
             datetime.datetime.fromisoformat(job.next_run_at), datetime.datetime.fromisoformat(job.created_at),
         )
     else:
@@ -288,12 +322,14 @@ async def claim_due(now: datetime.datetime | None = None) -> list[Execution]:
                 execution = Execution(
                     job_id=job.id, scheduled_for=scheduled_for, chat_id=chat.id,
                     turn_id=f"turn_{uuid.uuid4().hex}", prompt=job.prompt,
+                    author_display_name=job.author_display_name,
                 )
                 inserted = await conn.fetchrow(
-                    "INSERT INTO hatchery_job_executions (job_id, scheduled_for, chat_id, turn_id, prompt) "
-                    "VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING RETURNING chat_id",
+                    "INSERT INTO hatchery_job_executions "
+                    "(job_id, scheduled_for, chat_id, turn_id, prompt, author_display_name) "
+                    "VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING RETURNING chat_id",
                     execution.job_id, execution.scheduled_for, execution.chat_id, execution.turn_id,
-                    execution.prompt,
+                    execution.prompt, execution.author_display_name,
                 )
                 if inserted:
                     await conn.execute(
@@ -334,6 +370,7 @@ async def claim_due(now: datetime.datetime | None = None) -> list[Execution]:
                 execution = Execution(
                     job_id=job.id, scheduled_for=scheduled_for, chat_id=chat.id,
                     turn_id=f"turn_{uuid.uuid4().hex}", prompt=job.prompt,
+                    author_display_name=job.author_display_name,
                 )
                 execution_path.write_text(execution.model_dump_json(), encoding="utf-8")
                 _write_prompt(execution, events._path(chat.id, "messages"))
@@ -489,7 +526,8 @@ async def cleanup(now: datetime.datetime | None = None) -> int:
 def _chat_for(job: models.Job) -> models.Chat:
     title = job.prompt.strip().splitlines()[0][:80] or "scheduled job"
     return models.Chat(
-        id=f"chat_{uuid.uuid4().hex[:12]}", user_id=job.owner_id, space_id=job.space_id,
+        id=f"chat_{uuid.uuid4().hex[:12]}", user_id=job.owner_id,
+        author_display_name=job.author_display_name, space_id=job.space_id,
         title=title, trigger=f"cron:{job.id}", created_at=datetime.datetime.now(datetime.UTC).isoformat(),
     )
 
@@ -497,6 +535,7 @@ def _chat_for(job: models.Job) -> models.Chat:
 def _job(row) -> models.Job:
     return models.Job(
         id=row["id"], space_id=row["space_id"], owner_id=row["owner_id"],
+        author_display_name=row["author_display_name"],
         schedule=row["schedule"], prompt=row["prompt"], paused=row["paused"],
         next_run_at=row["next_run_at"].isoformat(), created_at=row["created_at"].isoformat(),
     )
@@ -555,6 +594,12 @@ def _delete_pending_executions(job_id: str) -> None:
 def _prompt_message(execution: Execution) -> ai.messages.Message:
     message = ai.user_message(execution.prompt)
     message.id = f"job_prompt_{execution.job_id}_{int(execution.scheduled_for.timestamp())}"
+    message.provider_metadata = {
+        "hatchery": {
+            "origin": "cron",
+            "author": execution.author_display_name or "User",
+        }
+    }
     return message
 
 

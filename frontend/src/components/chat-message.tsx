@@ -64,7 +64,7 @@ export function ChatMessage({ message }: { message: ChatUIMessage }) {
               {message.metadata.author}
               {message.metadata.author && message.metadata.origin && " · "}
               {message.metadata.origin &&
-                `via ${{ slack: "Slack", github: "GitHub", ui: "UI" }[message.metadata.origin]}`}
+                `via ${{ slack: "Slack", github: "GitHub", ui: "UI", cron: "Schedule" }[message.metadata.origin]}`}
             </MessageHeader>
           )}
           {text.trim() && (
