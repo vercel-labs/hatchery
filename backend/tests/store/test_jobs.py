@@ -72,7 +72,10 @@ async def test_claim_due_coalesces_and_is_idempotent(monkeypatch):
         author_display_name="Ada Lovelace",
     )
     due = datetime.datetime(2026, 9, 4, 12, 0, tzinfo=datetime.UTC)
-    job.next_run_at = (due - datetime.timedelta(hours=3)).isoformat()
+    scheduled_for = (due - datetime.timedelta(hours=3)).replace(second=47).astimezone(
+        datetime.timezone(datetime.timedelta(hours=2))
+    )
+    job.next_run_at = scheduled_for.isoformat()
     jobs._write_job(job)
 
     first = await jobs.claim_due(due)
@@ -86,10 +89,12 @@ async def test_claim_due_coalesces_and_is_idempotent(monkeypatch):
         user_id="user_1",
         author_display_name="Ada Lovelace",
         space_id="spc_1",
-        title="Run maintenance",
+        title="scheduled run · 2026-09-04 09:00 UTC",
         trigger=f"cron:{job.id}",
         created_at=chat.created_at,
     )
+    assert job.prompt not in chat.title
+    assert job.author_display_name not in chat.title
     advanced = await jobs.get(job.id)
     assert datetime.datetime.fromisoformat(advanced.next_run_at) > due
     transcript = await chats.get(first[0].chat_id)

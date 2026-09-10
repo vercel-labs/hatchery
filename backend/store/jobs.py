@@ -297,7 +297,7 @@ async def claim_due(now: datetime.datetime | None = None) -> list[Execution]:
             for row in rows:
                 job = _job(row)
                 scheduled_for = row["next_run_at"]
-                chat = _chat_for(job)
+                chat = _chat_for(job, scheduled_for)
                 execution = Execution(
                     job_id=job.id, scheduled_for=scheduled_for, chat_id=chat.id,
                     turn_id=f"turn_{uuid.uuid4().hex}", prompt=job.prompt,
@@ -342,7 +342,7 @@ async def claim_due(now: datetime.datetime | None = None) -> list[Execution]:
             scheduled_for = datetime.datetime.fromisoformat(job.next_run_at)
             execution_path = _execution_path(job.id, scheduled_for)
             if not execution_path.exists():
-                chat = _chat_for(job)
+                chat = _chat_for(job, scheduled_for)
                 from store import chats, events
 
                 chats._write_chat(chat)
@@ -502,8 +502,8 @@ async def cleanup(now: datetime.datetime | None = None) -> int:
     return removed
 
 
-def _chat_for(job: models.Job) -> models.Chat:
-    title = job.prompt.strip().splitlines()[0][:80] or "scheduled job"
+def _chat_for(job: models.Job, scheduled_for: datetime.datetime) -> models.Chat:
+    title = f"scheduled run · {scheduled_for.astimezone(datetime.UTC):%Y-%m-%d %H:%M} UTC"
     return models.Chat(
         id=f"chat_{uuid.uuid4().hex[:12]}", user_id=job.owner_id,
         author_display_name=job.author_display_name, space_id=job.space_id,
