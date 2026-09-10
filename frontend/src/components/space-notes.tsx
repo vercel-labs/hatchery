@@ -173,8 +173,17 @@ export function SpaceNotes({ spaceId }: { spaceId: string }) {
   };
 
   return (
-    <section className="mt-6 flex flex-col gap-3" aria-label="Notes">
-      <div className="flex justify-end">
+    <section
+      className="mt-6 flex flex-col gap-3"
+      aria-labelledby={`agent-notes-${spaceId}`}
+    >
+      <div className="flex h-7 items-center justify-between px-1">
+        <h2
+          id={`agent-notes-${spaceId}`}
+          className="text-xs font-medium text-muted-foreground"
+        >
+          Agent notes
+        </h2>
         {editing === null && (
           <Button
             variant="ghost"
@@ -277,7 +286,6 @@ export function SpaceNotes({ spaceId }: { spaceId: string }) {
                 <div className="flex min-h-6 items-center gap-1 text-muted-foreground">
                   <Button
                     variant="ghost"
-                    size="xs"
                     aria-expanded={open}
                     className="h-auto justify-start px-0"
                     disabled={editing !== null}
