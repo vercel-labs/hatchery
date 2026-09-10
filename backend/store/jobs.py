@@ -26,13 +26,6 @@ CREATE TABLE IF NOT EXISTS hatchery_jobs (
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ALTER TABLE hatchery_jobs ADD COLUMN IF NOT EXISTS author_display_name TEXT;
-UPDATE hatchery_jobs jobs SET author_display_name = COALESCE(
-    NULLIF(BTRIM(users.data->>'name'), ''),
-    NULLIF(BTRIM(users.data->>'username'), ''),
-    NULLIF(BTRIM(users.data->>'email'), '')
-)
-FROM hatchery_users users
-WHERE jobs.owner_id = users.id AND jobs.author_display_name IS NULL;
 CREATE INDEX IF NOT EXISTS hatchery_jobs_due ON hatchery_jobs (next_run_at) WHERE NOT paused;
 
 CREATE TABLE IF NOT EXISTS hatchery_job_executions (
@@ -51,20 +44,6 @@ CREATE TABLE IF NOT EXISTS hatchery_job_executions (
 ALTER TABLE hatchery_job_executions ADD COLUMN IF NOT EXISTS author_display_name TEXT;
 ALTER TABLE hatchery_job_executions ADD COLUMN IF NOT EXISTS lease_token TEXT;
 ALTER TABLE hatchery_job_executions ADD COLUMN IF NOT EXISTS lease_until TIMESTAMPTZ;
-UPDATE hatchery_job_executions executions
-SET author_display_name = jobs.author_display_name
-FROM hatchery_jobs jobs
-WHERE executions.job_id = jobs.id
-    AND executions.author_display_name IS NULL
-    AND jobs.author_display_name IS NOT NULL;
-UPDATE hatchery_chats chats
-SET data = chats.data || jsonb_build_object(
-    'author_display_name', jobs.author_display_name
-)
-FROM hatchery_jobs jobs
-WHERE chats.data->>'trigger' = 'cron:' || jobs.id
-    AND chats.data->>'author_display_name' IS NULL
-    AND jobs.author_display_name IS NOT NULL;
 """
 
 _RETENTION = datetime.timedelta(days=30)
