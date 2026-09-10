@@ -674,6 +674,7 @@ async def delete_note(space_id: str, filename: str) -> None:
 class JobResponse(pydantic.BaseModel):
     id: str
     space_id: str
+    author_display_name: str | None = None
     schedule: str
     prompt: str
     paused: bool
@@ -729,7 +730,13 @@ async def create_job(
     if await spaces.get(space_id) is None:
         raise fastapi.HTTPException(404, "unknown space")
     return _job_response(
-        await jobs.create(space_id, request.state.user["id"], body.schedule, body.prompt)
+        await jobs.create(
+            space_id,
+            request.state.user["id"],
+            body.schedule,
+            body.prompt,
+            author_display_name=_user_display_name(request.state.user),
+        )
     )
 
 
@@ -767,6 +774,9 @@ async def cron_heartbeat(request: fastapi.Request) -> dict:
     await jobs.claim_due(now)
     started = 0
     for execution in await jobs.lease_pending(now):
+        chat = await chats.get(execution.chat_id)
+        if chat is not None and chat.topic is None:
+            _spawn(_name_chat(execution.chat_id, execution.prompt))
         registered = next(
             (
                 data.get("run_id")

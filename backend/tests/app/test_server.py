@@ -570,6 +570,7 @@ async def test_job_routes_are_owner_scoped():
         )
 
     assert created.status_code == 200
+    assert created.json()["author_display_name"] == "test@vercel.com"
     assert listed.json() == [created.json()]
     assert paused.json()["paused"] is True
     assert invalid.status_code == 422
@@ -579,7 +580,13 @@ async def test_job_routes_are_owner_scoped():
 async def test_cron_heartbeat_auth_and_reconciliation(monkeypatch):
     monkeypatch.setenv("CRON_SECRET", "cron-test-secret")
     space = await server.spaces.default()
-    job = await server.jobs.create(space.id, "user_test", "* * * * *", "Do work")
+    job = await server.jobs.create(
+        space.id,
+        "user_test",
+        "* * * * *",
+        "Do work",
+        author_display_name="Ada Lovelace",
+    )
     job.next_run_at = (datetime.datetime.now(datetime.UTC) - datetime.timedelta(minutes=2)).isoformat()
     server.jobs._write_job(job)
     starts = []
@@ -595,10 +602,13 @@ async def test_cron_heartbeat_auth_and_reconciliation(monkeypatch):
         first = await c.get(
             "/api/cron", headers={"authorization": "Bearer cron-test-secret"}
         )
+        if server._background:
+            await asyncio.gather(*list(server._background))
         duplicate = await c.get(
             "/api/cron", headers={"authorization": "Bearer cron-test-secret"}
         )
         visible = await c.get("/api/chats")
+        [message] = (await c.get(f"/api/chats/{starts[0][0]}/messages")).json()
 
     assert denied.status_code == 401
     assert first.json() == {"ok": True, "started": 1}
@@ -606,6 +616,9 @@ async def test_cron_heartbeat_auth_and_reconciliation(monkeypatch):
     assert len(starts) == 1
     assert starts[0][1] == "cron"
     assert visible.json()[0]["trigger"] == f"cron:{job.id}"
+    assert visible.json()[0]["author_display_name"] == "Ada Lovelace"
+    assert visible.json()[0]["topic"] == "Test request"
+    assert message["metadata"] == {"origin": "cron", "author": "Ada Lovelace"}
     transcript = await server._transcript(starts[0][0])
     assert [message.text for message in transcript] == ["Do work"]
 

@@ -1635,8 +1635,11 @@ function SpacePane({
           <Card key={job.id} size="sm">
             <CardHeader>
               <CardTitle className="truncate">{job.prompt}</CardTitle>
-              <CardDescription className="font-mono">
-                {job.schedule} UTC{job.paused ? " · paused" : ""}
+              <CardDescription>
+                <span className="font-mono">
+                  {job.schedule} UTC{job.paused ? " · paused" : ""}
+                </span>
+                {job.author_display_name ? ` · by ${job.author_display_name}` : ""}
               </CardDescription>
             </CardHeader>
             <CardContent className="flex justify-end gap-1">

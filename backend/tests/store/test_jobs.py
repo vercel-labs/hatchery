@@ -1,5 +1,6 @@
 import datetime
 
+import ai
 import pytest
 
 import models
@@ -15,8 +16,15 @@ def test_validate_schedule_accepts_only_five_fields():
 
 
 async def test_crud_and_owner_scoped_listing():
-    created = await jobs.create("spc_1", "user_1", "0 9 * * 1-5", "Check reports")
+    created = await jobs.create(
+        "spc_1",
+        "user_1",
+        "0 9 * * 1-5",
+        "Check reports",
+        author_display_name="Ada Lovelace",
+    )
 
+    assert created.author_display_name == "Ada Lovelace"
     assert await jobs.list_for_space("spc_1", "user_2") == []
     assert (await jobs.list_for_space("spc_1", "user_1"))[0] == created
 
@@ -29,10 +37,45 @@ async def test_crud_and_owner_scoped_listing():
     assert await jobs.get(created.id) is None
 
 
+def test_legacy_job_and_execution_attribution_is_optional():
+    job = models.Job.model_validate(
+        {
+            "id": "job_legacy",
+            "space_id": "spc_1",
+            "owner_id": "user_1",
+            "schedule": "0 9 * * *",
+            "prompt": "Check reports",
+            "next_run_at": "2026-09-05T09:00:00+00:00",
+            "created_at": "2026-09-04T09:00:00+00:00",
+        }
+    )
+    execution = jobs.Execution.model_validate(
+        {
+            "job_id": job.id,
+            "scheduled_for": job.next_run_at,
+            "chat_id": "chat_legacy",
+            "turn_id": "turn_legacy",
+            "prompt": job.prompt,
+        }
+    )
+
+    assert job.author_display_name is None
+    assert execution.author_display_name is None
+
+
 async def test_claim_due_coalesces_and_is_idempotent(monkeypatch):
-    job = await jobs.create("spc_1", "user_1", "* * * * *", "Run maintenance")
+    job = await jobs.create(
+        "spc_1",
+        "user_1",
+        "* * * * *",
+        "Run maintenance",
+        author_display_name="Ada Lovelace",
+    )
     due = datetime.datetime(2026, 9, 4, 12, 0, tzinfo=datetime.UTC)
-    job.next_run_at = (due - datetime.timedelta(hours=3)).isoformat()
+    scheduled_for = (due - datetime.timedelta(hours=3)).replace(second=47).astimezone(
+        datetime.timezone(datetime.timedelta(hours=2))
+    )
+    job.next_run_at = scheduled_for.isoformat()
     jobs._write_job(job)
 
     first = await jobs.claim_due(due)
@@ -44,11 +87,14 @@ async def test_claim_due_coalesces_and_is_idempotent(monkeypatch):
     assert chat == models.Chat(
         id=chat.id,
         user_id="user_1",
+        author_display_name="Ada Lovelace",
         space_id="spc_1",
-        title="Run maintenance",
+        title="scheduled run · 2026-09-04 09:00 UTC",
         trigger=f"cron:{job.id}",
         created_at=chat.created_at,
     )
+    assert job.prompt not in chat.title
+    assert job.author_display_name not in chat.title
     advanced = await jobs.get(job.id)
     assert datetime.datetime.fromisoformat(advanced.next_run_at) > due
     transcript = await chats.get(first[0].chat_id)
@@ -58,7 +104,12 @@ async def test_claim_due_coalesces_and_is_idempotent(monkeypatch):
     prompt_records = await events.read(first[0].chat_id, "messages")
     assert len(prompt_records) == 1
     assert prompt_records[0][1]["id"].startswith("job_prompt_")
+    prompt = ai.messages.Message.model_validate(prompt_records[0][1])
+    assert prompt.provider_metadata == {
+        "hatchery": {"origin": "cron", "author": "Ada Lovelace"}
+    }
     leased = await jobs.lease_pending(due)
+    assert leased[0].author_display_name == "Ada Lovelace"
     assert [execution.turn_id for execution in leased] == [first[0].turn_id]
     assert await jobs.lease_pending(due) == []
 
