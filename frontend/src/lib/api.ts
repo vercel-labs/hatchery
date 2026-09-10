@@ -76,6 +76,14 @@ export type SpaceWarning = {
   warning: string;
 };
 
+export type Note = {
+  space_id: string;
+  filename: string;
+  content: string;
+  revision: number;
+  updated_at: string;
+};
+
 export type Job = {
   id: string;
   space_id: string;

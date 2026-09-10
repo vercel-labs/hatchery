@@ -41,3 +41,13 @@ Scheduled jobs use five-field UTC cron expressions. Vercel calls `/api/cron` eve
 minute; set the same long random `CRON_SECRET` on the backend deployment so its
 `Authorization: Bearer` header is accepted. Local heartbeat checks can use
 `curl -H "Authorization: Bearer $CRON_SECRET" http://localhost:3000/api/cron`.
+
+Each space also has shared agent notes: a flat list of simple `.md` files shown
+under the space description. Keep them lean and durable so periodic jobs can
+cross-reference prior work without carrying full transcripts into future runs.
+Dispatcher edits replace one unique exact or at least 92%-similar line block;
+missing, ambiguous, and lower-confidence matches do not write. Human edits keep
+the revision captured when editing starts. A stale save is rejected; an explicit
+overwrite uses the revision the person just reviewed and conflicts again if the
+note changes meanwhile. All edit, overwrite, and delete writes hold the same
+per-note lock through read, validation, and write.

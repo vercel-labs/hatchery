@@ -62,6 +62,7 @@ import {
 } from "@/components/new-chat-state";
 import { SandboxForm } from "@/components/sandbox-form";
 import { SpaceColorPicker } from "@/components/space-color-picker";
+import { SpaceNotes } from "@/components/space-notes";
 import { TerminalPane, type SandboxWorkspace } from "@/components/terminal-pane";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -1432,6 +1433,7 @@ function SpacePane({
             </article>
           </>
         )}
+        <SpaceNotes spaceId={space.id} />
       </section>
       <aside className="mx-auto flex w-full max-w-2xl flex-col gap-2 lg:mx-0 lg:max-w-none">
         <div className="flex h-7 items-center justify-between px-1">
