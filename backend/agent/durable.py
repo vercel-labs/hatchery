@@ -319,7 +319,15 @@ async def create_sandbox(
     title: str = "sandbox",
     size: typing.Literal["small", "big"] = "small",
 ) -> dict[str, typing.Any]:
-    """Create a persistent sandbox. Use big only for heavier development and tests."""
+    """Create a persistent sandbox owned by this chat and return its metadata.
+
+    ``repos`` selects owner/repo working copies to clone; the first is primary.
+    ``setup_script`` runs setup, ``ports`` exposes up to four ports, and ``branch``
+    or ``git_sha`` selects the primary repo revision. Use small for research,
+    reading, triage, light edits, and focused work. Use big for meaningful tests
+    or builds, dev servers, browser/E2E work, monorepos, native compilation, or
+    other heavy workloads. Files and processes persist across subagent runs.
+    """
     return await create_sandbox_step(
         current_agent.get().chat_id,
         list(repos or []),
@@ -334,7 +342,11 @@ async def create_sandbox(
 
 @ai.tool
 async def list_sandboxes() -> list[dict[str, typing.Any]]:
-    """List this chat's reusable coding sandboxes."""
+    """Return metadata for this chat's reusable persistent sandboxes.
+
+    This only reads sandbox state. Use the repository and status metadata to
+    decide whether existing work can continue before creating another sandbox.
+    """
     return await list_sandboxes_step(current_agent.get().chat_id)
 
 
@@ -344,7 +356,13 @@ async def create_subagent(
     task: str,
     model: str = MODEL_ID,
 ) -> dict[str, typing.Any]:
-    """Start an fx subagent in a sandbox."""
+    """Start a fresh fx subagent chat in ``sandbox_id``.
+
+    ``task`` is the context the new subagent receives. It can inspect and change
+    the sandbox's persistent files and processes. The returned subagent/task ID,
+    sandbox ID, and state mean the launch was accepted and work has started; they
+    are not the completed result.
+    """
     return await create_subagent_step(
         current_agent.get().chat_id, sandbox_id, task, model
     )
@@ -355,7 +373,15 @@ async def message_subagent(
     message: str,
     subagent_id: str | None = None,
 ) -> dict[str, typing.Any]:
-    """Send a revision, follow-up, or answer to an existing subagent."""
+    """Queue ``message`` for an existing subagent chat and resume its work.
+
+    Use ``subagent_id`` to select the chat; omitting it targets this chat's most
+    recently created subagent. The returned ID and state confirm that the durable
+    queue accepted the message, not that the subagent answered it. A completion arriving
+    afterward can belong to older queued work, so compare it with the latest ask;
+    a stale completion does not mean this message failed or require replacement
+    work.
+    """
     return await message_subagent_step(
         current_agent.get().chat_id, message, subagent_id
     )
@@ -367,7 +393,13 @@ async def check_subagent(
     after: int | None = None,
     limit: int = 20,
 ) -> dict[str, typing.Any]:
-    """Read durable subagent state and recent events."""
+    """Return durable state and recent events for a subagent without changing it.
+
+    ``subagent_id`` selects the chat, ``after`` requests events after a sequence,
+    and ``limit`` bounds the event count from 1 to 50. Use this when current
+    progress or detail matters, not to re-read content already present in a
+    delivered result.
+    """
     return await check_subagent_step(
         current_agent.get().chat_id, subagent_id, after, limit
     )
@@ -377,7 +409,13 @@ async def check_subagent(
 async def require_attention(
     reason: typing.Literal["result_available", "blocked"],
 ) -> dict[str, str]:
-    """Mark this chat as needing human review or input."""
+    """Set and return this chat's human-attention reason.
+
+    Use ``result_available`` exactly when a result is ready for human review. Use
+    ``blocked`` exactly when progress requires human input or a human-only
+    decision. Do not use either for routine progress, waiting, recoverable
+    failures, or follow-up work that can continue without the human.
+    """
     return await require_attention_step(current_agent.get().chat_id, reason)
 
 
@@ -385,13 +423,21 @@ async def require_attention(
 async def find_channels(
     provider: typing.Literal["slack", "github"], query: str
 ) -> list[dict] | dict:
-    """Find Slack channels or GitHub issues and pull requests."""
+    """Search eligible destinations without sending a message.
+
+    ``provider`` selects Slack channels or GitHub issues/pull requests and
+    ``query`` describes the destination. Return real destination IDs for later
+    use; an error result may describe required Slack scope.
+    """
     return await find_channels_step(current_agent.get().chat_id, provider, query)
 
 
 @ai.tool
 async def find_people(query: str) -> list[dict]:
-    """Find linked people and return Hatchery person IDs."""
+    """Search linked people without sending anything and return person IDs.
+
+    Use the returned Hatchery IDs in communication tools; never invent handles.
+    """
     return await find_people_step(current_agent.get().chat_id, query)
 
 
@@ -402,7 +448,13 @@ async def start_thread(
     text: str,
     people: list[str] | None = None,
 ) -> dict:
-    """Start a linked thread at an exact destination."""
+    """Send the first notification and link its external thread to this chat.
+
+    ``destination`` must be an exact ID returned by ``find_channels`` and
+    ``people`` must contain IDs returned by ``find_people``. Returns delivery
+    status; a ``sent`` result makes later normal replies deliver to every linked
+    channel and removes this tool from subsequent model steps.
+    """
     agent = current_agent.get()
     result = await start_thread_step(
         agent.chat_id,
@@ -426,7 +478,12 @@ async def read_notes(
         ),
     ] = None,
 ) -> list[dict[str, typing.Any]] | dict[str, typing.Any]:
-    """List this space's notes or read one complete markdown note."""
+    """List this space's notes or read one complete markdown note.
+
+    Omit ``filename`` to return filename/update-time summaries. Pass an exact .md
+    filename to return its durable content or a ``not_found`` status. This does
+    not expose sandbox or repository files.
+    """
     return await read_notes_step(current_agent.get().chat_id, filename)
 
 
@@ -435,7 +492,12 @@ async def create_note(
     filename: typing.Annotated[str, pydantic.Field(max_length=100)],
     content: typing.Annotated[str, pydantic.Field(max_length=32_000)] = "",
 ) -> dict[str, typing.Any]:
-    """Create a lean shared markdown note in this space."""
+    """Create a lean durable markdown note shared across this space.
+
+    ``filename`` is an exact .md name and ``content`` should contain only facts,
+    decisions, or pointers useful to future work, never transcripts or large
+    results. Returns ``created``, ``exists``, or ``limit_reached`` status.
+    """
     return await create_note_step(current_agent.get().chat_id, filename, content)
 
 
@@ -458,7 +520,14 @@ async def edit_note(
         ),
     ],
 ) -> dict[str, typing.Any]:
-    """Safely replace one unique exact or high-confidence fuzzy note snippet."""
+    """Replace one unique snippet in an existing durable space note.
+
+    ``filename`` names the .md note, ``find`` should use precise complete lines,
+    and ``replacement`` is the exact new text. Returns ``saved`` with match and
+    score, ``not_found``, ``missing``, ``ambiguous``, or ``low_confidence``. Read
+    the note and retry with more context after an unsafe match; update stale detail
+    and keep notes lean.
+    """
     return await edit_note_step(
         current_agent.get().chat_id, filename, find, replacement
     )

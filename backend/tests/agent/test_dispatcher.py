@@ -43,29 +43,12 @@ def test_system_prompt_describes_trust_and_visibility_boundaries():
     assert "SDK guide (documentation): https://example.com/sdk" in prompt
 
 
-def test_system_prompt_describes_every_dispatcher_tool():
+def test_system_prompt_leaves_tool_local_semantics_to_tool_specs():
     prompt = " ".join(dispatcher.system_prompt(space()).split())
 
-    for tool in (
-        "list_sandboxes",
-        "create_sandbox",
-        "create_subagent",
-        "message_subagent",
-        "check_subagent",
-        "require_attention",
-        "find_channels",
-        "find_people",
-        "start_thread",
-        "read_notes",
-        "create_note",
-        "edit_note",
-    ):
-        assert tool in prompt
-    assert "result_available exactly when a result is ready for human review" in prompt
-    assert "blocked exactly when progress requires human input" in prompt
-    assert "Do not use either for routine progress" in prompt
-    assert "one unique existing snippet" in prompt
-    assert "low-confidence match" in prompt
+    assert "Dispatcher tools and their effects" not in prompt
+    assert "result_available exactly when" not in prompt
+    assert "one unique existing snippet" not in prompt
 
 
 def test_system_prompt_presents_coordination_as_tradeoffs():
@@ -80,6 +63,11 @@ def test_system_prompt_presents_coordination_as_tradeoffs():
     assert "Stopping is flexible" in prompt
     assert "When an agent stalls or fails" in prompt
     assert "Do not turn ordinary recovery into a human blocker" in prompt
+    assert "A durable queue can deliver an older completion" in prompt
+    assert "Compare a result with the latest unanswered request" in prompt
+    assert "send the same subagent the precise unanswered request again" in prompt
+    assert "do not restart work, create replacement agents or sandboxes" in prompt
+    assert "merely because one response was stale" in prompt
 
 
 def test_unlinked_system_prompt_describes_thread_starting():
