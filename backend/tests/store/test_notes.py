@@ -219,8 +219,14 @@ async def test_note_create_rejects_duplicates_and_invalid_values():
     ):
         with pytest.raises(ValueError, match="simple .md name"):
             await notes.create(space.id, filename)
-    with pytest.raises(ValueError, match="at most 32000"):
-        await notes.create(space.id, "large.md", "x" * 32_001)
+    assert notes.MAX_CONTENT_LENGTH == 1_000_000
+    large = await notes.create(space.id, "large.md", "x" * notes.MAX_CONTENT_LENGTH)
+    assert len(large.content) == notes.MAX_CONTENT_LENGTH
+
+    with pytest.raises(ValueError, match="at most 1000000"):
+        await notes.create(
+            space.id, "too_large.md", "x" * (notes.MAX_CONTENT_LENGTH + 1)
+        )
 
 
 async def test_note_count_is_bounded(monkeypatch):

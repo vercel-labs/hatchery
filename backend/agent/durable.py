@@ -10,6 +10,7 @@ import vercel.workflow
 
 
 MODEL_ID = "openai/gpt-5.6-sol"
+MAX_NOTE_CONTENT_LENGTH = 1_000_000
 
 workflow = vercel.workflow.Workflows(
     sandbox_policy=vercel.workflow.SandboxPolicy(
@@ -433,7 +434,9 @@ async def read_notes(
 @ai.tool
 async def create_note(
     filename: typing.Annotated[str, pydantic.Field(max_length=100)],
-    content: typing.Annotated[str, pydantic.Field(max_length=32_000)] = "",
+    content: typing.Annotated[
+        str, pydantic.Field(max_length=MAX_NOTE_CONTENT_LENGTH)
+    ] = "",
 ) -> dict[str, typing.Any]:
     """Create a lean shared markdown note in this space."""
     return await create_note_step(current_agent.get().chat_id, filename, content)
@@ -446,14 +449,14 @@ async def edit_note(
         str,
         pydantic.Field(
             min_length=1,
-            max_length=32_000,
+            max_length=MAX_NOTE_CONTENT_LENGTH,
             description="One unique existing snippet, preferably complete lines",
         ),
     ],
     replacement: typing.Annotated[
         str,
         pydantic.Field(
-            max_length=32_000,
+            max_length=MAX_NOTE_CONTENT_LENGTH,
             description="Exact text to put in place of the matched snippet",
         ),
     ],

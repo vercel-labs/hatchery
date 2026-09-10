@@ -11,7 +11,7 @@ import {
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import { apiFetch, type Note } from "@/lib/api";
+import { apiFetch, type Note, type NoteSummary } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -25,9 +25,10 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 
 type EditingNote = "new" | { filename: string; revision: number };
+type NoteItem = Note | NoteSummary;
 
 export function SpaceNotes({ spaceId }: { spaceId: string }) {
-  const [notes, setNotes] = useState<Note[] | null>(null);
+  const [notes, setNotes] = useState<NoteItem[] | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [loadError, setLoadError] = useState(false);
   const [editing, setEditing] = useState<EditingNote | null>(null);
@@ -36,6 +37,9 @@ export function SpaceNotes({ spaceId }: { spaceId: string }) {
   const [conflict, setConflict] = useState<Note | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const [noteError, setNoteError] = useState<{ filename: string; message: string } | null>(
+    null,
+  );
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
@@ -44,7 +48,7 @@ export function SpaceNotes({ spaceId }: { spaceId: string }) {
     apiFetch(`/api/spaces/${spaceId}/notes`)
       .then(async (response) => {
         if (!response.ok) throw new Error();
-        return (await response.json()) as Note[];
+        return (await response.json()) as NoteSummary[];
       })
       .then((found) => {
         if (current) setNotes(found);
@@ -74,6 +78,35 @@ export function SpaceNotes({ spaceId }: { spaceId: string }) {
     setEditing(null);
     setConflict(null);
     setError("");
+  };
+
+  const toggleNote = async (note: NoteItem) => {
+    if (selected === note.filename) {
+      setSelected(null);
+      return;
+    }
+    setSelected(note.filename);
+    setConfirmingDelete(null);
+    setError("");
+    setNoteError(null);
+    if ("content" in note) return;
+    try {
+      const response = await apiFetch(
+        `/api/spaces/${spaceId}/notes/${encodeURIComponent(note.filename)}`,
+      );
+      if (!response.ok) throw new Error("Could not load note.");
+      const loaded = (await response.json()) as Note;
+      setNotes((found) =>
+        (found ?? []).map((item) =>
+          item.filename === loaded.filename ? loaded : item,
+        ),
+      );
+    } catch (caught) {
+      setNoteError({
+        filename: note.filename,
+        message: caught instanceof Error ? caught.message : "Could not load note.",
+      });
+    }
   };
 
   const persist = async (override: boolean) => {
@@ -151,7 +184,7 @@ export function SpaceNotes({ spaceId }: { spaceId: string }) {
     void persist(false);
   };
 
-  const deleteNote = async (note: Note) => {
+  const deleteNote = async (note: NoteSummary) => {
     setDeleting(true);
     setError("");
     try {
@@ -225,7 +258,7 @@ export function SpaceNotes({ spaceId }: { spaceId: string }) {
                     value={content}
                     onChange={(event) => setContent(event.target.value)}
                     className="min-h-40 resize-y font-mono"
-                    maxLength={32000}
+                    maxLength={1_000_000}
                     aria-invalid={Boolean(error)}
                   />
                   <FieldError>{error}</FieldError>
@@ -289,25 +322,23 @@ export function SpaceNotes({ spaceId }: { spaceId: string }) {
                     aria-expanded={open}
                     className="h-auto justify-start px-0"
                     disabled={editing !== null}
-                    onClick={() => {
-                      setSelected(open ? null : note.filename);
-                      setConfirmingDelete(null);
-                      setError("");
-                    }}
+                    onClick={() => void toggleNote(note)}
                   >
                     <span className="font-mono">{note.filename}</span>
                   </Button>
                   {open && editing === null && (
                     <>
-                      <Button
-                        variant="ghost"
-                        size="icon-xs"
-                        aria-label={`Edit ${note.filename}`}
-                        title={`Edit ${note.filename}`}
-                        onClick={() => openEditor(note)}
-                      >
-                        <PencilIcon />
-                      </Button>
+                      {"content" in note && (
+                        <Button
+                          variant="ghost"
+                          size="icon-xs"
+                          aria-label={`Edit ${note.filename}`}
+                          title={`Edit ${note.filename}`}
+                          onClick={() => openEditor(note)}
+                        >
+                          <PencilIcon />
+                        </Button>
+                      )}
                       <Button
                         variant="ghost"
                         size="icon-xs"
@@ -322,17 +353,23 @@ export function SpaceNotes({ spaceId }: { spaceId: string }) {
                 </div>
                 {open && (
                   <div className="flex flex-col gap-2 pb-3 pl-[1.875rem] text-muted-foreground">
-                    {note.content ? (
-                      <article className="typeset typeset-docs min-w-0 [--color-foreground:var(--muted-foreground)]">
-                        <ReactMarkdown
-                          remarkPlugins={[remarkGfm]}
-                          components={{ img: () => null }}
-                        >
-                          {note.content}
-                        </ReactMarkdown>
-                      </article>
+                    {"content" in note ? (
+                      note.content ? (
+                        <article className="typeset typeset-docs min-w-0 [--color-foreground:var(--muted-foreground)]">
+                          <ReactMarkdown
+                            remarkPlugins={[remarkGfm]}
+                            components={{ img: () => null }}
+                          >
+                            {note.content}
+                          </ReactMarkdown>
+                        </article>
+                      ) : (
+                        <p className="text-sm">Empty note.</p>
+                      )
+                    ) : noteError?.filename === note.filename ? (
+                      <p className="text-sm text-destructive">{noteError.message}</p>
                     ) : (
-                      <p className="text-sm">Empty note.</p>
+                      <p className="text-sm">Loading note…</p>
                     )}
                     {confirmingDelete === note.filename && (
                       <div className="flex flex-wrap items-center gap-2 text-sm" role="group" aria-label={`Confirm deletion of ${note.filename}`}>

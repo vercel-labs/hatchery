@@ -161,7 +161,7 @@ async def test_tools_read_trusted_chat_id_from_current_agent(monkeypatch):
 
 
 async def test_note_tools_share_memory_with_the_current_chats_space():
-    from store import spaces
+    from store import notes, spaces
 
     space = await spaces.create("recurring")
     chat = await chats.create(space.id, "scheduled review")
@@ -169,6 +169,7 @@ async def test_note_tools_share_memory_with_the_current_chats_space():
     assert {"read_notes", "create_note", "edit_note"} <= {
         tool.name for tool in durable.BASE_TOOLS
     }
+    assert durable.MAX_NOTE_CONTENT_LENGTH == notes.MAX_CONTENT_LENGTH
     assert await durable.read_notes_step.func(chat.id, None) == []
     created = await durable.create_note_step.func(
         chat.id, "reviewed_issues.md", "- issue 12 reviewed"
