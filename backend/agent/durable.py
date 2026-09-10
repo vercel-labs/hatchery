@@ -10,7 +10,7 @@ import vercel.workflow
 
 
 MODEL_ID = "openai/gpt-5.6-sol"
-MAX_NOTE_CONTENT_LENGTH = 9_007_199_254_740_991
+MAX_NOTE_CONTENT_LENGTH = 1_000_000
 
 workflow = vercel.workflow.Workflows(
     sandbox_policy=vercel.workflow.SandboxPolicy(

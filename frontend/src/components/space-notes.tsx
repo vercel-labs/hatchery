@@ -258,6 +258,7 @@ export function SpaceNotes({ spaceId }: { spaceId: string }) {
                     value={content}
                     onChange={(event) => setContent(event.target.value)}
                     className="min-h-40 resize-y font-mono"
+                    maxLength={1_000_000}
                     aria-invalid={Boolean(error)}
                   />
                   <FieldError>{error}</FieldError>

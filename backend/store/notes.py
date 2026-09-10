@@ -9,8 +9,7 @@ import urllib.parse
 import models
 import store
 
-# Largest integer represented exactly by JSON consumers using IEEE-754 doubles.
-MAX_CONTENT_LENGTH = 9_007_199_254_740_991
+MAX_CONTENT_LENGTH = 1_000_000
 MAX_FILENAME_LENGTH = 100
 MAX_NOTES_PER_SPACE = 50
 FUZZY_MATCH_THRESHOLD = 0.92

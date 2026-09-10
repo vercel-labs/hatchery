@@ -203,7 +203,7 @@ async def test_agent_and_human_edits_share_one_local_note_lock(monkeypatch):
     assert current.revision == 2
 
 
-async def test_note_create_rejects_duplicates_and_invalid_values(monkeypatch):
+async def test_note_create_rejects_duplicates_and_invalid_values():
     space = await spaces.create("notes")
     await notes.create(space.id, "foo.md")
 
@@ -219,13 +219,14 @@ async def test_note_create_rejects_duplicates_and_invalid_values(monkeypatch):
     ):
         with pytest.raises(ValueError, match="simple .md name"):
             await notes.create(space.id, filename)
-    assert notes.MAX_CONTENT_LENGTH == 9_007_199_254_740_991
-    large = await notes.create(space.id, "large.md", "x" * 32_001)
-    assert len(large.content) == 32_001
+    assert notes.MAX_CONTENT_LENGTH == 1_000_000
+    large = await notes.create(space.id, "large.md", "x" * notes.MAX_CONTENT_LENGTH)
+    assert len(large.content) == notes.MAX_CONTENT_LENGTH
 
-    monkeypatch.setattr(notes, "MAX_CONTENT_LENGTH", 32_001)
-    with pytest.raises(ValueError, match="at most 32001"):
-        await notes.create(space.id, "too_large.md", "x" * 32_002)
+    with pytest.raises(ValueError, match="at most 1000000"):
+        await notes.create(
+            space.id, "too_large.md", "x" * (notes.MAX_CONTENT_LENGTH + 1)
+        )
 
 
 async def test_note_count_is_bounded(monkeypatch):
