@@ -338,7 +338,13 @@ async def test_space_notes_are_shared_space_scoped_markdown_files():
     assert empty.json() == []
     assert created.status_code == 201
     assert created.json()["space_id"] == first.id
-    assert listed.json() == [created.json()]
+    assert listed.json() == [
+        {
+            "filename": created.json()["filename"],
+            "revision": created.json()["revision"],
+            "updated_at": created.json()["updated_at"],
+        }
+    ]
     assert read.json() == created.json()
     assert updated.json()["content"] == "Only durable context."
     assert updated.json()["revision"] == 2
@@ -386,6 +392,26 @@ async def test_space_note_routes_validate_names_conflicts_and_space():
     assert duplicate.status_code == 409
     assert missing_note.status_code == 404
     assert missing_space.status_code == 404
+
+
+async def test_space_note_routes_allow_modern_context_sizes_and_reject_oversize_bytes():
+    space = await server.spaces.create("large notes")
+    async with client() as c:
+        accepted = await c.post(
+            f"/api/spaces/{space.id}/notes",
+            json={"filename": "large.md", "content": "x" * 32_001},
+            headers={"origin": "http://test"},
+        )
+        rejected = await c.post(
+            f"/api/spaces/{space.id}/notes",
+            json={"filename": "too_large.md", "content": "é" * 500_001},
+            headers={"origin": "http://test"},
+        )
+
+    assert accepted.status_code == 201
+    assert len(accepted.json()["content"]) == 32_001
+    assert rejected.status_code == 422
+    assert "1000000 JSON-encoded UTF-8 bytes" in rejected.text
 
 
 async def test_space_create_accepts_only_explicit_accent_ids():

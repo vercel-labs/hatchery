@@ -97,6 +97,9 @@ async def test_find_replace_rejects_missing_ambiguous_and_low_confidence_text():
             "replacement\n",
         )
     assert weak.value.reason == "low_confidence"
+    with pytest.raises(notes.FindReplaceError) as too_large:
+        notes._find_replace("y" * 20_000, "x" * 10_001, "replacement")
+    assert too_large.value.reason == "fuzzy_too_large"
     assert weak.value.score is not None
     assert (await notes.get(space.id, note.filename)).revision == 1
 
@@ -219,8 +222,12 @@ async def test_note_create_rejects_duplicates_and_invalid_values():
     ):
         with pytest.raises(ValueError, match="simple .md name"):
             await notes.create(space.id, filename)
-    with pytest.raises(ValueError, match="at most 32000"):
-        await notes.create(space.id, "large.md", "x" * 32_001)
+    large = await notes.create(space.id, "large.md", "x" * 32_001)
+    assert len(large.content) == 32_001
+    with pytest.raises(notes.NoteContentTooLarge, match="1000000 JSON-encoded UTF-8 bytes"):
+        await notes.create(space.id, "too_large.md", "é" * 500_001)
+    with pytest.raises(notes.NoteContentTooLarge):
+        notes.validate_content("\0" * 166_667)
 
 
 async def test_note_count_is_bounded(monkeypatch):

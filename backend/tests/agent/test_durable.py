@@ -198,6 +198,52 @@ async def test_note_tools_share_memory_with_the_current_chats_space():
     assert "expected_revision" not in properties
 
 
+async def test_note_tool_pages_large_content_for_model_context_safety():
+    from store import notes, spaces
+
+    space = await spaces.create("large recurring note")
+    chat = await chats.create(space.id, "scheduled review")
+    content = "x" * durable.NOTE_READ_CHUNK_LENGTH + "the end"
+    await durable.create_note_step.func(chat.id, "large.md", content)
+
+    first = await durable.read_notes_step.func(chat.id, "large.md")
+    second = await durable.read_notes_step.func(
+        chat.id, "large.md", first["next_offset"], first["revision"]
+    )
+
+    assert len(first["content"]) == durable.NOTE_READ_CHUNK_LENGTH
+    assert first["content_offset"] == 0
+    assert first["content_length"] == len(content)
+    assert first["next_offset"] == durable.NOTE_READ_CHUNK_LENGTH
+    assert second["content"] == "the end"
+    assert second["next_offset"] is None
+    changed = await notes.update(space.id, "large.md", f"changed{content}", first["revision"])
+    assert changed is not None
+    stale = await durable.read_notes_step.func(
+        chat.id, "large.md", first["next_offset"], first["revision"]
+    )
+    assert stale == {
+        "status": "revision_changed",
+        "filename": "large.md",
+        "expected_revision": first["revision"],
+        "current_revision": changed.revision,
+    }
+    too_large = await durable.create_note_step.func(
+        chat.id, "too_large.md", "x" * 1_000_001
+    )
+    assert too_large == {
+        "status": "content_too_large",
+        "size": 1_000_001,
+        "max_content_bytes": 1_000_000,
+    }
+    properties = durable.read_notes.tool.spec.params["properties"]
+    assert set(properties) == {"filename", "offset", "expected_revision"}
+    with pytest.raises(ValueError, match="must not be negative"):
+        await durable.read_notes_step.func(chat.id, "large.md", -1)
+    with pytest.raises(ValueError, match="expected_revision is required"):
+        await durable.read_notes_step.func(chat.id, "large.md", 1)
+
+
 async def test_note_tool_rejects_unsafe_find_replace_without_writing():
     from store import spaces
 

@@ -9,9 +9,11 @@ import urllib.parse
 import models
 import store
 
-MAX_CONTENT_LENGTH = 32_000
+MAX_CONTENT_BYTES = 1_000_000
 MAX_FILENAME_LENGTH = 100
 MAX_NOTES_PER_SPACE = 50
+MAX_FUZZY_FIND_LENGTH = 10_000
+MAX_FUZZY_MATCH_WORK = 10_000_000
 FUZZY_MATCH_THRESHOLD = 0.92
 FUZZY_MATCH_MARGIN = 0.05
 FUZZY_MIN_FIND_LENGTH = 16
@@ -35,6 +37,14 @@ _note_locks: dict[tuple[str, str], threading.RLock] = {}
 
 class NoteExists(Exception):
     pass
+
+
+class NoteContentTooLarge(ValueError):
+    def __init__(self, size: int) -> None:
+        super().__init__(
+            f"content must be at most {MAX_CONTENT_BYTES} JSON-encoded UTF-8 bytes; got {size}"
+        )
+        self.size = size
 
 
 class NoteLimitReached(Exception):
@@ -142,7 +152,7 @@ async def get(space_id: str, filename: str) -> models.Note | None:
 
 async def create(space_id: str, filename: str, content: str = "") -> models.Note:
     filename = valid_filename(filename)
-    _validate_content(content)
+    validate_content(content)
     await ensure_ready()
     now = datetime.datetime.now(datetime.UTC)
     if store.use_postgres():
@@ -204,7 +214,7 @@ async def update(
 ) -> models.Note | None:
     """Replace one note under lock only if the human's reviewed revision is current."""
     filename = valid_filename(filename)
-    _validate_content(content)
+    validate_content(content)
     if expected_revision < 1:
         raise ValueError("expected_revision must be positive")
     await ensure_ready()
@@ -272,7 +282,7 @@ async def find_replace(
             if row is None:
                 return None
             content, match, score = _find_replace(row["content"], find, replacement)
-            _validate_content(content)
+            validate_content(content)
             now = datetime.datetime.now(datetime.UTC)
             saved = await connection.fetchrow(
                 "UPDATE hatchery_space_notes "
@@ -290,7 +300,7 @@ async def find_replace(
             return None
         current = _read_local(space_id, filename)
         content, match, score = _find_replace(current.content, find, replacement)
-        _validate_content(content)
+        validate_content(content)
         now = datetime.datetime.now(datetime.UTC)
         saved = _write_local(
             space_id, filename, content, current.revision + 1, now
@@ -384,6 +394,11 @@ def _find_replace(content: str, find: str, replacement: str) -> tuple[str, str, 
         )
     if len(find) < FUZZY_MIN_FIND_LENGTH:
         raise FindReplaceError("low_confidence", score=0.0)
+    if (
+        len(find) > MAX_FUZZY_FIND_LENGTH
+        or len(find) * len(content) > MAX_FUZZY_MATCH_WORK
+    ):
+        raise FindReplaceError("fuzzy_too_large")
 
     lines = content.splitlines(keepends=True)
     find_lines = find.splitlines(keepends=True)
@@ -412,9 +427,11 @@ def _find_replace(content: str, find: str, replacement: str) -> tuple[str, str, 
     return "".join(lines), "fuzzy", best_score
 
 
-def _validate_content(content: str) -> None:
-    if len(content) > MAX_CONTENT_LENGTH:
-        raise ValueError(f"content must be at most {MAX_CONTENT_LENGTH} characters")
+def validate_content(content: str) -> str:
+    size = len(json.dumps(content, ensure_ascii=False).encode("utf-8")) - 2
+    if size > MAX_CONTENT_BYTES:
+        raise NoteContentTooLarge(size)
+    return content
 
 
 def _from_row(space_id: str, row) -> models.Note:

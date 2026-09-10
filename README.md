@@ -51,3 +51,15 @@ the revision captured when editing starts. A stale save is rejected; an explicit
 overwrite uses the revision the person just reviewed and conflicts again if the
 note changes meanwhile. All edit, overwrite, and delete writes hold the same
 per-note lock through read, validation, and write.
+
+A note may contain up to 1,000,000 JSON-encoded UTF-8 bytes. This replaces the
+original 32,000-character application cap while staying well below Vercel
+Functions' 4.5 MB request and response limit. Note lists return metadata only and
+the UI fetches selected notes individually. Agent reads return at most 100,000
+characters plus `next_offset`; continue with that offset and the returned
+`revision`. A changed revision is reported instead of mixing note versions. This
+keeps provider requests bounded even when a stored note approaches the current
+model's context window. Oversized API writes return 422, and agent writes return
+`content_too_large` with the measured and allowed sizes. Fuzzy edits are limited
+to 10,000-character search snippets to bound matching work; larger exact edits
+still work.
