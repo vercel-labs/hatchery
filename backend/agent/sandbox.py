@@ -129,6 +129,22 @@ async def list_all(chat_id: str) -> list[worker.Worker]:
     return await worker.list_all(chat_id)
 
 
+async def run_bash(
+    chat_id: str,
+    sandbox_id: str,
+    command: str,
+    timeout: int,
+    actor_user_id: str | None = None,
+) -> dict[str, int | str | bool]:
+    async with telemetry.use_chat(chat_id):
+        record = await worker.get(sandbox_id)
+        if record is None or record.chat_id != chat_id:
+            raise ValueError("sandbox does not belong to this chat")
+        return await worker.sandbox.run_bash(
+            record, command, timeout, actor_user_id=actor_user_id
+        )
+
+
 async def destroy(chat_id: str, sandbox_id: str) -> None:
     async with telemetry.use_chat(chat_id):
         record = await worker.get(sandbox_id)

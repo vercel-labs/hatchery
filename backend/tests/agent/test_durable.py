@@ -46,6 +46,7 @@ async def test_durable_tools_keep_effects_non_retriable():
     assert durable.list_sandboxes_step.max_retries > 0
     assert durable.check_subagent_step.max_retries > 0
     assert durable.create_sandbox_step.max_retries == 0
+    assert durable.bash_step.max_retries == 0
     assert durable.create_subagent_step.max_retries == 0
     assert durable.message_subagent_step.max_retries == 0
     assert durable.require_attention_step.max_retries == 0
@@ -284,6 +285,38 @@ async def test_durable_require_attention_uses_trusted_chat_id(monkeypatch):
     properties = durable.require_attention.tool.spec.params["properties"]
     assert set(properties) == {"reason"}
     assert properties["reason"]["enum"] == ["result_available", "blocked"]
+
+
+async def test_bash_tool_uses_trusted_chat_and_actor_ids(monkeypatch):
+    calls = []
+
+    async def step(*args):
+        calls.append(args)
+        return {"exit_code": 0, "stdout": "ok", "stderr": ""}
+
+    class Writer:
+        async def write(self, value):
+            pass
+
+    monkeypatch.setattr(durable, "bash_step", step)
+    agent = durable.DurableDispatcher("chat_trusted", Writer(), actor_user_id="user_actor")
+    token = durable.current_agent.set(agent)
+    try:
+        result = await durable.bash.fn("wrk_1", "pwd", 10)
+    finally:
+        durable.current_agent.reset(token)
+
+    assert result["stdout"] == "ok"
+    assert calls == [("chat_trusted", "wrk_1", "pwd", 10, "user_actor")]
+    assert "bash" in {tool.name for tool in durable.BASE_TOOLS}
+    properties = durable.bash.tool.spec.params["properties"]
+    assert set(properties) == {"sandbox_id", "command", "timeout"}
+    assert properties["command"]["type"] == "string"
+    assert properties["timeout"]["type"] == "integer"
+    with pytest.raises(ValueError, match="command must contain"):
+        await durable.bash.fn("wrk_1", "")
+    with pytest.raises(ValueError, match="timeout must be between"):
+        await durable.bash.fn("wrk_1", "pwd", 301)
 
 
 async def test_create_sandbox_tool_forwards_size(monkeypatch):
