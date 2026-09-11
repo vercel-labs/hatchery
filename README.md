@@ -1,53 +1,26 @@
-# hatchery
+# Hatchery
 
-See `AGENTS.md` for layout and development commands.
+Hatchery is a software factory. It coordinates coding agents in Vercel Sandboxes to monitor, investigate, modify code, open pull requests, and send notifications.
 
-The worker layer always uses Vercel Sandbox and Queues. Local development uses
-Vercel's local Queue broker through the same daemon, topics, protocol, and
-subscriber as cloud.
+Work is organized into **spaces**, which share repositories, reference material, and notes across chats and scheduled jobs. Hatchery can be used from its web UI or through Slack and GitHub.
 
-## Local development
+## How to use
 
-Hatchery auth uses the same Vercel OAuth flow and Postgres tables locally and in
-deployments. Set `DATABASE_URL`, `VERCEL_APP_CLIENT_ID`,
-`VERCEL_APP_CLIENT_SECRET`, and `GITHUB_CONNECTOR`. Register
-`http://localhost:3000/api/auth/callback` on the Vercel app. Set
-`HATCHERY_APP_ORIGIN=http://localhost:3000` if the browser-facing origin cannot
-be inferred from forwarded headers. See `auth.md` for the session, connection,
-credential, and sandbox behavior.
+1. Get into the allowlist
+2. Go to https://hatchery.playground-vercel.tools/
 
-Expose `vercel dev` so cloud sandboxes can reach its Queue broker:
+Note that everybody from the allowlist can view and participate in everybody else's chats through any channel. Use your own judgement when choosing what kind of work to do there.
 
-```sh
-./scripts/reverse_proxy.sh
-```
+## Development
 
-Keep that process open. In another terminal, run the commands it prints:
+Hatchery is developed and tested through Vercel preview deployments. Running the application locally is not supported.
+
+Point Slack and GitHub triggers at the branch when testing integrations:
 
 ```sh
-export HATCHERY_PUBLIC_URL='https://...vgrok...'
-vercel dev
+./scripts/triggers.sh
 ```
 
-Open `http://localhost:3000`, create a chat, and ask the dispatcher to create a
-sandbox and subagent. `vercel dev` supplies the local Queue endpoint and token;
-Hatchery rewrites that endpoint to the public vgrok origin for the sandbox.
+Use [`docs/use-agent-browser.md`](docs/use-agent-browser.md) for browser-driven testing and [`docs/use-braintrust.md`](docs/use-braintrust.md) to inspect agent runs.
 
-Deployments use hosted Vercel Queues through deployment OIDC. No local worker or
-in-process task bypass exists. Sandbox and subagent terminals require the browser
-session before the backend bridges them to the authenticated in-sandbox daemon.
-
-Scheduled jobs use five-field UTC cron expressions. Vercel calls `/api/cron` every
-minute; set the same long random `CRON_SECRET` on the backend deployment so its
-`Authorization: Bearer` header is accepted. Local heartbeat checks can use
-`curl -H "Authorization: Bearer $CRON_SECRET" http://localhost:3000/api/cron`.
-
-Each space also has shared agent notes: a flat list of simple `.md` files shown
-under the space description. Keep them lean and durable so periodic jobs can
-cross-reference prior work without carrying full transcripts into future runs.
-Dispatcher edits replace one unique exact or at least 92%-similar line block;
-missing, ambiguous, and lower-confidence matches do not write. Human edits keep
-the revision captured when editing starts. A stale save is rejected; an explicit
-overwrite uses the revision the person just reviewed and conflicts again if the
-note changes meanwhile. All edit, overwrite, and delete writes hold the same
-per-note lock through read, validation, and write.
+The frontend is built with Next.js and React. The backend uses FastAPI and the AI SDK for Python. Hatchery runs on Vercel Workflows, Queues, and Sandboxes, with Neon Postgres for storage and Vercel Connect for Slack and GitHub integrations.
