@@ -7,7 +7,7 @@ Work is organized into **spaces**, which share repositories, reference material,
 ## How to use
 
 1. Get into the allowlist
-2. Go to https://hatchery.playground-vercel.tools/
+2. Open the [Hatchery web app](https://hatchery.playground-vercel.tools/)
 
 Note that everybody from the allowlist can view and participate in everybody else's chats through any channel. Use your own judgement when choosing what kind of work to do there.
 
