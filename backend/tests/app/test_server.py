@@ -2292,12 +2292,11 @@ async def test_task_tty_bridges_pending_subagent_with_daemon_session(monkeypatch
         assert session_id in daemon_sessions
         bridged.append((ws, session_id))
 
-    async def prepare(found, *, actor_user_id=None):
+    async def prepare(found):
         assert found is record
-        assert actor_user_id == "user_test"
 
     monkeypatch.setattr(server.worker, "get_task", get_task)
-    monkeypatch.setattr(server.worker.sandbox, "prepare_for_command", prepare)
+    monkeypatch.setattr(server.worker.sandbox, "prepare_for_tty", prepare)
     monkeypatch.setattr(server.worker, "get", get_worker)
     monkeypatch.setattr(server, "_bridge_tty", bridge)
     ws = FakeWebSocket()
@@ -2351,12 +2350,11 @@ async def test_task_tty_bridges_running_and_pending_subagents_to_their_sessions(
         assert session_id in daemon_sessions
         bridged.append(session_id)
 
-    async def prepare(found, *, actor_user_id=None):
+    async def prepare(found):
         assert found is record
-        assert actor_user_id == "user_test"
 
     monkeypatch.setattr(server.worker, "get_task", get_task)
-    monkeypatch.setattr(server.worker.sandbox, "prepare_for_command", prepare)
+    monkeypatch.setattr(server.worker.sandbox, "prepare_for_tty", prepare)
     monkeypatch.setattr(server.worker, "get", get_worker)
     monkeypatch.setattr(server, "_bridge_tty", bridge)
 

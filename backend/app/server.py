@@ -1299,6 +1299,29 @@ async def _authenticate_websocket(ws: fastapi.WebSocket) -> dict | None:
     return None
 
 
+async def _prepare_tty(
+    ws: fastapi.WebSocket,
+    record: worker.Worker,
+    chat_id: str,
+    session_id: str,
+) -> bool:
+    try:
+        await worker.sandbox.prepare_for_tty(record)
+    except Exception as error:
+        log.warning(
+            "TTY preparation failed chat=%s worker=%s session=%s: %s",
+            chat_id,
+            record.id,
+            session_id,
+            error,
+            exc_info=True,
+        )
+        await ws.accept()
+        await ws.close(code=1011, reason="sandbox preparation failed")
+        return False
+    return True
+
+
 async def _bridge_tty(
     ws: fastapi.WebSocket,
     record: worker.Worker,
@@ -1471,7 +1494,8 @@ async def task_tty(ws: fastapi.WebSocket, chat_id: str, subagent_id: str) -> Non
         await ws.accept()
         await ws.close(code=4404, reason="unknown sandbox")
         return
-    await worker.sandbox.prepare_for_command(record, actor_user_id=user["id"])
+    if not await _prepare_tty(ws, record, chat_id, task.id):
+        return
     await _bridge_tty(ws, record, task.id)
 
 
@@ -1490,7 +1514,8 @@ async def manual_tty(ws: fastapi.WebSocket, chat_id: str, terminal_id: str) -> N
         await ws.accept()
         await ws.close(code=4404, reason="unknown sandbox")
         return
-    await worker.sandbox.prepare_for_command(record, actor_user_id=user["id"])
+    if not await _prepare_tty(ws, record, chat_id, terminal.id):
+        return
     await _bridge_tty(ws, record, terminal.id, ["/bin/bash", "-l"])
 
 

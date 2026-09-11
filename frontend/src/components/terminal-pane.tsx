@@ -69,7 +69,7 @@ function TaskTerminal({ chatId, tab }: { chatId: string; tab: TerminalTab }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<
     "waiting" | "connecting" | "live" | "exited" | "error"
-  >(tab.kind === "subagent" && tab.status === "pending" ? "waiting" : "connecting");
+  >("connecting");
   const [detail, setDetail] = useState("");
 
   useEffect(() => {
@@ -81,8 +81,6 @@ function TaskTerminal({ chatId, tab }: { chatId: string; tab: TerminalTab }) {
     let disposed = false;
     let offset = 0;
     let exited = false;
-    let sessionReady = tab.kind === "manual" || tab.status !== "pending";
-    let waitingDetail = "waiting for sandbox queue";
 
     const boot = async () => {
       const [{ Terminal }, { FitAddon }] = await Promise.all([
@@ -121,31 +119,6 @@ function TaskTerminal({ chatId, tab }: { chatId: string; tab: TerminalTab }) {
 
       const connect = () => {
         if (disposed || exited) return;
-        if (!sessionReady) {
-          setStatus("waiting");
-          setDetail(waitingDetail);
-          retry = setTimeout(async () => {
-            try {
-              const response = await apiFetch(
-                `/api/chats/${chatId}/subagents/${tab.id}/readiness`,
-              );
-              if (response.ok) {
-                const readiness = await response.json();
-                sessionReady = readiness.session_ready;
-                waitingDetail =
-                  readiness.daemon?.queue_error ||
-                  (readiness.daemon?.queue_connected === false
-                    ? "sandbox queue is disconnected"
-                    : "waiting for sandbox queue");
-                setDetail(waitingDetail);
-              }
-            } catch {
-              setDetail("readiness check failed");
-            }
-            connect();
-          }, 1500);
-          return;
-        }
         setStatus("connecting");
         setDetail("");
         const path =
@@ -200,7 +173,7 @@ function TaskTerminal({ chatId, tab }: { chatId: string; tab: TerminalTab }) {
       ws?.close();
       void cleanup.then((dispose) => dispose?.());
     };
-  }, [chatId, tab.id, tab.kind, tab.status]);
+  }, [chatId, tab.id, tab.kind]);
 
   return (
     <>
