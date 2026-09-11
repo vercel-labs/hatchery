@@ -20,7 +20,6 @@ import {
   PlusIcon,
   MessageSquareIcon,
   TerminalIcon,
-  TriangleIcon,
   Trash2Icon,
   XIcon,
 } from "lucide-react";
@@ -36,7 +35,6 @@ import {
   type Space,
   type SpaceWarning,
   type User,
-  type VercelCLIConnection,
 } from "@/lib/api";
 import {
   chatAttentionFilterLabel,
@@ -102,14 +100,6 @@ import {
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetFooter,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Sidebar,
@@ -225,11 +215,6 @@ export function AppShell() {
   const [addingSpace, setAddingSpace] = useState(false);
   const [spaceName, setSpaceName] = useState("");
   const [spaceColor, setSpaceColor] = useState<AccentColor | null>(null);
-  const [vercelCLI, setVercelCLI] = useState<VercelCLIConnection | null>(null);
-  const [vercelToken, setVercelToken] = useState("");
-  const [vercelSheetOpen, setVercelSheetOpen] = useState(false);
-  const [vercelError, setVercelError] = useState("");
-  const [savingVercel, setSavingVercel] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [chatFilters, setChatFilters] = useState<ChatSidebarFilters>({
     requiresAttention: false,
@@ -274,35 +259,6 @@ export function AppShell() {
     }
   };
 
-  const saveVercelCLI = async (event: React.FormEvent) => {
-    event.preventDefault();
-    setSavingVercel(true);
-    setVercelError("");
-    const response = await apiFetch("/api/connections/vercel-cli", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token: vercelToken }),
-    });
-    setSavingVercel(false);
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      setVercelError(body.detail ?? "Could not connect Vercel CLI access.");
-      return;
-    }
-    const body: { connection: VercelCLIConnection } = await response.json();
-    setVercelCLI(body.connection);
-    setVercelToken("");
-    setVercelSheetOpen(false);
-  };
-
-  const disconnectVercelCLI = async () => {
-    if (!window.confirm("Disconnect Vercel CLI access? Active sandboxes will lose deployment access.")) {
-      return;
-    }
-    const response = await apiFetch("/api/connections/vercel-cli", { method: "DELETE" });
-    if (response.ok) setVercelCLI(null);
-  };
-
   useEffect(() => {
     const load = async () => {
       const identity = await apiFetch("/api/auth/me");
@@ -312,26 +268,23 @@ export function AppShell() {
         setUser(null);
         return;
       }
-      const [s, c, github, slack, vercel, warnings] = await Promise.all([
+      const [s, c, github, slack, warnings] = await Promise.all([
         apiFetch("/api/spaces"),
         apiFetch("/api/chats"),
         apiFetch("/api/connections/github"),
         apiFetch("/api/connections/slack"),
-        apiFetch("/api/connections/vercel-cli"),
         apiFetch("/api/spaces/warnings"),
       ]);
-      if (!s.ok || !c.ok || !github.ok || !slack.ok || !vercel.ok || !warnings.ok) {
+      if (!s.ok || !c.ok || !github.ok || !slack.ok || !warnings.ok) {
         throw new Error("backend unreachable");
       }
       const connection: { connection: User["github"] | null } = await github.json();
       const slackConnection: { connection: User["slack"] | null } = await slack.json();
-      const vercelConnection: { connection: VercelCLIConnection | null } = await vercel.json();
       setUser({
         ...me.user,
         github: connection.connection ?? undefined,
         slack: slackConnection.connection ?? undefined,
       });
-      setVercelCLI(vercelConnection.connection);
       setSpaces(await s.json());
       setChats(await c.json());
       setSpaceWarnings(await warnings.json());
@@ -604,10 +557,6 @@ export function AppShell() {
                     Connect Slack
                   </DropdownMenuItem>
                 )}
-                <DropdownMenuItem onClick={() => setVercelSheetOpen(true)}>
-                  <TriangleIcon />
-                  {vercelCLI ? "Vercel CLI connected" : "Connect Vercel CLI"}
-                </DropdownMenuItem>
               </DropdownMenuGroup>
               <DropdownMenuSeparator />
               <DropdownMenuGroup>
@@ -621,12 +570,6 @@ export function AppShell() {
                   <DropdownMenuItem variant="destructive" onClick={disconnectSlack}>
                     <MessageSquareIcon />
                     Disconnect Slack
-                  </DropdownMenuItem>
-                )}
-                {vercelCLI && (
-                  <DropdownMenuItem variant="destructive" onClick={disconnectVercelCLI}>
-                    <TriangleIcon />
-                    Disconnect Vercel CLI
                   </DropdownMenuItem>
                 )}
                 <DropdownMenuItem
@@ -928,49 +871,6 @@ export function AppShell() {
           </SidebarFooter>
         )}
       </Sidebar>
-
-      <Sheet open={vercelSheetOpen} onOpenChange={setVercelSheetOpen}>
-        <SheetContent>
-          <SheetHeader>
-            <SheetTitle>{vercelCLI ? "Replace Vercel CLI token" : "Connect Vercel CLI"}</SheetTitle>
-            <SheetDescription>
-              Add your Vercel token to let agents access the teams and projects you can access.
-            </SheetDescription>
-          </SheetHeader>
-          <form className="flex flex-col gap-4 px-4" onSubmit={saveVercelCLI}>
-            <FieldGroup>
-              <Field data-invalid={Boolean(vercelError)}>
-                <FieldLabel htmlFor="vercel-token">Access token</FieldLabel>
-                <Input
-                  id="vercel-token"
-                  type="password"
-                  autoComplete="off"
-                  value={vercelToken}
-                  onChange={(event) => setVercelToken(event.target.value)}
-                  aria-invalid={Boolean(vercelError)}
-                  placeholder="vcp_…"
-                />
-                <FieldDescription>
-                  Create the narrowest token possible in Vercel account settings. It is stored encrypted.
-                </FieldDescription>
-                {vercelError && <FieldError>{vercelError}</FieldError>}
-              </Field>
-            </FieldGroup>
-            <Button type="submit" disabled={!vercelToken.trim() || savingVercel}>
-              {savingVercel ? "Connecting…" : vercelCLI ? "Replace token" : "Connect"}
-            </Button>
-          </form>
-          <SheetFooter>
-            <Button
-              variant="outline"
-              nativeButton={false}
-              render={<a href="https://vercel.com/account/settings/tokens" target="_blank" rel="noreferrer" />}
-            >
-              Create token in Vercel
-            </Button>
-          </SheetFooter>
-        </SheetContent>
-      </Sheet>
 
       <SidebarInset>
         <header className="flex h-14 items-center gap-2 border-b px-4">
