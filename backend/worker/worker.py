@@ -535,7 +535,7 @@ async def reconcile_task(task_id: str) -> models.Task:
     task = await store.get_task(task_id)
     if task is None:
         raise KeyError(task_id)
-    if task.status != "pending":
+    if task.status in ("errored", "cancelled"):
         return task
     pending = [item for item in task.inputs if item.delivered_at is None]
     if not pending:

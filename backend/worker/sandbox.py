@@ -218,6 +218,32 @@ async def prepare_for_command(
             )
 
 
+async def prepare_for_tty(record: models.Worker) -> None:
+    """Resume a sandbox for TTY attachment without replacing a reachable daemon."""
+    async with ai.experimental_telemetry.span("sandbox.tty.prepare") as span:
+        span.set_attrs(
+            {"chat.id": record.chat_id, "worker.id": record.id},
+            sandbox_name=record.sandbox_name,
+        )
+        box = await vercel_sandbox.resume_sandbox(name=record.sandbox_name)
+        span.set_attrs(region=box.region or "")
+        await box.update(execution_time_limit=EXECUTION_TIME_LIMIT)
+        routes = [models.Route(port=route.port, url=route.url) for route in box.routes]
+        daemon_route = next(
+            (route for route in routes if route.port == DAEMON_PORT), None
+        )
+        if daemon_route is None:
+            raise RuntimeError("sandbox did not expose the daemon route")
+        try:
+            health = await _daemon_health(daemon_route.url, record.daemon_token)
+        except httpx.HTTPError, ValueError:
+            health = {}
+        if health.get("ok") is not True:
+            await repair_daemon(
+                box, record.id, record.spec, record.daemon_token, routes
+            )
+
+
 async def recover_daemon(record: models.Worker) -> None:
     """Repair daemon control and let its persisted active-task set resume fx."""
     box = await vercel_sandbox.get_sandbox(name=record.sandbox_name)

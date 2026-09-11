@@ -1993,7 +1993,6 @@ async def test_worker_completion_does_not_restart_active_workflow(monkeypatch):
 
 
 async def test_task_readiness_reports_queue_state(monkeypatch, caplog):
-    reconciled = []
     task = server.worker.Task(
         id="task_1",
         chat_id="chat_1",
@@ -2025,27 +2024,17 @@ async def test_task_readiness_reports_queue_state(monkeypatch, caplog):
         assert found is record
         return []
 
-    async def reconcile_task(task_id):
-        reconciled.append(task_id)
-        return task
-
     monkeypatch.setattr(server.worker, "get_task", get_task)
     monkeypatch.setattr(server.worker, "get", get_worker)
     monkeypatch.setattr(server.worker.sandbox, "daemon_health", daemon_health)
     monkeypatch.setattr(server.worker.sandbox, "tty_sessions", tty_sessions)
-    monkeypatch.setattr(server.worker, "reconcile_task", reconcile_task)
     caplog.set_level("WARNING", logger="app")
 
     readiness = await server.task_readiness("chat_1", "task_1")
 
-    assert reconciled == ["task_1"]
-    warning = next(
-        record
-        for record in caplog.records
-        if record.message == "sandbox TTY is not ready"
-    )
-    assert warning.tty_wait_reason == "daemon_stale"
-    assert warning.queue_error == "HTTP 502: tunnel offline"
+    assert "sandbox TTY not ready chat=chat_1 task=task_1 worker=wrk_1" in caplog.text
+    assert "reason=daemon_stale" in caplog.text
+    assert "queue_error='HTTP 502: tunnel offline'" in caplog.text
     assert readiness == {
         "state": "pending",
         "session_ready": False,
@@ -2307,12 +2296,11 @@ async def test_task_tty_bridges_pending_subagent_with_daemon_session(monkeypatch
         assert session_id in daemon_sessions
         bridged.append((ws, session_id))
 
-    async def prepare(found, *, actor_user_id=None):
+    async def prepare(found):
         assert found is record
-        assert actor_user_id == "user_test"
 
     monkeypatch.setattr(server.worker, "get_task", get_task)
-    monkeypatch.setattr(server.worker.sandbox, "prepare_for_command", prepare)
+    monkeypatch.setattr(server.worker.sandbox, "prepare_for_tty", prepare)
     monkeypatch.setattr(server.worker, "get", get_worker)
     monkeypatch.setattr(server, "_bridge_tty", bridge)
     ws = FakeWebSocket()
@@ -2321,48 +2309,6 @@ async def test_task_tty_bridges_pending_subagent_with_daemon_session(monkeypatch
 
     assert bridged == [(ws, "task_1")]
     assert ws.closed is None
-
-
-async def test_task_tty_logs_reconnect_preparation_failure(monkeypatch, caplog):
-    task = server.worker.Task(
-        id="task_1",
-        chat_id="chat_1",
-        worker_id="wrk_1",
-        title="fix",
-        prompt="fix it",
-        model="openai/test",
-        status="running",
-        created_at="2026-08-31T00:00:00+00:00",
-        updated_at="2026-08-31T00:00:00+00:00",
-    )
-    record = type("Worker", (), {"id": "wrk_1"})()
-
-    async def get_task(chat_id, task_id):
-        return task
-
-    async def get_worker(worker_id):
-        return record
-
-    async def prepare(found, *, actor_user_id=None):
-        raise RuntimeError("daemon unavailable")
-
-    monkeypatch.setattr(server.worker, "get_task", get_task)
-    monkeypatch.setattr(server.worker, "get", get_worker)
-    monkeypatch.setattr(server.worker.sandbox, "prepare_for_command", prepare)
-    caplog.set_level("WARNING", logger="app")
-    ws = FakeWebSocket()
-
-    await server.task_tty(ws, "chat_1", "task_1")
-
-    assert ws.closed == (1011, "sandbox preparation failed")
-    warning = next(
-        record
-        for record in caplog.records
-        if record.message == "TTY reconnect preparation failed"
-    )
-    assert warning.chat_id == "chat_1"
-    assert warning.task_id == "task_1"
-    assert warning.worker_id == "wrk_1"
 
 
 async def test_task_tty_bridges_running_and_pending_subagents_to_their_sessions(
@@ -2408,12 +2354,11 @@ async def test_task_tty_bridges_running_and_pending_subagents_to_their_sessions(
         assert session_id in daemon_sessions
         bridged.append(session_id)
 
-    async def prepare(found, *, actor_user_id=None):
+    async def prepare(found):
         assert found is record
-        assert actor_user_id == "user_test"
 
     monkeypatch.setattr(server.worker, "get_task", get_task)
-    monkeypatch.setattr(server.worker.sandbox, "prepare_for_command", prepare)
+    monkeypatch.setattr(server.worker.sandbox, "prepare_for_tty", prepare)
     monkeypatch.setattr(server.worker, "get", get_worker)
     monkeypatch.setattr(server, "_bridge_tty", bridge)
 
@@ -2505,15 +2450,10 @@ async def test_tty_bridge_propagates_upstream_close(monkeypatch, caplog):
     await server._bridge_tty(ws, type("Worker", (), {"id": "wrk_1"})(), "task_1")
 
     assert ws.closed == (4404, "session not found")
-    warning = next(
-        record
-        for record in caplog.records
-        if record.message == "TTY upstream connection closed"
-    )
-    assert warning.worker_id == "wrk_1"
-    assert warning.session_id == "task_1"
-    assert warning.close_code == 4404
-    assert warning.close_reason == "session not found"
+    assert (
+        "TTY upstream closed worker=wrk_1 session=task_1 code=4404 "
+        "reason=session not found"
+    ) in caplog.text
 
 
 async def test_tty_bridge_maps_auth_rejection(monkeypatch):

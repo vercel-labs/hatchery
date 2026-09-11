@@ -1299,6 +1299,29 @@ async def _authenticate_websocket(ws: fastapi.WebSocket) -> dict | None:
     return None
 
 
+async def _prepare_tty(
+    ws: fastapi.WebSocket,
+    record: worker.Worker,
+    chat_id: str,
+    session_id: str,
+) -> bool:
+    try:
+        await worker.sandbox.prepare_for_tty(record)
+    except Exception as error:
+        log.warning(
+            "TTY preparation failed chat=%s worker=%s session=%s error=%s",
+            chat_id,
+            record.id,
+            session_id,
+            error,
+            exc_info=True,
+        )
+        await ws.accept()
+        await ws.close(code=1011, reason="sandbox preparation failed")
+        return False
+    return True
+
+
 async def _bridge_tty(
     ws: fastapi.WebSocket,
     record: worker.Worker,
@@ -1359,13 +1382,11 @@ async def _bridge_tty(
             close_reason = "upstream connection closed"
         if close_code != 1000:
             log.warning(
-                "TTY upstream connection closed",
-                extra={
-                    "worker_id": record.id,
-                    "session_id": session_id,
-                    "close_code": close_code,
-                    "close_reason": close_reason,
-                },
+                "TTY upstream closed worker=%s session=%s code=%s reason=%s",
+                record.id,
+                session_id,
+                close_code,
+                close_reason,
             )
     except websockets.InvalidStatus as error:
         status = error.response.status_code
@@ -1470,37 +1491,22 @@ async def task_readiness(chat_id: str, subagent_id: str) -> dict:
         else:
             reason = "session_missing"
         log.warning(
-            "sandbox TTY is not ready",
-            extra={
-                "chat_id": chat_id,
-                "task_id": task.id,
-                "worker_id": record.id,
-                "task_state": task.status,
-                "launch_attempts": task.launch_attempts,
-                "tty_wait_reason": reason,
-                "daemon_version": daemon.get("version"),
-                "expected_daemon_version": worker.sandbox.daemon_main.VERSION,
-                "daemon_event_deployment": daemon.get("event_deployment"),
-                "expected_event_deployment": os.environ.get("VERCEL_DEPLOYMENT_ID"),
-                "queue_connected": daemon.get("queue_connected"),
-                "queue_error": daemon.get("queue_error"),
-                "tty_session_ids": [session.get("id") for session in sessions],
-            },
+            "sandbox TTY not ready chat=%s task=%s worker=%s state=%s reason=%s "
+            "daemon_version=%r expected_daemon_version=%s daemon_deployment=%r "
+            "expected_deployment=%r queue_connected=%r queue_error=%r sessions=%s",
+            chat_id,
+            task.id,
+            record.id,
+            task.status,
+            reason,
+            daemon.get("version"),
+            worker.sandbox.daemon_main.VERSION,
+            daemon.get("event_deployment"),
+            os.environ.get("VERCEL_DEPLOYMENT_ID"),
+            daemon.get("queue_connected"),
+            daemon.get("queue_error"),
+            [session.get("id") for session in sessions],
         )
-        if task.status == "pending":
-            try:
-                await worker.reconcile_task(task.id)
-            except Exception as error:
-                log.warning(
-                    "sandbox TTY recovery failed",
-                    exc_info=error,
-                    extra={
-                        "chat_id": chat_id,
-                        "task_id": task.id,
-                        "worker_id": record.id,
-                        "tty_wait_reason": reason,
-                    },
-                )
     return {
         "state": task.status,
         "session_ready": session_ready,
@@ -1523,20 +1529,7 @@ async def task_tty(ws: fastapi.WebSocket, chat_id: str, subagent_id: str) -> Non
         await ws.accept()
         await ws.close(code=4404, reason="unknown sandbox")
         return
-    try:
-        await worker.sandbox.prepare_for_command(record, actor_user_id=user["id"])
-    except Exception as error:
-        log.warning(
-            "TTY reconnect preparation failed",
-            exc_info=error,
-            extra={
-                "chat_id": chat_id,
-                "task_id": task.id,
-                "worker_id": record.id,
-            },
-        )
-        await ws.accept()
-        await ws.close(code=1011, reason="sandbox preparation failed")
+    if not await _prepare_tty(ws, record, chat_id, task.id):
         return
     await _bridge_tty(ws, record, task.id)
 
@@ -1556,7 +1549,8 @@ async def manual_tty(ws: fastapi.WebSocket, chat_id: str, terminal_id: str) -> N
         await ws.accept()
         await ws.close(code=4404, reason="unknown sandbox")
         return
-    await worker.sandbox.prepare_for_command(record, actor_user_id=user["id"])
+    if not await _prepare_tty(ws, record, chat_id, terminal.id):
+        return
     await _bridge_tty(ws, record, terminal.id, ["/bin/bash", "-l"])
 
 

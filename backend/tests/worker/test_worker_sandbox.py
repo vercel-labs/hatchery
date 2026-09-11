@@ -683,6 +683,107 @@ async def test_prepare_for_command_resumes_and_repairs_daemon(monkeypatch):
     ]
 
 
+async def test_prepare_for_tty_preserves_reachable_stale_daemon(monkeypatch):
+    calls = []
+
+    class Box:
+        region = "iad1"
+        routes = [types.SimpleNamespace(port=8787, url="https://daemon.example")]
+
+        async def update(self, **options):
+            calls.append(("update", options))
+
+    async def resume_sandbox(name):
+        calls.append(("resume", name))
+        return Box()
+
+    async def daemon_health(url, token):
+        calls.append(("health", url, token))
+        return {
+            "ok": True,
+            "version": sandbox.daemon_main.VERSION - 1,
+            "queue_connected": False,
+            "event_deployment": "dpl_old",
+        }
+
+    async def repair(*args):
+        raise AssertionError("reachable TTY daemon must not be replaced")
+
+    monkeypatch.setattr(sandbox.vercel_sandbox, "resume_sandbox", resume_sandbox)
+    monkeypatch.setattr(sandbox, "_daemon_health", daemon_health)
+    monkeypatch.setattr(sandbox, "repair_daemon", repair)
+    record = models.Worker(
+        id="wrk_1",
+        chat_id="chat_1",
+        sandbox_name="hatchery-wrk_1",
+        command_topic="topic",
+        title="worker",
+        status="running",
+        spec=models.WorkerSpec(),
+        daemon_token="secret",
+        created_at="now",
+        updated_at="now",
+    )
+
+    await sandbox.prepare_for_tty(record)
+
+    assert calls == [
+        ("resume", "hatchery-wrk_1"),
+        ("update", {"execution_time_limit": sandbox.EXECUTION_TIME_LIMIT}),
+        ("health", "https://daemon.example", "secret"),
+    ]
+
+
+async def test_prepare_for_tty_repairs_unreachable_daemon(monkeypatch):
+    calls = []
+
+    class Box:
+        region = "iad1"
+        routes = [types.SimpleNamespace(port=8787, url="https://daemon.example")]
+
+        async def update(self, **options):
+            calls.append(("update", options))
+
+    async def resume_sandbox(name):
+        calls.append(("resume", name))
+        return Box()
+
+    async def daemon_health(url, token):
+        raise httpx.ConnectError("daemon unavailable")
+
+    async def repair(box, worker_id, spec, token, routes):
+        calls.append(("repair", worker_id, token, routes))
+
+    monkeypatch.setattr(sandbox.vercel_sandbox, "resume_sandbox", resume_sandbox)
+    monkeypatch.setattr(sandbox, "_daemon_health", daemon_health)
+    monkeypatch.setattr(sandbox, "repair_daemon", repair)
+    record = models.Worker(
+        id="wrk_1",
+        chat_id="chat_1",
+        sandbox_name="hatchery-wrk_1",
+        command_topic="topic",
+        title="worker",
+        status="running",
+        spec=models.WorkerSpec(),
+        daemon_token="secret",
+        created_at="now",
+        updated_at="now",
+    )
+
+    await sandbox.prepare_for_tty(record)
+
+    assert calls == [
+        ("resume", "hatchery-wrk_1"),
+        ("update", {"execution_time_limit": sandbox.EXECUTION_TIME_LIMIT}),
+        (
+            "repair",
+            "wrk_1",
+            "secret",
+            [models.Route(port=8787, url="https://daemon.example")],
+        ),
+    ]
+
+
 async def test_probe_route_rejects_undeclared_port():
     record = models.Worker(
         id="wrk_1",
