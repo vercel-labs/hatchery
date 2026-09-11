@@ -218,6 +218,18 @@ async def prepare_for_command(
             )
 
 
+async def prepare_for_tty(record: models.Worker) -> None:
+    """Resume a sandbox without replacing the daemon that owns its TTY sessions."""
+    async with ai.experimental_telemetry.span("sandbox.tty.prepare") as span:
+        span.set_attrs(
+            {"chat.id": record.chat_id, "worker.id": record.id},
+            sandbox_name=record.sandbox_name,
+        )
+        box = await vercel_sandbox.resume_sandbox(name=record.sandbox_name)
+        span.set_attrs(region=box.region or "")
+        await box.update(execution_time_limit=EXECUTION_TIME_LIMIT)
+
+
 async def recover_daemon(record: models.Worker) -> None:
     """Repair daemon control and let its persisted active-task set resume fx."""
     box = await vercel_sandbox.get_sandbox(name=record.sandbox_name)

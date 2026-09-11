@@ -683,6 +683,45 @@ async def test_prepare_for_command_resumes_and_repairs_daemon(monkeypatch):
     ]
 
 
+async def test_prepare_for_tty_only_resumes_sandbox(monkeypatch):
+    calls = []
+
+    class Box:
+        region = "iad1"
+
+        async def update(self, **options):
+            calls.append(("update", options))
+
+    async def resume_sandbox(name):
+        calls.append(("resume", name))
+        return Box()
+
+    async def repair(*args):
+        raise AssertionError("TTY attachment must not replace its daemon")
+
+    monkeypatch.setattr(sandbox.vercel_sandbox, "resume_sandbox", resume_sandbox)
+    monkeypatch.setattr(sandbox, "repair_daemon", repair)
+    record = models.Worker(
+        id="wrk_1",
+        chat_id="chat_1",
+        sandbox_name="hatchery-wrk_1",
+        command_topic="topic",
+        title="worker",
+        status="running",
+        spec=models.WorkerSpec(),
+        daemon_token="secret",
+        created_at="now",
+        updated_at="now",
+    )
+
+    await sandbox.prepare_for_tty(record)
+
+    assert calls == [
+        ("resume", "hatchery-wrk_1"),
+        ("update", {"execution_time_limit": sandbox.EXECUTION_TIME_LIMIT}),
+    ]
+
+
 async def test_probe_route_rejects_undeclared_port():
     record = models.Worker(
         id="wrk_1",
