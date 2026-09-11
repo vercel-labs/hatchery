@@ -455,32 +455,6 @@ async def disconnect_slack(request: fastapi.Request) -> None:
     await connections.disconnect_slack(request.state.user)
 
 
-class VercelCLIRequest(pydantic.BaseModel):
-    token: str = pydantic.Field(min_length=1, max_length=512)
-
-
-@app.get("/api/connections/vercel-cli")
-async def vercel_cli_connection(request: fastapi.Request) -> dict:
-    user = request.state.user
-    return {"connection": await connections.vercel_cli_connection(user["id"])}
-
-
-@app.put("/api/connections/vercel-cli")
-async def connect_vercel_cli(request: fastapi.Request, body: VercelCLIRequest) -> dict:
-    user = request.state.user
-    try:
-        connection = await connections.connect_vercel_cli(user["id"], body.token)
-    except ValueError as error:
-        raise fastapi.HTTPException(400, str(error)) from error
-    return {"connection": connection}
-
-
-@app.delete("/api/connections/vercel-cli", status_code=204)
-async def disconnect_vercel_cli(request: fastapi.Request) -> None:
-    user = request.state.user
-    await connections.disconnect_vercel_cli(user["id"])
-
-
 class SpaceWarning(pydantic.BaseModel):
     space_id: str
     repo: str

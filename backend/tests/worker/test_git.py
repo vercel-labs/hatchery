@@ -253,7 +253,7 @@ def test_origin_parser_accepts_https_and_ssh():
 def test_agent_environment_scrubs_control_plane_secrets():
     env = main.agent_environment({
         "PATH": "/usr/bin", "HATCHERY_DAEMON_TOKEN": "secret",
-        "VERCEL_QUEUE_TOKEN": "queue",
+        "VERCEL_QUEUE_TOKEN": "queue", "VERCEL_TOKEN": "vercel",
         "GH_TOKEN": "github", "AI_GATEWAY_API_KEY": "gateway-key", "SAFE": "yes",
     })
     assert env["SAFE"] == "yes"
@@ -263,4 +263,4 @@ def test_agent_environment_scrubs_control_plane_secrets():
     assert "VERCEL_QUEUE_TOKEN" not in env
     assert env["GH_TOKEN"] == "sandbox-network-policy-placeholder"
     assert env["GH_TOKEN"] != "github"
-    assert env["VERCEL_TOKEN"] == "sandbox-vercel-policy-placeholder"
+    assert "VERCEL_TOKEN" not in env

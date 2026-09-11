@@ -198,44 +198,6 @@ async def test_slack_connection_routes(monkeypatch):
     assert seen == {"authorized": "user_test", "disconnected": "user_test"}
 
 
-async def test_vercel_cli_connection_routes(monkeypatch):
-    seen = {}
-
-    async def connection(user_id):
-        assert user_id == "user_test"
-        return {"username": "ada"}
-
-    async def connect(user_id, token):
-        seen["connected"] = (user_id, token)
-        return {"username": "ada"}
-
-    async def disconnect(user_id):
-        seen["disconnected"] = user_id
-
-    monkeypatch.setattr(server.connections, "vercel_cli_connection", connection)
-    monkeypatch.setattr(server.connections, "connect_vercel_cli", connect)
-    monkeypatch.setattr(server.connections, "disconnect_vercel_cli", disconnect)
-
-    async with client() as c:
-        status = await c.get("/api/connections/vercel-cli")
-        connected = await c.put(
-            "/api/connections/vercel-cli",
-            json={"token": "private"},
-            headers={"origin": "http://test"},
-        )
-        disconnected = await c.delete(
-            "/api/connections/vercel-cli", headers={"origin": "http://test"}
-        )
-
-    assert status.json() == {"connection": {"username": "ada"}}
-    assert connected.json() == {"connection": {"username": "ada"}}
-    assert disconnected.status_code == 204
-    assert seen == {
-        "connected": ("user_test", "private"),
-        "disconnected": "user_test",
-    }
-
-
 async def test_spaces_seed_default():
     async with client() as c:
         listed = (await c.get("/api/spaces")).json()

@@ -28,13 +28,8 @@ CREATE TABLE IF NOT EXISTS hatchery_oauth_states (
     expires_at TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE TABLE IF NOT EXISTS hatchery_user_secrets (
-    user_id    TEXT NOT NULL REFERENCES hatchery_users(id) ON DELETE CASCADE,
-    name       TEXT NOT NULL,
-    value      TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (user_id, name)
-);
+UPDATE hatchery_users SET data = data - 'vercel_cli' WHERE data ? 'vercel_cli';
+DROP TABLE IF EXISTS hatchery_user_secrets;
 CREATE TABLE IF NOT EXISTS hatchery_slack_identities (
     team_id    TEXT NOT NULL,
     slack_user_id TEXT NOT NULL,
@@ -105,23 +100,6 @@ async def list_people() -> list[dict]:
         else dict(row["person"])
         for row in rows
     ]
-
-
-async def save_connection(user_id: str, name: str, connection: dict) -> None:
-    await (await db.pool()).execute(
-        "UPDATE hatchery_users SET data = jsonb_set(data, ARRAY[$2], $3::jsonb) WHERE id = $1",
-        user_id,
-        name,
-        json.dumps(connection),
-    )
-
-
-async def delete_connection(user_id: str, name: str) -> None:
-    await (await db.pool()).execute(
-        "UPDATE hatchery_users SET data = data - $2 WHERE id = $1",
-        user_id,
-        name,
-    )
 
 
 class GitHubIdentityConflict(RuntimeError):
@@ -229,33 +207,6 @@ async def delete_slack_connection(user_id: str) -> None:
         await conn.execute(
             "UPDATE hatchery_users SET data = data - 'slack' WHERE id = $1", user_id
         )
-
-
-async def save_secret(user_id: str, name: str, value: str) -> None:
-    await (await db.pool()).execute(
-        "INSERT INTO hatchery_user_secrets (user_id, name, value) VALUES ($1, $2, $3) "
-        "ON CONFLICT (user_id, name) DO UPDATE SET value = EXCLUDED.value, created_at = now()",
-        user_id,
-        name,
-        value,
-    )
-
-
-async def get_secret(user_id: str, name: str) -> str | None:
-    row = await (await db.pool()).fetchrow(
-        "SELECT value FROM hatchery_user_secrets WHERE user_id = $1 AND name = $2",
-        user_id,
-        name,
-    )
-    return str(row["value"]) if row is not None else None
-
-
-async def delete_secret(user_id: str, name: str) -> None:
-    await (await db.pool()).execute(
-        "DELETE FROM hatchery_user_secrets WHERE user_id = $1 AND name = $2",
-        user_id,
-        name,
-    )
 
 
 async def create_session(user_id: str, lifetime: datetime.timedelta) -> str:

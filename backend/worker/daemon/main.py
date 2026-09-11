@@ -32,7 +32,7 @@ import uuid
 import asyncssh
 import websockets.asyncio.server
 
-VERSION = 13
+VERSION = 14
 FX_VERSION = "0.0.8"
 FX_BINARY = "/opt/hatchery/bin/fx"
 REPLAY_LIMIT = 1024 * 1024
@@ -58,15 +58,15 @@ def agent_environment(env: dict[str, str] | None = None) -> dict[str, str]:
         "VERCEL_QUEUE_TOKEN",
         "VERCEL_QUEUE_BASE_URL",
         "VERCEL_DEPLOYMENT_ID",
+        "VERCEL_TOKEN",
         "GH_TOKEN",
         "GITHUB_TOKEN",
     }
     result = {name: value for name, value in source.items() if name not in private}
     result["PATH"] = f"/opt/hatchery/bin:{result.get('PATH', '/usr/local/bin:/usr/bin:/bin')}"
-    # CLIs require a local credential before sending a request. Sandbox network
-    # policy replaces these non-secret markers when the user connected access.
+    # GitHub CLIs require a local credential before sending a request. Sandbox
+    # network policy replaces this non-secret marker when the user connected access.
     result["GH_TOKEN"] = "sandbox-network-policy-placeholder"
-    result["VERCEL_TOKEN"] = "sandbox-vercel-policy-placeholder"
     return result
 
 
