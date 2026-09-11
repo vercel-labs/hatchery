@@ -132,6 +132,61 @@ async def test_stopped_worker_persists_task_before_resume_and_publish(monkeypatc
     assert (await worker.get(created.id)).status == "running"
 
 
+async def test_reconcile_pending_task_prepares_and_resends(monkeypatch):
+    sent = []
+    actors = []
+
+    async def provision(worker_id, spec, daemon_token):
+        return sandbox.Provisioned(f"hatchery-{worker_id}", [])
+
+    async def prepare_for_command(record, **kwargs):
+        actors.append(kwargs["actor_user_id"])
+
+    async def send(command):
+        sent.append(command)
+
+    monkeypatch.setattr(worker.sandbox, "provision", provision)
+    monkeypatch.setattr(worker.sandbox, "prepare_for_command", prepare_for_command)
+    monkeypatch.setattr(worker.queue, "send", send)
+    created = await worker.create("chat_1", models.WorkerSpec())
+    task = await worker.launch_task(
+        "chat_1", created.id, "fix it", "openai/test", actor_user_id="user_1"
+    )
+
+    reconciled = await worker.reconcile_task(task.id)
+
+    assert actors == ["user_1", "user_1"]
+    assert [command.type for command in sent] == ["task.launch", "task.launch"]
+    assert [command.sequence for command in sent] == [0, 0]
+    assert reconciled.inputs[0].delivered_at is not None
+
+
+async def test_reconcile_does_not_replay_completed_task(monkeypatch):
+    sent = []
+
+    async def provision(worker_id, spec, daemon_token):
+        return sandbox.Provisioned(f"hatchery-{worker_id}", [])
+
+    async def prepare_for_command(record, **kwargs):
+        pass
+
+    async def send(command):
+        sent.append(command)
+
+    monkeypatch.setattr(worker.sandbox, "provision", provision)
+    monkeypatch.setattr(worker.sandbox, "prepare_for_command", prepare_for_command)
+    monkeypatch.setattr(worker.queue, "send", send)
+    created = await worker.create("chat_1", models.WorkerSpec())
+    task = await worker.launch_task("chat_1", created.id, "fix it", "openai/test")
+    task.status = "complete"
+    await worker.store.save_task(task)
+
+    reconciled = await worker.reconcile_task(task.id)
+
+    assert reconciled.status == "complete"
+    assert len(sent) == 1
+
+
 async def test_ingest_is_idempotent_and_ordered(monkeypatch):
     async def send(command):
         pass

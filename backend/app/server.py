@@ -1357,6 +1357,16 @@ async def _bridge_tty(
         else:
             close_code = 1011
             close_reason = "upstream connection closed"
+        if close_code != 1000:
+            log.warning(
+                "TTY upstream connection closed",
+                extra={
+                    "worker_id": record.id,
+                    "session_id": session_id,
+                    "close_code": close_code,
+                    "close_reason": close_reason,
+                },
+            )
     except websockets.InvalidStatus as error:
         status = error.response.status_code
         close_code = 4401 if status == 401 else 4403 if status == 403 else 1011
@@ -1449,9 +1459,51 @@ async def task_readiness(chat_id: str, subagent_id: str) -> dict:
             "queue_error": "sandbox daemon is unreachable",
         }
         sessions = []
+    session_ready = any(session.get("id") == task.id for session in sessions)
+    if not session_ready:
+        if daemon.get("ok") is not True:
+            reason = "daemon_unreachable"
+        elif daemon.get("version") != worker.sandbox.daemon_main.VERSION:
+            reason = "daemon_stale"
+        elif daemon.get("queue_connected") is not True:
+            reason = "queue_disconnected"
+        else:
+            reason = "session_missing"
+        log.warning(
+            "sandbox TTY is not ready",
+            extra={
+                "chat_id": chat_id,
+                "task_id": task.id,
+                "worker_id": record.id,
+                "task_state": task.status,
+                "launch_attempts": task.launch_attempts,
+                "tty_wait_reason": reason,
+                "daemon_version": daemon.get("version"),
+                "expected_daemon_version": worker.sandbox.daemon_main.VERSION,
+                "daemon_event_deployment": daemon.get("event_deployment"),
+                "expected_event_deployment": os.environ.get("VERCEL_DEPLOYMENT_ID"),
+                "queue_connected": daemon.get("queue_connected"),
+                "queue_error": daemon.get("queue_error"),
+                "tty_session_ids": [session.get("id") for session in sessions],
+            },
+        )
+        if task.status == "pending":
+            try:
+                await worker.reconcile_task(task.id)
+            except Exception as error:
+                log.warning(
+                    "sandbox TTY recovery failed",
+                    exc_info=error,
+                    extra={
+                        "chat_id": chat_id,
+                        "task_id": task.id,
+                        "worker_id": record.id,
+                        "tty_wait_reason": reason,
+                    },
+                )
     return {
         "state": task.status,
-        "session_ready": any(session.get("id") == task.id for session in sessions),
+        "session_ready": session_ready,
         "daemon": daemon,
     }
 
@@ -1471,7 +1523,21 @@ async def task_tty(ws: fastapi.WebSocket, chat_id: str, subagent_id: str) -> Non
         await ws.accept()
         await ws.close(code=4404, reason="unknown sandbox")
         return
-    await worker.sandbox.prepare_for_command(record, actor_user_id=user["id"])
+    try:
+        await worker.sandbox.prepare_for_command(record, actor_user_id=user["id"])
+    except Exception as error:
+        log.warning(
+            "TTY reconnect preparation failed",
+            exc_info=error,
+            extra={
+                "chat_id": chat_id,
+                "task_id": task.id,
+                "worker_id": record.id,
+            },
+        )
+        await ws.accept()
+        await ws.close(code=1011, reason="sandbox preparation failed")
+        return
     await _bridge_tty(ws, record, task.id)
 
 
