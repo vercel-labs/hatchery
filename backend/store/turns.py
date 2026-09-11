@@ -17,6 +17,7 @@ class ActiveTurn:
     origin: str
     task_id: str | None
     generation: int
+    actor_user_id: str | None = None
 
 
 class BusyError(RuntimeError):
@@ -81,11 +82,14 @@ async def active(chat_id: str) -> ActiveTurn | None:
                     origin=str(data["origin"]),
                     task_id=typing.cast(str | None, data.get("task_id")),
                     generation=index,
+                    actor_user_id=typing.cast(str | None, data.get("actor_user_id")),
                 )
             )
         elif event_type in {"turn.completed", "turn.failed", "turn.cancelled"}:
             terminal.add(turn_id)
-    return next((turn for turn in reversed(started) if turn.turn_id not in terminal), None)
+    return next(
+        (turn for turn in reversed(started) if turn.turn_id not in terminal), None
+    )
 
 
 async def finish(

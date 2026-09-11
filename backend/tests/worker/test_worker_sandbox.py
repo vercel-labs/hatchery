@@ -89,7 +89,9 @@ async def test_provision_creates_persistent_sandbox_and_checks_daemon(monkeypatc
     async def vercel_credential(_user_id):
         return None
 
-    monkeypatch.setattr(sandbox.vercel_sandbox, "get_or_create_sandbox", get_or_create_sandbox)
+    monkeypatch.setattr(
+        sandbox.vercel_sandbox, "get_or_create_sandbox", get_or_create_sandbox
+    )
     monkeypatch.setattr(sandbox.vercel_oidc, "get_vercel_oidc_token", oidc_token)
     monkeypatch.setattr(sandbox.httpx, "AsyncClient", Client)
     monkeypatch.setattr(sandbox, "_github_credential", github_credential)
@@ -153,15 +155,20 @@ async def test_provision_creates_persistent_sandbox_and_checks_daemon(monkeypatc
     )
 
 
-@pytest.mark.parametrize("installed,downloaded,passes", [
-    (None, "0.0.8", True),
-    ("0.0.7", "0.0.8", True),
-    ("0.0.9", "0.0.8", True),
-    ("0.0.8", None, True),
-    ("0.0.7", None, False),
-    (None, "0.0.9", False),
-])
-async def test_daemon_startup_enforces_fx_pin(monkeypatch, tmp_path, installed, downloaded, passes):
+@pytest.mark.parametrize(
+    "installed,downloaded,passes",
+    [
+        (None, "0.0.8", True),
+        ("0.0.7", "0.0.8", True),
+        ("0.0.9", "0.0.8", True),
+        ("0.0.8", None, True),
+        ("0.0.7", None, False),
+        (None, "0.0.9", False),
+    ],
+)
+async def test_daemon_startup_enforces_fx_pin(
+    monkeypatch, tmp_path, installed, downloaded, passes
+):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     fx = bin_dir / "fx"
@@ -172,9 +179,9 @@ async def test_daemon_startup_enforces_fx_pin(monkeypatch, tmp_path, installed, 
     installer = tmp_path / "setup.sh"
     installer.write_text(
         "set -eu\n"
-        "test \"$1\" = v0.0.8\n"
+        'test "$1" = v0.0.8\n'
         'mkdir -p "$FX_INSTALL_DIR"\n'
-        'cat > "$FX_INSTALL_DIR/fx" <<\'EOF\'\n'
+        "cat > \"$FX_INSTALL_DIR/fx\" <<'EOF'\n"
         f"#!/bin/sh\nprintf '%s\\n' '{downloaded}'\n"
         "EOF\n"
         'chmod +x "$FX_INSTALL_DIR/fx"\n'
@@ -202,13 +209,17 @@ async def test_daemon_startup_enforces_fx_pin(monkeypatch, tmp_path, installed, 
     result = subprocess.run(
         ["/bin/sh", "-c", script],
         env=os.environ | {"PATH": f"{bin_dir}:{os.environ['PATH']}"},
-        text=True, capture_output=True,
+        text=True,
+        capture_output=True,
     )
     assert (result.returncode == 0) is passes, result.stderr
     assert ("admitted" in result.stdout) is passes
     assert fetched.exists() is (installed != "0.0.8")
     if passes:
-        assert subprocess.check_output([str(fx), "--version"], text=True).strip() == "0.0.8"
+        assert (
+            subprocess.check_output([str(fx), "--version"], text=True).strip()
+            == "0.0.8"
+        )
 
 
 def test_worker_spec_resolves_semantic_and_legacy_resources():
@@ -234,7 +245,9 @@ async def test_is_live_passively_checks_running_status(monkeypatch):
 
     async def get_sandbox(*, name):
         calls.append(name)
-        return types.SimpleNamespace(status=sandbox.vercel_sandbox.SandboxStatus.RUNNING)
+        return types.SimpleNamespace(
+            status=sandbox.vercel_sandbox.SandboxStatus.RUNNING
+        )
 
     async def resume_sandbox(**_options):
         raise AssertionError("liveness check must not resume the sandbox")
@@ -249,7 +262,9 @@ async def test_is_live_passively_checks_running_status(monkeypatch):
 async def test_is_live_is_false_for_stopped_sandbox_and_lookup_error(monkeypatch):
     async def stopped(*, name):
         assert name == "hatchery-wrk_1"
-        return types.SimpleNamespace(status=sandbox.vercel_sandbox.SandboxStatus.STOPPED)
+        return types.SimpleNamespace(
+            status=sandbox.vercel_sandbox.SandboxStatus.STOPPED
+        )
 
     monkeypatch.setattr(sandbox.vercel_sandbox, "get_sandbox", stopped)
     assert await sandbox.is_live("hatchery-wrk_1") is False
@@ -320,7 +335,9 @@ async def test_setup_script_gets_github_placeholder(monkeypatch):
         identity=None,
     )
 
-    setup = next(call for call in calls if call[1] == ["-lc", "gh repo clone acme/app app"])
+    setup = next(
+        call for call in calls if call[1] == ["-lc", "gh repo clone acme/app app"]
+    )
     assert setup[2]["env"] == {"GH_TOKEN": sandbox.GITHUB_TOKEN_PLACEHOLDER}
 
 
@@ -340,7 +357,9 @@ async def test_github_credential_uses_connected_user(monkeypatch):
 async def test_empty_sandbox_allows_missing_github_connection(monkeypatch):
     async def token(_user_id):
         raise sandbox.connections.ConnectionRequired(
-            httpx.Response(401, request=httpx.Request("GET", "https://connect.vercel.com")),
+            httpx.Response(
+                401, request=httpx.Request("GET", "https://connect.vercel.com")
+            ),
             "connect",
         )
 
@@ -520,14 +539,16 @@ async def test_existing_sandbox_repairs_dead_daemon(monkeypatch):
             calls["process"] = (command, args, env)
             return Process()
 
-    health = iter([
-        httpx.ConnectError("down"),
-        {
-            "ok": True,
-            "version": sandbox.daemon_main.VERSION,
-            "queue_connected": True,
-        },
-    ])
+    health = iter(
+        [
+            httpx.ConnectError("down"),
+            {
+                "ok": True,
+                "version": sandbox.daemon_main.VERSION,
+                "queue_connected": True,
+            },
+        ]
+    )
 
     async def daemon_health(url, token):
         result = next(health)
@@ -536,10 +557,17 @@ async def test_existing_sandbox_repairs_dead_daemon(monkeypatch):
         return result
 
     monkeypatch.setattr(sandbox, "_daemon_health", daemon_health)
-    monkeypatch.setattr(sandbox, "_wait_for_daemon", lambda *args, **kwargs: daemon_health(args[0], args[1]))
+    monkeypatch.setattr(
+        sandbox,
+        "_wait_for_daemon",
+        lambda *args, **kwargs: daemon_health(args[0], args[1]),
+    )
 
     await sandbox.repair_daemon(
-        Box(), "wrk_1", models.WorkerSpec(), "secret",
+        Box(),
+        "wrk_1",
+        models.WorkerSpec(),
+        "secret",
         [models.Route(port=8787, url="https://daemon.example")],
     )
 
@@ -589,7 +617,10 @@ async def test_healthy_daemon_is_restarted_when_event_deployment_changes(monkeyp
     monkeypatch.setattr(sandbox, "_wait_for_daemon", wait_for_daemon)
 
     await sandbox.repair_daemon(
-        Box(), "wrk_1", models.WorkerSpec(), "secret",
+        Box(),
+        "wrk_1",
+        models.WorkerSpec(),
+        "secret",
         [models.Route(port=8787, url="https://daemon.example")],
     )
 
@@ -630,13 +661,17 @@ async def test_prepare_for_command_resumes_and_repairs_daemon(monkeypatch):
 
     monkeypatch.setattr(sandbox.vercel_sandbox, "resume_sandbox", resume_sandbox)
     monkeypatch.setattr(sandbox.git, "git_credentials", credentials)
-    async def identity(_user_id):
+
+    async def identity(user_id):
+        assert user_id == "user_actor"
         return None
 
-    async def github_credential(_user_id, *, required=True):
+    async def github_credential(user_id, *, required=True):
+        assert user_id == "user_actor"
         return None
 
-    async def vercel_credential(_user_id):
+    async def vercel_credential(user_id):
+        assert user_id == "user_actor"
         return None
 
     monkeypatch.setattr(sandbox.git, "configure", configure)
@@ -646,30 +681,47 @@ async def test_prepare_for_command_resumes_and_repairs_daemon(monkeypatch):
     monkeypatch.setattr(sandbox, "_network_policy", network_policy)
     monkeypatch.setattr(sandbox, "repair_daemon", repair)
     record = models.Worker(
-        id="wrk_1", chat_id="chat_1", sandbox_name="hatchery-wrk_1",
-        command_topic="topic", title="worker", status="running",
-        spec=models.WorkerSpec(), daemon_token="secret",
-        created_at="now", updated_at="now",
+        id="wrk_1",
+        chat_id="chat_1",
+        sandbox_name="hatchery-wrk_1",
+        command_topic="topic",
+        title="worker",
+        status="running",
+        spec=models.WorkerSpec(),
+        daemon_token="secret",
+        created_at="now",
+        updated_at="now",
     )
 
-    await sandbox.prepare_for_command(record)
+    await sandbox.prepare_for_command(record, actor_user_id="user_actor")
 
     assert calls == [
         ("resume", "hatchery-wrk_1"),
         ("update", {"execution_time_limit": sandbox.EXECUTION_TIME_LIMIT}),
         ("policy", "queue-policy"),
         ("git", "iad1", None),
-        ("repair", "wrk_1", "secret", [models.Route(port=8787, url="https://daemon.example")]),
+        (
+            "repair",
+            "wrk_1",
+            "secret",
+            [models.Route(port=8787, url="https://daemon.example")],
+        ),
     ]
 
 
 async def test_probe_route_rejects_undeclared_port():
     record = models.Worker(
-        id="wrk_1", chat_id="chat_1", sandbox_name="hatchery-wrk_1",
-        command_topic="topic", title="worker", status="running",
+        id="wrk_1",
+        chat_id="chat_1",
+        sandbox_name="hatchery-wrk_1",
+        command_topic="topic",
+        title="worker",
+        status="running",
         spec=models.WorkerSpec(ports=[3000]),
         routes=[models.Route(port=3000, url="https://app.example")],
-        daemon_token="secret", created_at="now", updated_at="now",
+        daemon_token="secret",
+        created_at="now",
+        updated_at="now",
     )
 
     try:
@@ -741,17 +793,30 @@ async def test_snapshot_create_and_restore(monkeypatch):
     monkeypatch.setattr(sandbox, "_network_policy", network_policy)
     monkeypatch.setattr(sandbox, "repair_daemon", repair)
     record = models.Worker(
-        id="wrk_1", chat_id="chat_1", sandbox_name="hatchery-wrk_1",
-        command_topic="topic", title="worker", status="running",
+        id="wrk_1",
+        chat_id="chat_1",
+        sandbox_name="hatchery-wrk_1",
+        command_topic="topic",
+        title="worker",
+        status="running",
         spec=models.WorkerSpec(),
         routes=[models.Route(port=8787, url="https://daemon.example")],
         daemon_token="secret",
-        created_at="now", updated_at="now",
+        created_at="now",
+        updated_at="now",
     )
 
     assert await sandbox.snapshot(record) == "snap_1"
     assert await sandbox.snapshot(record, "snap_1") == "snap_1"
-    assert calls == ["snapshot", "stop", ("update", {"current_snapshot_id": "snap_1"}), "resume", "policy", "git", "repair"]
+    assert calls == [
+        "snapshot",
+        "stop",
+        ("update", {"current_snapshot_id": "snap_1"}),
+        "resume",
+        "policy",
+        "git",
+        "repair",
+    ]
 
 
 def test_daemon_env_bridges_vercel_dev_queue_through_public_origin(monkeypatch):
@@ -777,9 +842,7 @@ def test_daemon_env_uses_placeholder_without_exposing_cloud_identity(monkeypatch
     monkeypatch.setenv("VERCEL_QUEUE_BASE_URL", "https://queues.example")
     monkeypatch.delenv("VERCEL_QUEUE_TOKEN", raising=False)
 
-    env = sandbox._daemon_env(
-        "wrk_1", models.WorkerSpec(), "secret", region="sfo1"
-    )
+    env = sandbox._daemon_env("wrk_1", models.WorkerSpec(), "secret", region="sfo1")
 
     assert "VERCEL_OIDC_TOKEN" not in env
     assert "VERCEL_DEPLOYMENT_ID" not in env
@@ -792,9 +855,7 @@ def test_daemon_env_uses_placeholder_without_exposing_cloud_identity(monkeypatch
 def test_daemon_env_uses_sandbox_region_when_runtime_region_is_missing(monkeypatch):
     monkeypatch.delenv("VERCEL_REGION", raising=False)
 
-    env = sandbox._daemon_env(
-        "wrk_1", models.WorkerSpec(), "secret", region="iad1"
-    )
+    env = sandbox._daemon_env("wrk_1", models.WorkerSpec(), "secret", region="iad1")
 
     assert env["VERCEL_REGION"] == "iad1"
 

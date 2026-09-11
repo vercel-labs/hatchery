@@ -7,7 +7,7 @@ async def _worker(monkeypatch):
     async def provision(worker_id, spec, daemon_token):
         return sandbox.Provisioned(f"hatchery-{worker_id}", [])
 
-    async def prepare_for_command(record):
+    async def prepare_for_command(record, **kwargs):
         pass
 
     monkeypatch.setattr(worker.sandbox, "provision", provision)

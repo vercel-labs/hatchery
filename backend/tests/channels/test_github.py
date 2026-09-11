@@ -26,10 +26,11 @@ def connect_stub(monkeypatch):
 
 
 class FakeBus:
-    def __init__(self, bound: dict | None = None) -> None:
+    def __init__(self, bound: dict | None = None, authorized: bool = False) -> None:
         self.dispatched: list[channels.Inbound] = []
         self.seen: set[str] = set()
         self.bound = bound
+        self.authorized = authorized
 
     async def dispatch(self, inbound: channels.Inbound) -> None:
         self.dispatched.append(inbound)
@@ -43,21 +44,36 @@ class FakeBus:
     async def binding(self, token: str) -> dict | None:
         return self.bound
 
+    async def authorize(self, inbound: channels.Inbound) -> bool:
+        return self.authorized
 
-def forwarded(payload: dict, event: str, delivery: str = "d1", auth: str = "Bearer good") -> channels.Webhook:
+
+def forwarded(
+    payload: dict, event: str, delivery: str = "d1", auth: str = "Bearer good"
+) -> channels.Webhook:
     return channels.Webhook(
         body=json.dumps(payload).encode(),
-        headers={"authorization": auth, "x-github-event": event, "x-github-delivery": delivery},
+        headers={
+            "authorization": auth,
+            "x-github-event": event,
+            "x-github-delivery": delivery,
+        },
     )
 
 
-def issue_comment(body: str = "@e2e-bot please port this", pull: bool = False, **overrides) -> dict:
+def issue_comment(
+    body: str = "@e2e-bot please port this", pull: bool = False, **overrides
+) -> dict:
     issue: dict = {"number": 5}
     if pull:
         issue["pull_request"] = {"url": "..."}
     payload = {
         "action": "created",
-        "comment": {"id": 900, "body": body, "html_url": "https://github.com/v/r/issues/5#issuecomment-900"},
+        "comment": {
+            "id": 900,
+            "body": body,
+            "html_url": "https://github.com/v/r/issues/5#issuecomment-900",
+        },
         "issue": issue,
         "repository": {"id": 42, "full_name": "vercel/repo"},
         "sender": {"id": 7, "login": "andrey", "type": "User"},
@@ -66,16 +82,22 @@ def issue_comment(body: str = "@e2e-bot please port this", pull: bool = False, *
     return payload
 
 
-async def handled(webhook: channels.Webhook, bus: FakeBus | None = None) -> tuple[channels.Ack, FakeBus]:
+async def handled(
+    webhook: channels.Webhook, bus: FakeBus | None = None
+) -> tuple[channels.Ack, FakeBus]:
     bus = bus or FakeBus()
-    ack = await github.channel(connector="github/e2e-bot", bot_name="e2e-bot").handle(webhook, bus)
+    ack = await github.channel(connector="github/e2e-bot", bot_name="e2e-bot").handle(
+        webhook, bus
+    )
     if ack.work is not None:
         await ack.work
     return ack, bus
 
 
 async def test_rejects_unverified_forward():
-    ack, bus = await handled(forwarded(issue_comment(), "issue_comment", auth="Bearer forged"))
+    ack, bus = await handled(
+        forwarded(issue_comment(), "issue_comment", auth="Bearer forged")
+    )
     assert ack.status == 401
     assert bus.dispatched == []
 
@@ -95,6 +117,41 @@ async def test_issue_comment_mention_dispatches():
     assert inbound.state["kind"] == "issue"
     assert inbound.state["number"] == 5
     assert inbound.state["sender_id"] == "7"
+    assert inbound.actor == {"sender_id": "7"}
+
+
+async def test_allowed_initial_mention_backfills_all_issue_comments():
+    comments = [
+        {
+            "id": 800,
+            "body": "context from a participant",
+            "html_url": "https://github.com/v/r/issues/5#issuecomment-800",
+            "user": {"id": 8, "login": "participant", "type": "User"},
+        },
+        {
+            "id": 900,
+            "body": "@e2e-bot please port this",
+            "html_url": "https://github.com/v/r/issues/5#issuecomment-900",
+            "user": {"id": 7, "login": "andrey", "type": "User"},
+        },
+    ]
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=comments)
+
+    channel = github.channel(
+        connector="github/e2e-bot",
+        bot_name="e2e-bot",
+        transport=httpx.MockTransport(responder),
+    )
+    bus = FakeBus(authorized=True)
+    ack = await channel.handle(forwarded(issue_comment(), "issue_comment"), bus)
+    assert ack.work is not None
+    await ack.work
+
+    assert [item.state["message_id"] for item in bus.dispatched] == [800, 900]
+    assert [item.invoke for item in bus.dispatched] == [False, True]
+    assert all(item.actor == {"sender_id": "7"} for item in bus.dispatched)
 
 
 async def test_pr_comment_gets_pull_token():
@@ -106,7 +163,12 @@ async def test_pr_comment_gets_pull_token():
 async def test_review_comment_threads_on_root():
     payload = {
         "action": "created",
-        "comment": {"id": 901, "in_reply_to_id": 800, "body": "@e2e-bot fix", "html_url": "u"},
+        "comment": {
+            "id": 901,
+            "in_reply_to_id": 800,
+            "body": "@e2e-bot fix",
+            "html_url": "u",
+        },
         "pull_request": {"number": 9},
         "repository": {"id": 42, "full_name": "vercel/repo"},
         "sender": {"login": "andrey", "type": "User"},
@@ -121,8 +183,13 @@ async def test_review_comment_threads_on_root():
 async def test_ignores_no_mention_bots_own_marker_and_other_events():
     cases = [
         forwarded(issue_comment(body="no mention here"), "issue_comment"),
-        forwarded(issue_comment(sender={"login": "e2e-bot[bot]", "type": "Bot"}), "issue_comment"),
-        forwarded(issue_comment(body=f"@e2e-bot hi\n\n{github.MARKER}"), "issue_comment"),
+        forwarded(
+            issue_comment(sender={"login": "e2e-bot[bot]", "type": "Bot"}),
+            "issue_comment",
+        ),
+        forwarded(
+            issue_comment(body=f"@e2e-bot hi\n\n{github.MARKER}"), "issue_comment"
+        ),
         forwarded(issue_comment(action="edited"), "issue_comment"),
         forwarded(issue_comment(), "issues"),
         forwarded(issue_comment(body="@e2e-bottle not us"), "issue_comment"),
@@ -150,19 +217,30 @@ def api_channel(calls: list) -> github.GitHubChannel:
         calls.append(request)
         return httpx.Response(201, json={"id": 1})
 
-    return github.channel(connector="github/e2e-bot", bot_name="e2e-bot", transport=httpx.MockTransport(responder))
+    return github.channel(
+        connector="github/e2e-bot",
+        bot_name="e2e-bot",
+        transport=httpx.MockTransport(responder),
+    )
 
 
 def state(kind: str = "issue") -> dict:
     return {
-        "owner": "vercel", "repo": "repo", "repository_id": 42, "kind": kind, "number": 5,
-        "root_comment_id": 800 if kind == "review_thread" else None, "comment_id": 900,
+        "owner": "vercel",
+        "repo": "repo",
+        "repository_id": 42,
+        "kind": kind,
+        "number": 5,
+        "root_comment_id": 800 if kind == "review_thread" else None,
+        "comment_id": 900,
     }
 
 
 async def test_turn_started_reacts_eyes_with_connect_token(connect_stub):
     calls: list[httpx.Request] = []
-    await api_channel(calls).on_event(channels.event(channels.protocol.TURN_STARTED), state())
+    await api_channel(calls).on_event(
+        channels.event(channels.protocol.TURN_STARTED), state()
+    )
     [request] = calls
     assert request.url.path == "/repos/vercel/repo/issues/comments/900/reactions"
     assert json.loads(request.read()) == {"content": "eyes"}
@@ -170,11 +248,11 @@ async def test_turn_started_reacts_eyes_with_connect_token(connect_stub):
     assert connect_stub == ["github/e2e-bot"]  # token minted from the connector
 
 
-
-
 async def test_reply_posts_issue_comment_with_marker():
     calls: list[httpx.Request] = []
-    await api_channel(calls).on_event(channels.event(channels.protocol.MESSAGE_COMPLETED, message="ported!"), state())
+    await api_channel(calls).on_event(
+        channels.event(channels.protocol.MESSAGE_COMPLETED, message="ported!"), state()
+    )
     [request] = calls
     assert request.url.path == "/repos/vercel/repo/issues/5/comments"
     assert json.loads(request.read())["body"] == f"ported!\n\n{github.MARKER}"
@@ -182,7 +260,10 @@ async def test_reply_posts_issue_comment_with_marker():
 
 async def test_reply_to_review_thread_uses_replies_endpoint():
     calls: list[httpx.Request] = []
-    await api_channel(calls).on_event(channels.event(channels.protocol.MESSAGE_COMPLETED, message="ok"), state("review_thread"))
+    await api_channel(calls).on_event(
+        channels.event(channels.protocol.MESSAGE_COMPLETED, message="ok"),
+        state("review_thread"),
+    )
     assert calls[0].url.path == "/repos/vercel/repo/pulls/5/comments/800/replies"
 
 
@@ -190,7 +271,10 @@ async def test_long_reply_is_chunked(monkeypatch):
     monkeypatch.setattr(github, "COMMENT_LIMIT", 40)
     calls: list[httpx.Request] = []
     size = 40 - len(github.MARKER) - 2
-    await api_channel(calls).on_event(channels.event(channels.protocol.MESSAGE_COMPLETED, message="x" * (size + 1)), state())
+    await api_channel(calls).on_event(
+        channels.event(channels.protocol.MESSAGE_COMPLETED, message="x" * (size + 1)),
+        state(),
+    )
     assert len(calls) == 2
     first, second = (json.loads(c.read())["body"] for c in calls)
     assert first == "x" * size + f"\n\n{github.MARKER}"
@@ -201,6 +285,12 @@ async def test_api_error_raises():
     def responder(request: httpx.Request) -> httpx.Response:
         return httpx.Response(403, json={"message": "Resource not accessible"})
 
-    ch = github.channel(connector="github/e2e-bot", bot_name="e2e-bot", transport=httpx.MockTransport(responder))
+    ch = github.channel(
+        connector="github/e2e-bot",
+        bot_name="e2e-bot",
+        transport=httpx.MockTransport(responder),
+    )
     with pytest.raises(RuntimeError, match="403"):
-        await ch.on_event(channels.event(channels.protocol.MESSAGE_COMPLETED, message="hi"), state())
+        await ch.on_event(
+            channels.event(channels.protocol.MESSAGE_COMPLETED, message="hi"), state()
+        )

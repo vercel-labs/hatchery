@@ -153,7 +153,9 @@ async def get(chat_id: str) -> models.Chat | None:
     if store.use_postgres():
         from store import db
 
-        row = await (await db.pool()).fetchrow("SELECT data FROM hatchery_chats WHERE id = $1", chat_id)
+        row = await (await db.pool()).fetchrow(
+            "SELECT data FROM hatchery_chats WHERE id = $1", chat_id
+        )
         return _chat(row["data"]) if row is not None else None
     with _lock:
         return _read_chat(chat_id)
@@ -192,10 +194,15 @@ async def list_all() -> list[models.Chat]:
     if store.use_postgres():
         from store import db
 
-        rows = await (await db.pool()).fetch("SELECT data FROM hatchery_chats ORDER BY created_at DESC")
+        rows = await (await db.pool()).fetch(
+            "SELECT data FROM hatchery_chats ORDER BY created_at DESC"
+        )
         return [_chat(row["data"]) for row in rows]
     with _lock:
-        chats = [_read_chat(urllib.parse.unquote(p.stem)) for p in (store.data_dir() / "chats").glob("*.json")]
+        chats = [
+            _read_chat(urllib.parse.unquote(p.stem))
+            for p in (store.data_dir() / "chats").glob("*.json")
+        ]
         found = [c for c in chats if c is not None]
         found.sort(key=lambda c: c.created_at, reverse=True)
         return found
@@ -320,7 +327,9 @@ async def set_topic(chat_id: str, topic: str) -> models.Chat | None:
         return chat
 
 
-async def finish(chat_id: str, status: str, artifact: str | None = None) -> models.Chat | None:
+async def finish(
+    chat_id: str, status: str, artifact: str | None = None
+) -> models.Chat | None:
     """Record a chat's worker status and optional terminal artifact."""
     if store.use_postgres():
         from store import db
@@ -461,33 +470,23 @@ async def claim(
                     if isinstance(owner["state"], str)
                     else dict(owner["state"])
                 )
-                if binding_token != token and saved_state.get("team_id") != state.get("team_id"):
+                if binding_token != token and saved_state.get("team_id") != state.get(
+                    "team_id"
+                ):
                     owner = None
             if owner is not None:
                 chat = _chat(owner["data"])
-                identity_matches = _binding_identity_matches(saved_state, state)
-                if user_id is not None and chat.user_id is None and identity_matches:
-                    claimed = await conn.fetchrow(
-                        "UPDATE hatchery_chats SET data = data || "
-                        "jsonb_build_object('user_id', $2::text, 'author_display_name', $3::text) "
-                        "WHERE id = $1 RETURNING data",
-                        chat.id,
-                        user_id,
-                        author_display_name,
-                    )
-                    chat = _chat(claimed["data"])
-                if user_id is None or chat.user_id == user_id:
+                await conn.execute(
+                    "UPDATE hatchery_bindings SET state = state || $2::jsonb WHERE token = $1",
+                    binding_token,
+                    json.dumps(state),
+                )
+                if binding_token != token:
                     await conn.execute(
-                        "UPDATE hatchery_bindings SET state = state || $2::jsonb WHERE token = $1",
+                        "UPDATE hatchery_bindings SET token = $2 WHERE token = $1",
                         binding_token,
-                        json.dumps(state),
+                        token,
                     )
-                    if binding_token != token:
-                        await conn.execute(
-                            "UPDATE hatchery_bindings SET token = $2 WHERE token = $1",
-                            binding_token,
-                            token,
-                        )
                 return chat, False
             inserted = await conn.fetchrow(
                 "INSERT INTO hatchery_bindings (token, chat_id, channel, state) "
@@ -511,12 +510,11 @@ async def claim(
                 token,
             )
             chat = _chat(owner["data"])
-            if user_id is None or chat.user_id == user_id:
-                await conn.execute(
-                    "UPDATE hatchery_bindings SET state = state || $2::jsonb WHERE token = $1",
-                    token,
-                    json.dumps(state),
-                )
+            await conn.execute(
+                "UPDATE hatchery_bindings SET state = state || $2::jsonb WHERE token = $1",
+                token,
+                json.dumps(state),
+            )
             return chat, False
 
     with _lock:
@@ -535,51 +533,48 @@ async def claim(
         if existing is not None:
             owner = _read_chat(existing["chat_id"])
             if owner is not None:
-                identity_matches = _binding_identity_matches(existing.get("state", {}), state)
-                if user_id is not None and owner.user_id is None and identity_matches:
-                    owner.user_id = user_id
-                    owner.author_display_name = author_display_name
-                    _write_chat(owner)
-                if user_id is None or owner.user_id == user_id:
-                    existing["state"] = {**existing.get("state", {}), **state}
-                    if binding_token != token:
-                        bindings_.pop(binding_token)
-                        bindings_[token] = existing
-                    _write_bindings(bindings_)
+                existing["state"] = {**existing.get("state", {}), **state}
+                if binding_token != token:
+                    bindings_.pop(binding_token)
+                    bindings_[token] = existing
+                _write_bindings(bindings_)
                 return owner, False
-        bindings_[token] = {"chat_id": candidate.id, "channel": channel, "state": dict(state)}
+        bindings_[token] = {
+            "chat_id": candidate.id,
+            "channel": channel,
+            "state": dict(state),
+        }
         _write_bindings(bindings_)
         _write_chat(candidate)
         return candidate, True
-
-
-def _binding_identity_matches(saved: dict, inbound: dict) -> bool:
-    """Only a Slack identity that created a legacy binding may claim its chat."""
-    return bool(
-        saved.get("team_id")
-        and saved.get("user_id")
-        and saved.get("team_id") == inbound.get("team_id")
-        and saved.get("user_id") == inbound.get("user_id")
-    )
 
 
 async def bindings(chat_id: str) -> list[Binding]:
     if store.use_postgres():
         from store import db
 
-        rows = await (await db.pool()).fetch("SELECT * FROM hatchery_bindings WHERE chat_id = $1", chat_id)
+        rows = await (await db.pool()).fetch(
+            "SELECT * FROM hatchery_bindings WHERE chat_id = $1", chat_id
+        )
         return [
             Binding(
                 token=row["token"],
                 chat_id=row["chat_id"],
                 channel=row["channel"],
-                state=json.loads(row["state"]) if isinstance(row["state"], str) else row["state"],
+                state=json.loads(row["state"])
+                if isinstance(row["state"], str)
+                else row["state"],
             )
             for row in rows
         ]
     with _lock:
         return [
-            Binding(token=token, chat_id=data["chat_id"], channel=data["channel"], state=data.get("state", {}))
+            Binding(
+                token=token,
+                chat_id=data["chat_id"],
+                channel=data["channel"],
+                state=data.get("state", {}),
+            )
             for token, data in _read_bindings().items()
             if data["chat_id"] == chat_id
         ]
@@ -591,7 +586,8 @@ async def dedupe(key: str) -> bool:
         from store import db
 
         row = await (await db.pool()).fetchrow(
-            "INSERT INTO hatchery_dedupe (key) VALUES ($1) ON CONFLICT DO NOTHING RETURNING key", key
+            "INSERT INTO hatchery_dedupe (key) VALUES ($1) ON CONFLICT DO NOTHING RETURNING key",
+            key,
         )
         return row is not None
     with _lock:
@@ -611,7 +607,9 @@ def _now() -> str:
 
 def _chat(raw) -> models.Chat:
     # asyncpg returns jsonb as str unless a codec is installed
-    return models.Chat.model_validate_json(raw if isinstance(raw, str) else json.dumps(raw))
+    return models.Chat.model_validate_json(
+        raw if isinstance(raw, str) else json.dumps(raw)
+    )
 
 
 def _read_chat(chat_id: str) -> models.Chat | None:

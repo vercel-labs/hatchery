@@ -66,8 +66,7 @@ def agent_environment(env: dict[str, str] | None = None) -> dict[str, str]:
     # CLIs require a local credential before sending a request. Sandbox network
     # policy replaces these non-secret markers when the user connected access.
     result["GH_TOKEN"] = "sandbox-network-policy-placeholder"
-    if source.get("HATCHERY_VERCEL_CLI_CONNECTED") == "1":
-        result["VERCEL_TOKEN"] = "sandbox-vercel-policy-placeholder"
+    result["VERCEL_TOKEN"] = "sandbox-vercel-policy-placeholder"
     return result
 
 

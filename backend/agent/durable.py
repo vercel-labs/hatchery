@@ -24,6 +24,7 @@ class TurnInput(pydantic.BaseModel):
     turn_id: str = "turn_unknown"
     origin: typing.Literal["ui", "channel", "worker", "cron"]
     task_id: str | None = None
+    actor_user_id: str | None = None
 
 
 class PreparedTurn(pydantic.BaseModel):
@@ -58,7 +59,11 @@ async def prepare_turn(turn: TurnInput) -> PreparedTurn:
                 if not cached_reply and task.completion_sequence is not None:
                     marker = f"subagent_result_{task.id}_{task.completion_sequence}"
                     result_index = next(
-                        (index for index, message in enumerate(stored) if message.id == marker),
+                        (
+                            index
+                            for index, message in enumerate(stored)
+                            if message.id == marker
+                        ),
                         -1,
                     )
                     cached_reply = next(
@@ -122,6 +127,7 @@ async def create_sandbox_step(
     git_sha: str | None,
     title: str,
     size: typing.Literal["small", "big"],
+    actor_user_id: str | None = None,
 ) -> dict[str, typing.Any]:
     from agent import sandbox
 
@@ -136,6 +142,7 @@ async def create_sandbox_step(
             title=title,
             size=size,
         ),
+        actor_user_id=actor_user_id,
     )
     return created.model_dump(exclude={"daemon_token"})
 
@@ -152,11 +159,17 @@ async def list_sandboxes_step(chat_id: str) -> list[dict[str, typing.Any]]:
 
 @workflow.step(max_retries=0)
 async def create_subagent_step(
-    chat_id: str, sandbox_id: str, task: str, model: str
+    chat_id: str,
+    sandbox_id: str,
+    task: str,
+    model: str,
+    actor_user_id: str | None = None,
 ) -> dict[str, typing.Any]:
     from agent import sandbox
 
-    created = await sandbox.launch_task(chat_id, sandbox_id, task, model)
+    created = await sandbox.launch_task(
+        chat_id, sandbox_id, task, model, actor_user_id=actor_user_id
+    )
     return {
         "subagent_id": created.id,
         "task_id": created.id,
@@ -167,7 +180,10 @@ async def create_subagent_step(
 
 @workflow.step(max_retries=0)
 async def message_subagent_step(
-    chat_id: str, message: str, subagent_id: str | None
+    chat_id: str,
+    message: str,
+    subagent_id: str | None,
+    actor_user_id: str | None = None,
 ) -> dict[str, typing.Any]:
     from agent import sandbox
     import worker
@@ -175,7 +191,9 @@ async def message_subagent_step(
     task = await worker.get_task(chat_id, subagent_id)
     if task is None:
         raise ValueError("no subagent can accept a message")
-    updated = await sandbox.send_task_input(chat_id, task.id, message)
+    updated = await sandbox.send_task_input(
+        chat_id, task.id, message, actor_user_id=actor_user_id
+    )
     return {"subagent_id": updated.id, "state": updated.status}
 
 
@@ -202,21 +220,26 @@ async def require_attention_step(
 
 @workflow.step
 async def find_channels_step(
-    chat_id: str, provider: typing.Literal["slack", "github"], query: str
+    chat_id: str,
+    provider: typing.Literal["slack", "github"],
+    query: str,
+    actor_user_id: str | None = None,
 ) -> list[dict] | dict:
     from channels import destinations
 
     try:
-        return await destinations.find_channels(chat_id, provider, query)
+        return await destinations.find_channels(chat_id, provider, query, actor_user_id)
     except destinations.SlackScopeRequired as error:
         return error.result
 
 
 @workflow.step
-async def find_people_step(chat_id: str, query: str) -> list[dict]:
+async def find_people_step(
+    chat_id: str, query: str, actor_user_id: str | None = None
+) -> list[dict]:
     from channels import destinations
 
-    return await destinations.find_people(chat_id, query)
+    return await destinations.find_people(chat_id, query, actor_user_id)
 
 
 @workflow.step(max_retries=0)
@@ -227,6 +250,7 @@ async def start_thread_step(
     text: str,
     people: list[str] | None,
     delivery_key: str,
+    actor_user_id: str | None = None,
 ) -> dict:
     from channels import destinations
 
@@ -237,6 +261,7 @@ async def start_thread_step(
         text,
         people,
         delivery_key=delivery_key,
+        actor_user_id=actor_user_id,
     )
 
 
@@ -264,7 +289,9 @@ async def read_notes_step(
 
 
 @workflow.step(max_retries=0)
-async def create_note_step(chat_id: str, filename: str, content: str) -> dict[str, typing.Any]:
+async def create_note_step(
+    chat_id: str, filename: str, content: str
+) -> dict[str, typing.Any]:
     from app import server
     from store import notes
 
@@ -338,6 +365,7 @@ async def create_sandbox(
         git_sha,
         title,
         size,
+        current_agent.get().actor_user_id,
     )
 
 
@@ -364,8 +392,9 @@ async def create_subagent(
     sandbox ID, and state mean the launch was accepted and work has started; they
     are not the completed result.
     """
+    agent = current_agent.get()
     return await create_subagent_step(
-        current_agent.get().chat_id, sandbox_id, task, model
+        agent.chat_id, sandbox_id, task, model, agent.actor_user_id
     )
 
 
@@ -383,8 +412,9 @@ async def message_subagent(
     a stale completion does not mean this message failed or require replacement
     work.
     """
+    agent = current_agent.get()
     return await message_subagent_step(
-        current_agent.get().chat_id, message, subagent_id
+        agent.chat_id, message, subagent_id, agent.actor_user_id
     )
 
 
@@ -430,7 +460,8 @@ async def find_channels(
     ``query`` describes the destination. Return real destination IDs for later
     use; an error result may describe required Slack scope.
     """
-    return await find_channels_step(current_agent.get().chat_id, provider, query)
+    agent = current_agent.get()
+    return await find_channels_step(agent.chat_id, provider, query, agent.actor_user_id)
 
 
 @ai.tool
@@ -439,7 +470,8 @@ async def find_people(query: str) -> list[dict]:
 
     Use the returned Hatchery IDs in communication tools; never invent handles.
     """
-    return await find_people_step(current_agent.get().chat_id, query)
+    agent = current_agent.get()
+    return await find_people_step(agent.chat_id, query, agent.actor_user_id)
 
 
 @ai.tool
@@ -464,6 +496,7 @@ async def start_thread(
         text,
         people,
         agent.turn_id,
+        agent.actor_user_id,
     )
     if result.get("status") == "sent":
         agent.linked = True
@@ -561,12 +594,12 @@ class DurableDispatcher(ai.Agent):
         turn_id: str | None = None,
         *,
         linked: bool = False,
+        actor_user_id: str | None = None,
     ) -> None:
-        super().__init__(
-            tools=[*BASE_TOOLS, *([] if linked else [start_thread])]
-        )
+        super().__init__(tools=[*BASE_TOOLS, *([] if linked else [start_thread])])
         self.chat_id = chat_id
         self.turn_id = turn_id or "turn_unknown"
+        self.actor_user_id = actor_user_id
         self.writer = writer
         self.linked = linked
 
@@ -630,7 +663,9 @@ async def register_turn(turn: TurnInput, run_id: str) -> int:
         if turn.origin == "cron" and not await jobs.claim_run(turn.turn_id, run_id):
             committed = await jobs.started_run(turn.turn_id)
             owner = committed or "a paused or deleted job"
-            raise RuntimeError(f"scheduled turn {turn.turn_id} is already owned by {owner}")
+            raise RuntimeError(
+                f"scheduled turn {turn.turn_id} is already owned by {owner}"
+            )
         existing = next(
             (
                 index
@@ -652,6 +687,7 @@ async def register_turn(turn: TurnInput, run_id: str) -> int:
                     "run_id": run_id,
                     "origin": turn.origin,
                     "task_id": turn.task_id,
+                    "actor_user_id": turn.actor_user_id,
                 },
             )
         announced = any(
@@ -702,6 +738,7 @@ def lifecycle_event(
         "type": event_type,
         "turn_id": turn.turn_id,
         "chat_id": turn.chat_id,
+        "actor_user_id": turn.actor_user_id,
         "error": error,
     }
     return data
@@ -737,7 +774,9 @@ async def ship_spans(spans: list[ai.experimental_telemetry.Span]) -> None:
 
 
 @workflow.step(max_retries=0)
-async def emit_turn_event(chat_id: str, event_type: str, error: str | None = None) -> None:
+async def emit_turn_event(
+    chat_id: str, event_type: str, error: str | None = None
+) -> None:
     """Emit a channel lifecycle event outside replayable workflow code."""
     from app import server
     import channels
@@ -815,12 +854,17 @@ async def run_turn(turn: TurnInput) -> None:
                     origin=turn.origin,
                     workflow_run_id=run_id,
                     task_id=turn.task_id or "",
+                    actor_user_id=turn.actor_user_id or "",
                 )
                 if prepared.cached_reply:
                     replies = [prepared.cached_reply]
                 else:
                     agent = DurableDispatcher(
-                        turn.chat_id, writer, turn.turn_id, linked=prepared.linked
+                        turn.chat_id,
+                        writer,
+                        turn.turn_id,
+                        linked=prepared.linked,
+                        actor_user_id=turn.actor_user_id,
                     )
                     token = current_agent.set(agent)
                     try:
@@ -871,6 +915,7 @@ async def start_turn(
     origin: typing.Literal["ui", "channel", "worker", "cron"],
     task_id: str | None = None,
     turn_id: str | None = None,
+    actor_user_id: str | None = None,
 ) -> "turns.ActiveTurn":
     """Claim, start, register, and announce one durable dispatcher turn."""
     import uuid
@@ -887,6 +932,7 @@ async def start_turn(
                 turn_id=turn_id,
                 origin=origin,
                 task_id=task_id,
+                actor_user_id=actor_user_id,
             ),
         )
         payload = TurnInput(
@@ -894,6 +940,9 @@ async def start_turn(
             turn_id=turn_id,
             origin=origin,
             task_id=task_id,
+            actor_user_id=actor_user_id,
         )
         generation = await register_turn.func(payload, run.run_id)
-        return turns.ActiveTurn(turn_id, run.run_id, origin, task_id, generation)
+        return turns.ActiveTurn(
+            turn_id, run.run_id, origin, task_id, generation, actor_user_id
+        )

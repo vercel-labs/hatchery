@@ -35,7 +35,11 @@ class WorkerSpec(pydantic.BaseModel):
     def valid_repos(cls, repos: list[str]) -> list[str]:
         for repo in repos:
             parts = repo.split("/")
-            if len(parts) != 2 or not all(parts) or any(part.strip() != part for part in parts):
+            if (
+                len(parts) != 2
+                or not all(parts)
+                or any(part.strip() != part for part in parts)
+            ):
                 raise ValueError("repos must use owner/repo form")
         return repos
 
@@ -58,7 +62,9 @@ class WorkerSpec(pydantic.BaseModel):
     def normalize(self):
         if (self.branch or self.git_sha) and not self.repos:
             raise ValueError("branch and git_sha require a main repo")
-        if self.size is not None and (self.vcpus is not None or self.memory is not None):
+        if self.size is not None and (
+            self.vcpus is not None or self.memory is not None
+        ):
             raise ValueError("size cannot be combined with legacy vcpus or memory")
         if self.vcpus is not None and self.vcpus < 1:
             raise ValueError("legacy vcpus must be positive")
@@ -118,6 +124,7 @@ class Task(pydantic.BaseModel):
     id: str
     chat_id: str
     worker_id: str
+    user_id: str | None = None
     title: str
     prompt: str
     model: str

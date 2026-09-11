@@ -67,6 +67,20 @@ def _spawn(coro) -> None:
     task.add_done_callback(done)
 
 
+async def _channel_user(channel: str, state: dict) -> tuple[str | None, dict | None]:
+    user_id = None
+    if channel == "slack":
+        user_id = await connections.auth_store.slack_user(
+            str(state.get("team_id", "")), str(state.get("user_id", ""))
+        )
+    elif channel == "github":
+        user_id = await connections.auth_store.github_user(
+            str(state.get("sender_id", ""))
+        )
+    user = await connections.auth_store.get_user(user_id) if user_id else None
+    return user_id, user
+
+
 class _StoreHub:
     """Land inbound messages in a chat and run one dispatcher turn.
 
@@ -77,22 +91,13 @@ class _StoreHub:
     async def dispatch(self, channel: str, inbound: channels.Inbound) -> None:
         async with ai.experimental_telemetry.span("channel.route") as span:
             span.set_attrs(channel=channel)
-            user_id = None
-            if channel == "slack":
-                user_id = await connections.auth_store.slack_user(
-                    str(inbound.state.get("team_id", "")),
-                    str(inbound.state.get("user_id", "")),
-                )
-            elif channel == "github":
-                user_id = await connections.auth_store.github_user(
-                    str(inbound.state.get("sender_id", ""))
-                )
-            user = None
-            if channel in {"slack", "github"}:
-                user = await connections.auth_store.get_user(user_id) if user_id else None
-                if not auth.allowed_user(user):
-                    span.set_attrs(ignored=f"unconnected_or_disallowed_{channel}_user")
-                    return
+            actor_id, actor = await _channel_user(
+                channel, inbound.actor or inbound.state
+            )
+            if inbound.actor is None or inbound.actor == inbound.state:
+                author_user = actor
+            else:
+                _, author_user = await _channel_user(channel, inbound.state)
             found = await spaces.list_all() or [await spaces.default()]
             title = inbound.title or inbound.text.strip().splitlines()[0][:80]
             token = f"{channel}:{inbound.token}"
@@ -101,6 +106,10 @@ class _StoreHub:
                 token = f"slack:{inbound.state['team_id']}:{inbound.token}"
                 legacy_token = f"slack:{inbound.token}"
             linked = await chats.binding(token)
+            actor_allowed = auth.allowed_user(actor)
+            if channel in {"slack", "github"} and linked is None and not actor_allowed:
+                span.set_attrs(ignored=f"unconnected_or_disallowed_{channel}_user")
+                return
             if linked is not None:
                 chat = await chats.get(linked.chat_id)
                 if chat is None:
@@ -114,16 +123,15 @@ class _StoreHub:
                     None,
                     title,
                     inbound.state,
-                    user_id=user_id,
-                    author_display_name=_user_display_name(user),
+                    user_id=actor_id,
+                    author_display_name=_user_display_name(actor),
                     legacy_token=legacy_token,
                 )
-            if linked is None and user_id is not None and chat.user_id != user_id:
-                span.set_attrs(ignored="owned_by_another_user", **{"chat.id": chat.id})
-                return
             span.set_attrs({"chat.id": chat.id}, accepted=True)
             async with telemetry.use_chat(chat.id):
-                async with ai.experimental_telemetry.span("channel.dispatch") as dispatch_span:
+                async with ai.experimental_telemetry.span(
+                    "channel.dispatch"
+                ) as dispatch_span:
                     async with turns.run(chat.id):
                         chat = await chats.get(chat.id) or chat
                         dispatch_span.set_attrs(
@@ -141,16 +149,24 @@ class _StoreHub:
                         source_id = str(inbound.state.get("message_id", ""))
                         message = ai.user_message(inbound.text)
                         if source_id:
-                            message.id = "inbound_" + hashlib.sha256(
-                                f"{token}:{source_id}".encode()
-                            ).hexdigest()
-                        author = _user_display_name(user) or _inbound_author(inbound)
-                        display_text = str(inbound.state.get("display_text", inbound.text))
+                            message.id = (
+                                "inbound_"
+                                + hashlib.sha256(
+                                    f"{token}:{source_id}".encode()
+                                ).hexdigest()
+                            )
+                        author = _user_display_name(author_user) or _inbound_author(
+                            inbound
+                        )
+                        display_text = str(
+                            inbound.state.get("display_text", inbound.text)
+                        )
                         message.provider_metadata = {
                             "hatchery": {
                                 "origin": channel,
                                 "author": author,
                                 "display_text": display_text,
+                                "actor_user_id": actor_id if actor_allowed else None,
                             }
                         }
                         known = {saved.id for saved in await _transcript(chat.id)}
@@ -179,7 +195,9 @@ class _StoreHub:
                             )
                             return
 
-                        if chat.space_id is None:
+                        if chat.space_id is None and (
+                            actor_allowed or channel not in {"slack", "github"}
+                        ):
                             await _classify_chat(
                                 chat.id,
                                 inbound.text,
@@ -194,8 +212,11 @@ class _StoreHub:
                             chat = await chats.get(chat.id) or chat
                         if created:
                             _spawn(_name_chat(chat.id, inbound.text))
+                        invoke = inbound.invoke and (
+                            actor_allowed or channel not in {"slack", "github"}
+                        )
                         dispatch_span.set_attrs(
-                            {"space.id": chat.space_id or ""}, invoke=inbound.invoke
+                            {"space.id": chat.space_id or ""}, invoke=invoke
                         )
                         log.info(
                             "inbound %s -> %s chat %s",
@@ -203,8 +224,12 @@ class _StoreHub:
                             "new" if created else "existing",
                             chat.id,
                         )
-                        if inbound.invoke:
-                            await _run_inbound_turn(chat.id)
+                        if invoke:
+                            await _run_inbound_turn(chat.id, actor_id)
+
+    async def authorize(self, channel: str, inbound: channels.Inbound) -> bool:
+        _, user = await _channel_user(channel, inbound.actor or inbound.state)
+        return auth.allowed_user(user)
 
     async def dedupe(self, key: str) -> bool:
         return await chats.dedupe(key)
@@ -270,7 +295,11 @@ async def _classify_chat(
                 chat_id,
                 channels.event(
                     channels.protocol.SPACE_ASSIGNED,
-                    space={"id": selected.id, "name": selected.name, "color": selected.color},
+                    space={
+                        "id": selected.id,
+                        "name": selected.name,
+                        "color": selected.color,
+                    },
                 ),
             )
             return selected
@@ -305,20 +334,17 @@ async def browser_session(request: fastapi.Request, call_next):
     user = await auth.current_user(request) if path.startswith("/api/") else None
     request.state.user = user
     if path.startswith("/api/") and not public and user is None:
-        return fastapi.responses.JSONResponse({"detail": "sign in required"}, status_code=401)
-    match = re.match(r"^/api/chats/([^/]+)", path) or re.match(
-        r"^/api/chat/([^/]+)/stream$", path
-    )
-    if match is not None and user is not None:
-        chat = await chats.get(match.group(1))
-        if chat is not None and chat.user_id is None and chat.trigger == "ui":
-            chat = await chats.claim_user(
-                chat.id, user["id"], _user_display_name(user)
-            )
-        if chat is not None and chat.user_id != user["id"]:
-            return fastapi.responses.JSONResponse({"detail": "unknown chat"}, status_code=404)
-    if path.startswith("/api/") and request.method not in {"GET", "HEAD", "OPTIONS"} and not auth.valid_origin(request):
-        return fastapi.responses.JSONResponse({"detail": "invalid origin"}, status_code=403)
+        return fastapi.responses.JSONResponse(
+            {"detail": "sign in required"}, status_code=401
+        )
+    if (
+        path.startswith("/api/")
+        and request.method not in {"GET", "HEAD", "OPTIONS"}
+        and not auth.valid_origin(request)
+    ):
+        return fastapi.responses.JSONResponse(
+            {"detail": "invalid origin"}, status_code=403
+        )
     return await call_next(request)
 
 
@@ -385,7 +411,9 @@ async def github_return(request: fastapi.Request):
     try:
         return await connections.finish_github(user)
     except connections.ConnectionRequired as error:
-        raise fastapi.HTTPException(409, "GitHub authorization was not completed") from error
+        raise fastapi.HTTPException(
+            409, "GitHub authorization was not completed"
+        ) from error
 
 
 @app.delete("/api/connections/github", status_code=204)
@@ -417,7 +445,9 @@ async def slack_return(request: fastapi.Request):
     try:
         return await connections.finish_slack(request.state.user)
     except connections.ConnectionRequired as error:
-        raise fastapi.HTTPException(409, "Slack authorization was not completed") from error
+        raise fastapi.HTTPException(
+            409, "Slack authorization was not completed"
+        ) from error
 
 
 @app.delete("/api/connections/slack", status_code=204)
@@ -436,9 +466,7 @@ async def vercel_cli_connection(request: fastapi.Request) -> dict:
 
 
 @app.put("/api/connections/vercel-cli")
-async def connect_vercel_cli(
-    request: fastapi.Request, body: VercelCLIRequest
-) -> dict:
+async def connect_vercel_cli(request: fastapi.Request, body: VercelCLIRequest) -> dict:
     user = request.state.user
     try:
         connection = await connections.connect_vercel_cli(user["id"], body.token)
@@ -551,7 +579,11 @@ class UpdateSpaceResourcesRequest(pydantic.BaseModel):
     def valid_repos(cls, repos: list[str]) -> list[str]:
         for repo in repos:
             parts = repo.split("/")
-            if len(parts) != 2 or not all(parts) or any(part.strip() != part for part in parts):
+            if (
+                len(parts) != 2
+                or not all(parts)
+                or any(part.strip() != part for part in parts)
+            ):
                 raise ValueError("repos must use owner/repo form")
         return repos
 
@@ -741,7 +773,9 @@ async def create_job(
 
 
 @app.put("/api/jobs/{job_id}")
-async def update_job(job_id: str, body: JobRequest, request: fastapi.Request) -> JobResponse:
+async def update_job(
+    job_id: str, body: JobRequest, request: fastapi.Request
+) -> JobResponse:
     await _owned_job(job_id, request.state.user["id"])
     updated = await jobs.update(job_id, body.schedule, body.prompt)
     assert updated is not None
@@ -789,7 +823,15 @@ async def cron_heartbeat(request: fastapi.Request) -> dict:
         if isinstance(registered, str):
             await jobs.mark_started(execution, registered)
             continue
-        await durable.start_turn(execution.chat_id, "cron", turn_id=execution.turn_id)
+        job = await jobs.get(execution.job_id)
+        if job is None:
+            continue
+        await durable.start_turn(
+            execution.chat_id,
+            "cron",
+            turn_id=execution.turn_id,
+            actor_user_id=job.owner_id,
+        )
         started += 1
     await jobs.cleanup(now)
     return {"ok": True, "started": started}
@@ -797,16 +839,7 @@ async def cron_heartbeat(request: fastapi.Request) -> dict:
 
 @app.get("/api/chats")
 async def list_chats(request: fastapi.Request) -> list[models.Chat]:
-    user = request.state.user
-    found = []
-    if user is not None:
-        for chat in await chats.list_all():
-            if chat.user_id is None and chat.trigger == "ui":
-                chat = await chats.claim_user(
-                    chat.id, user["id"], _user_display_name(user)
-                ) or chat
-            if chat.user_id == user["id"]:
-                found.append(chat)
+    found = await chats.list_all()
     for chat in found:
         if not chat.trigger.startswith("slack:") or chat.title.startswith("slack:"):
             continue
@@ -823,12 +856,16 @@ class CreateChatRequest(pydantic.BaseModel):
 
 
 @app.post("/api/chats")
-async def create_chat(request: CreateChatRequest, http_request: fastapi.Request) -> models.Chat:
+async def create_chat(
+    request: CreateChatRequest, http_request: fastapi.Request
+) -> models.Chat:
     user = http_request.state.user
     found = await spaces.list_all()
     if not found:
         found = [await spaces.default()]
-    if request.space_id is not None and not any(space.id == request.space_id for space in found):
+    if request.space_id is not None and not any(
+        space.id == request.space_id for space in found
+    ):
         raise fastapi.HTTPException(404, "unknown space")
     if request.id is not None:
         try:
@@ -882,7 +919,9 @@ async def mark_chat_seen(chat_id: str) -> models.Chat:
 
 
 @app.patch("/api/chats/{chat_id}/space")
-async def assign_chat_space(chat_id: str, request: AssignChatSpaceRequest) -> models.Chat:
+async def assign_chat_space(
+    chat_id: str, request: AssignChatSpaceRequest
+) -> models.Chat:
     if await spaces.get(request.space_id) is None:
         raise fastapi.HTTPException(404, "unknown space")
     if await chats.get(chat_id) is None:
@@ -907,7 +946,9 @@ async def chat_events(
         try:
             while True:
                 try:
-                    index, event = await asyncio.wait_for(asyncio.shield(pending), timeout=30)
+                    index, event = await asyncio.wait_for(
+                        asyncio.shield(pending), timeout=30
+                    )
                 except TimeoutError:
                     yield ": keepalive\n\n"
                     continue
@@ -948,9 +989,7 @@ async def chat_messages(chat_id: str) -> list[ai.ui.ai_sdk.UIMessage]:
         source = metadata.get(message.id, {})
         if source.get("origin"):
             message.metadata = {
-                key: source[key]
-                for key in ("origin", "author")
-                if key in source
+                key: source[key] for key in ("origin", "author") if key in source
             }
         for part in message.parts:
             if getattr(part, "type", None) != "text":
@@ -958,12 +997,19 @@ async def chat_messages(chat_id: str) -> list[ai.ui.ai_sdk.UIMessage]:
             if "display_text" in source:
                 part.text = source["display_text"]
                 continue
-            for tag, origin in (("slack_message", "slack"), ("github_context", "github")):
+            for tag, origin in (
+                ("slack_message", "slack"),
+                ("github_context", "github"),
+            ):
                 match = re.fullmatch(
-                    rf'<{tag}\b[^>]*>\s*(.*?)\s*</{tag}>', part.text, re.DOTALL
+                    rf"<{tag}\b[^>]*>\s*(.*?)\s*</{tag}>", part.text, re.DOTALL
                 )
                 if match:
-                    part.text = html.unescape(match.group(1)) if origin == "slack" else match.group(1)
+                    part.text = (
+                        html.unescape(match.group(1))
+                        if origin == "slack"
+                        else match.group(1)
+                    )
                     message.metadata = {**(message.metadata or {}), "origin": origin}
                     break
     return messages
@@ -986,12 +1032,6 @@ async def chat(
             if current is None:
                 raise fastapi.HTTPException(404, "unknown chat")
             user = http_request.state.user
-            if current.user_id is None and current.trigger == "ui":
-                current = await chats.claim_user(
-                    current.id, user["id"], _user_display_name(user)
-                ) or current
-            if current.user_id != user["id"]:
-                raise fastapi.HTTPException(404, "unknown chat")
             if current.archived_at is not None:
                 raise fastapi.HTTPException(
                     409, "chat is archived; unarchive it before posting"
@@ -1003,8 +1043,17 @@ async def chat(
             stored = await _transcript(request.chat_id)
             known = {message.id for message in stored}
             received = []
+            author = _user_display_name(user) or "User"
             for message in incoming:
                 if message.role == "user" and message.id not in known:
+                    message.provider_metadata = {
+                        **(message.provider_metadata or {}),
+                        "hatchery": {
+                            "origin": "ui",
+                            "author": author,
+                            "actor_user_id": user["id"],
+                        },
+                    }
                     await events.append(
                         request.chat_id,
                         "messages",
@@ -1014,9 +1063,8 @@ async def chat(
                     known.add(message.id)
                     received.append(message)
             slack_attribution = {}
-            if received and current.user_id:
-                user = await connections.auth_store.get_user(current.user_id)
-                identity = (user or {}).get("slack") or {}
+            if received:
+                identity = user.get("slack") or {}
                 if identity.get("team_id") and identity.get("user_id"):
                     slack_attribution = {
                         "slack_team_id": identity["team_id"],
@@ -1030,7 +1078,7 @@ async def chat(
                         message=message.text,
                         message_id=message.id,
                         origin="ui",
-                        author=current.author_display_name or "User",
+                        author=author,
                         **slack_attribution,
                     ),
                 )
@@ -1053,7 +1101,9 @@ async def chat(
                     {"origin": "ui", "author": "current user"},
                     await spaces.list_all() or [await spaces.default()],
                 )
-            turn = await durable.start_turn(request.chat_id, "ui")
+            turn = await durable.start_turn(
+                request.chat_id, "ui", actor_user_id=user["id"]
+            )
     except turns.BusyError as error:
         raise fastapi.HTTPException(409, str(error)) from error
     return fastapi.responses.StreamingResponse(
@@ -1096,7 +1146,9 @@ async def _transcript(chat_id: str) -> list[ai.messages.Message]:
     return _dedupe_tool_history(stored)
 
 
-def _dedupe_tool_history(messages: list[ai.messages.Message]) -> list[ai.messages.Message]:
+def _dedupe_tool_history(
+    messages: list[ai.messages.Message],
+) -> list[ai.messages.Message]:
     """Drop duplicate tool parts left by the old UI transcript ingestion bug."""
     seen_calls = set()
     seen_results = set()
@@ -1109,12 +1161,19 @@ def _dedupe_tool_history(messages: list[ai.messages.Message]) -> list[ai.message
                     continue
                 seen_calls.add(part.tool_call_id)
             elif isinstance(part, ai.messages.ToolResultPart):
-                if part.tool_call_id in seen_results or part.tool_call_id not in seen_calls:
+                if (
+                    part.tool_call_id in seen_results
+                    or part.tool_call_id not in seen_calls
+                ):
                     continue
                 seen_results.add(part.tool_call_id)
             parts.append(part)
         if parts:
-            repaired.append(message if len(parts) == len(message.parts) else message.model_copy(update={"parts": parts}))
+            repaired.append(
+                message
+                if len(parts) == len(message.parts)
+                else message.model_copy(update={"parts": parts})
+            )
     return repaired
 
 
@@ -1147,7 +1206,9 @@ async def suggest_chat_sandbox(chat_id: str) -> sandbox.Launch:
 
 
 @app.post("/api/chats/{chat_id}/sandboxes")
-async def create_chat_sandbox(chat_id: str, request: sandbox.Launch) -> dict:
+async def create_chat_sandbox(
+    chat_id: str, request: sandbox.Launch, http_request: fastapi.Request
+) -> dict:
     async with turns.run(chat_id):
         chat = await chats.get(chat_id)
         if chat is None:
@@ -1157,7 +1218,9 @@ async def create_chat_sandbox(chat_id: str, request: sandbox.Launch) -> dict:
                 409, "chat is archived; unarchive it before creating a sandbox"
             )
         try:
-            created = await sandbox.create(chat_id, request)
+            created = await sandbox.create(
+                chat_id, request, actor_user_id=http_request.state.user["id"]
+            )
         except RuntimeError as error:
             raise fastapi.HTTPException(409, str(error)) from error
         return created.model_dump(exclude={"daemon_token"})
@@ -1209,7 +1272,11 @@ async def create_manual_terminal(chat_id: str, sandbox_id: str) -> dict:
     except RuntimeError as error:
         raise fastapi.HTTPException(409, str(error)) from error
     await events.append(chat_id, "ui", {"type": "sandbox.changed"})
-    return {**terminal.model_dump(), "sandbox_id": terminal.worker_id, "session_id": terminal.id}
+    return {
+        **terminal.model_dump(),
+        "sandbox_id": terminal.worker_id,
+        "session_id": terminal.id,
+    }
 
 
 @app.delete("/api/chats/{chat_id}/terminals/{terminal_id}", status_code=204)
@@ -1222,9 +1289,13 @@ async def delete_manual_terminal(chat_id: str, terminal_id: str) -> None:
 
 
 @app.delete("/api/chats/{chat_id}/subagents/{subagent_id}", status_code=204)
-async def delete_subagent(chat_id: str, subagent_id: str) -> None:
+async def delete_subagent(
+    chat_id: str, subagent_id: str, request: fastapi.Request
+) -> None:
     try:
-        await worker.delete_task(chat_id, subagent_id)
+        await worker.delete_task(
+            chat_id, subagent_id, actor_user_id=request.state.user["id"]
+        )
     except ValueError as error:
         raise fastapi.HTTPException(404, str(error)) from error
     await events.append(chat_id, "ui", {"type": "sandbox.changed"})
@@ -1240,17 +1311,18 @@ async def delete_chat_sandbox(chat_id: str, sandbox_id: str) -> None:
         raise fastapi.HTTPException(404, str(error)) from error
 
 
-async def _authenticate_websocket(ws: fastapi.WebSocket) -> bool:
+async def _authenticate_websocket(ws: fastapi.WebSocket) -> dict | None:
     if not auth.valid_origin(ws):
         await ws.accept()
         await ws.close(code=4403, reason="invalid origin")
-        return False
+        return None
     session_id = getattr(ws, "cookies", {}).get(auth.COOKIE, "")
-    if await auth.session_user(session_id) is not None:
-        return True
+    user = await auth.session_user(session_id)
+    if user is not None:
+        return user
     await ws.accept()
     await ws.close(code=4401, reason="sign in required")
-    return False
+    return None
 
 
 async def _bridge_tty(
@@ -1316,7 +1388,12 @@ async def _bridge_tty(
         close_code = 4401 if status == 401 else 4403 if status == 403 else 1011
         close_reason = f"upstream rejected connection ({status})"
     except Exception as error:
-        log.warning("TTY bridge failed for sandbox %s session %s: %s", record.id, session_id, error)
+        log.warning(
+            "TTY bridge failed for sandbox %s session %s: %s",
+            record.id,
+            session_id,
+            error,
+        )
         close_code = 1011
         close_reason = "upstream connection failed"
     finally:
@@ -1326,13 +1403,15 @@ async def _bridge_tty(
 
 @app.websocket("/api/chats/{chat_id}/sandboxes/{sandbox_id}/ssh")
 async def sandbox_ssh(ws: fastapi.WebSocket, chat_id: str, sandbox_id: str) -> None:
-    if not await _authenticate_websocket(ws):
+    user = await _authenticate_websocket(ws)
+    if user is None:
         return
     record = await worker.get(sandbox_id)
     if record is None or record.chat_id != chat_id:
         await ws.accept()
         await ws.close(code=4404, reason="unknown sandbox")
         return
+    await worker.sandbox.prepare_for_command(record, actor_user_id=user["id"])
     url, headers = worker.sandbox.ssh(record)
     query = str(ws.url.query)
     if query:
@@ -1342,6 +1421,7 @@ async def sandbox_ssh(ws: fastapi.WebSocket, chat_id: str, sandbox_id: str) -> N
         async with websockets.asyncio.client.connect(
             url, additional_headers=headers, max_size=None, compression=None
         ) as upstream:
+
             async def down() -> None:
                 async for message in upstream:
                     if isinstance(message, bytes):
@@ -1367,7 +1447,7 @@ async def sandbox_ssh(ws: fastapi.WebSocket, chat_id: str, sandbox_id: str) -> N
                 task.cancel()
             for task in done:
                 task.result()
-    except (fastapi.WebSocketDisconnect, websockets.ConnectionClosed):
+    except fastapi.WebSocketDisconnect, websockets.ConnectionClosed:
         pass
     finally:
         with contextlib.suppress(RuntimeError):
@@ -1404,7 +1484,8 @@ async def task_readiness(chat_id: str, subagent_id: str) -> dict:
 
 @app.websocket("/api/chats/{chat_id}/subagents/{subagent_id}/tty")
 async def task_tty(ws: fastapi.WebSocket, chat_id: str, subagent_id: str) -> None:
-    if not await _authenticate_websocket(ws):
+    user = await _authenticate_websocket(ws)
+    if user is None:
         return
     task = await worker.get_task(chat_id, subagent_id)
     if task is None:
@@ -1416,12 +1497,14 @@ async def task_tty(ws: fastapi.WebSocket, chat_id: str, subagent_id: str) -> Non
         await ws.accept()
         await ws.close(code=4404, reason="unknown sandbox")
         return
+    await worker.sandbox.prepare_for_command(record, actor_user_id=user["id"])
     await _bridge_tty(ws, record, task.id)
 
 
 @app.websocket("/api/chats/{chat_id}/terminals/{terminal_id}/tty")
 async def manual_tty(ws: fastapi.WebSocket, chat_id: str, terminal_id: str) -> None:
-    if not await _authenticate_websocket(ws):
+    user = await _authenticate_websocket(ws)
+    if user is None:
         return
     terminal = await worker.store.get_terminal(terminal_id)
     if terminal is None or terminal.chat_id != chat_id:
@@ -1433,6 +1516,7 @@ async def manual_tty(ws: fastapi.WebSocket, chat_id: str, terminal_id: str) -> N
         await ws.accept()
         await ws.close(code=4404, reason="unknown sandbox")
         return
+    await worker.sandbox.prepare_for_command(record, actor_user_id=user["id"])
     await _bridge_tty(ws, record, terminal.id, ["/bin/bash", "-l"])
 
 
@@ -1485,9 +1569,13 @@ async def worker_event(event: worker_protocol.Event) -> None:
                             "braintrust.input_json": json.dumps(tool_input),
                             "braintrust.span_attributes": json.dumps({"type": "tool"}),
                             "gen_ai.operation.name": "execute_tool",
-                            "gen_ai.tool.name": str(event.payload.get("tool_name") or "fx"),
+                            "gen_ai.tool.name": str(
+                                event.payload.get("tool_name") or "fx"
+                            ),
                             "gen_ai.tool.type": "function",
-                            "gen_ai.tool.call.id": str(event.payload.get("tool_call_id") or ""),
+                            "gen_ai.tool.call.id": str(
+                                event.payload.get("tool_call_id") or ""
+                            ),
                             "gen_ai.tool.call.arguments": arguments,
                         }
                     )
@@ -1498,7 +1586,9 @@ async def worker_event(event: worker_protocol.Event) -> None:
                             "braintrust.output_json": json.dumps(output),
                             "braintrust.span_attributes": json.dumps({"type": "tool"}),
                             "gen_ai.operation.name": "execute_tool",
-                            "gen_ai.tool.call.id": str(event.payload.get("tool_call_id") or ""),
+                            "gen_ai.tool.call.id": str(
+                                event.payload.get("tool_call_id") or ""
+                            ),
                             "gen_ai.tool.call.result": json.dumps(output),
                         },
                         tool_error=bool(event.payload.get("error")),
@@ -1529,7 +1619,9 @@ async def worker_event(event: worker_protocol.Event) -> None:
                         },
                     )
                 elif changed and parent is not None and event.type == "task.question":
-                    question = str(event.payload.get("question") or event.payload.get("text") or "")
+                    question = str(
+                        event.payload.get("question") or event.payload.get("text") or ""
+                    )
                     parent.add_event("fx.attention", {"text": question[:8192]})
                 elif changed and parent is not None and event.type == "task.completed":
                     parent.add_event("fx.turn.completed")
@@ -1618,7 +1710,12 @@ async def complete_worker_task(task: worker.Task) -> None:
             run = vercel.workflow.Run(current.completion_run_id)
             if await run.status() in ("pending", "running", "completed"):
                 return
-        turn = await durable.start_turn(current.chat_id, "worker", current.id)
+        turn = await durable.start_turn(
+            current.chat_id,
+            "worker",
+            current.id,
+            actor_user_id=current.user_id,
+        )
 
         def record_run(latest: worker.Task) -> worker.Task:
             latest.completion_run_id = turn.run_id
@@ -1646,7 +1743,9 @@ async def _emit(chat_id: str, event: channels.Event) -> list[str]:
                 try:
                     await channel.on_event(event, binding.state)
                 except Exception as error:
-                    log.exception("channel delivery failed: %s -> %s", chat_id, binding.channel)
+                    log.exception(
+                        "channel delivery failed: %s -> %s", chat_id, binding.channel
+                    )
                     failures.append(f"{binding.channel}: {error}")
             span.set_attrs(failure_count=len(failures))
             return failures
@@ -1656,13 +1755,15 @@ async def _deliver(chat_id: str, message: str, *, final: bool = True) -> list[st
     data = {"message": message}
     if not final:
         data["final"] = False
-    return await _emit(chat_id, channels.event(channels.protocol.MESSAGE_COMPLETED, **data))
+    return await _emit(
+        chat_id, channels.event(channels.protocol.MESSAGE_COMPLETED, **data)
+    )
 
 
-async def _run_inbound_turn(chat_id: str) -> None:
+async def _run_inbound_turn(chat_id: str, actor_user_id: str | None = None) -> None:
     """Start one durable dispatcher turn after the channel has been acknowledged."""
     async with turns.run(chat_id):
-        await durable.start_turn(chat_id, "channel")
+        await durable.start_turn(chat_id, "channel", actor_user_id=actor_user_id)
 
 
 app.include_router(bot.router)
