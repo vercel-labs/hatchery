@@ -46,7 +46,7 @@ async def test_bind_refuses_to_transfer_external_thread():
         await chats.bind("github:repo:1:issue:7", second.id, "github", {})
 
 
-async def test_claim_sets_owner_and_rejects_owner_state_takeover():
+async def test_claim_keeps_creator_while_updating_shared_binding_state():
     first, created = await chats.claim(
         "slack:C1:100.1",
         "slack",
@@ -70,10 +70,10 @@ async def test_claim_sets_owner_and_rejects_owner_state_takeover():
     assert second.user_id == "hatchery_1"
     assert second.author_display_name == "Ada"
     [binding] = await chats.bindings(first.id)
-    assert binding.state == {"user_id": "U1"}
+    assert binding.state == {"user_id": "U2"}
 
 
-async def test_matching_connected_owner_claims_and_migrates_legacy_binding():
+async def test_allowed_user_migrates_binding_without_rewriting_creator():
     legacy, _ = await chats.claim(
         "slack:C1:100.1",
         "slack",
@@ -94,13 +94,13 @@ async def test_matching_connected_owner_claims_and_migrates_legacy_binding():
 
     assert created is False
     assert claimed.id == legacy.id
-    assert claimed.user_id == "hatchery_1"
-    assert (await chats.get(legacy.id)).user_id == "hatchery_1"
+    assert claimed.user_id is None
+    assert (await chats.get(legacy.id)).user_id is None
     [binding] = await chats.bindings(legacy.id)
     assert binding.token == "slack:T1:C1:100.1"
 
 
-async def test_matching_connected_owner_snapshots_author_on_claim():
+async def test_migrating_legacy_binding_does_not_invent_creator():
     legacy, _ = await chats.claim(
         "slack:T1:C1:100.2",
         "slack",
@@ -121,11 +121,11 @@ async def test_matching_connected_owner_snapshots_author_on_claim():
 
     assert created is False
     assert claimed.id == legacy.id
-    assert claimed.user_id == "hatchery_1"
-    assert claimed.author_display_name == "Ada"
+    assert claimed.user_id is None
+    assert claimed.author_display_name is None
 
 
-async def test_different_identity_cannot_claim_or_migrate_legacy_binding():
+async def test_different_identity_can_migrate_shared_legacy_binding():
     legacy, _ = await chats.claim(
         "slack:C1:100.1",
         "slack",
@@ -148,8 +148,8 @@ async def test_different_identity_cannot_claim_or_migrate_legacy_binding():
     assert rejected.id == legacy.id
     assert rejected.user_id is None
     [binding] = await chats.bindings(legacy.id)
-    assert binding.token == "slack:C1:100.1"
-    assert binding.state == {"team_id": "T1", "user_id": "U1"}
+    assert binding.token == "slack:T1:C1:100.1"
+    assert binding.state == {"team_id": "T1", "user_id": "U2"}
 
 
 async def test_other_workspace_ignores_legacy_collision_and_creates_scoped_binding():
@@ -202,9 +202,7 @@ async def test_claim_is_single_owner_under_concurrency():
 async def test_create_once_is_retry_safe_under_concurrency():
     results = await asyncio.gather(
         *(
-            chats.create_once(
-                "chat_123456789abc", None, "new chat", user_id="user_1"
-            )
+            chats.create_once("chat_123456789abc", None, "new chat", user_id="user_1")
             for _ in range(20)
         )
     )
@@ -214,9 +212,7 @@ async def test_create_once_is_retry_safe_under_concurrency():
 
 
 async def test_create_once_rejects_conflicting_retry():
-    await chats.create_once(
-        "chat_123456789abc", None, "new chat", user_id="user_1"
-    )
+    await chats.create_once("chat_123456789abc", None, "new chat", user_id="user_1")
 
     with pytest.raises(ValueError, match="conflicts"):
         await chats.create_once(

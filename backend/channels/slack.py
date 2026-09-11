@@ -77,19 +77,30 @@ def channel(
 
 
 class SlackChannel:
-    def __init__(self, connector: str | None, name: str, transport: httpx.AsyncBaseTransport | None) -> None:
+    def __init__(
+        self,
+        connector: str | None,
+        name: str,
+        transport: httpx.AsyncBaseTransport | None,
+    ) -> None:
         self.name = name
         self._connector = connector or os.environ.get("SLACK_CONNECTOR", "")
-        self._client = httpx.AsyncClient(base_url="https://slack.com/api", transport=transport)
+        self._client = httpx.AsyncClient(
+            base_url="https://slack.com/api", transport=transport
+        )
         self._profiles: dict[tuple[str, str], tuple[str, str]] = {}
 
-    async def handle(self, webhook: channels.Webhook, bus: channels.Bus) -> channels.Ack:
+    async def handle(
+        self, webhook: channels.Webhook, bus: channels.Bus
+    ) -> channels.Ack:
         try:
             await connect.verify_connect_webhook(webhook.headers)
         except connect.ConnectWebhookVerificationError:
             return channels.Ack(401, '{"error": "unverified webhook"}')
 
-        if webhook.headers.get("content-type", "").startswith("application/x-www-form-urlencoded"):
+        if webhook.headers.get("content-type", "").startswith(
+            "application/x-www-form-urlencoded"
+        ):
             form = urllib.parse.parse_qs(webhook.body.decode())
             payload = json.loads((form.get("payload") or ["{}"])[0])
         else:
@@ -99,7 +110,11 @@ class SlackChannel:
         if payload.get("type") == "url_verification":
             return channels.Ack(200, str(payload.get("challenge", "")), "text/plain")
         retries = webhook.headers.get("x-slack-retry-num", "")
-        if retries.isdigit() and int(retries) >= 1 and webhook.headers.get("x-slack-retry-reason") == "http_timeout":
+        if (
+            retries.isdigit()
+            and int(retries) >= 1
+            and webhook.headers.get("x-slack-retry-reason") == "http_timeout"
+        ):
             return channels.Ack()
 
         event = payload.get("event") or {}
@@ -108,8 +123,12 @@ class SlackChannel:
         if inbound is None and candidate is None:
             return channels.Ack()
         if inbound is not None:
-            return channels.Ack(work=self._sync_thread(payload, event, inbound, bus, invoke=True))
-        return channels.Ack(work=self._sync_thread(payload, event, candidate, bus, invoke=None))
+            return channels.Ack(
+                work=self._sync_thread(payload, event, inbound, bus, invoke=True)
+            )
+        return channels.Ack(
+            work=self._sync_thread(payload, event, candidate, bus, invoke=None)
+        )
 
     def _gate(self, payload: dict, event: dict) -> channels.Inbound | None:
         bot_user_id = ""
@@ -128,7 +147,9 @@ class SlackChannel:
         inbound = self._inbound(payload, event)
         if inbound is None:
             return None
-        title_text = re.sub(rf"<@{re.escape(bot_user_id)}>", "", str(event.get("text", "")))
+        title_text = re.sub(
+            rf"<@{re.escape(bot_user_id)}>", "", str(event.get("text", ""))
+        )
         title_text = html.unescape(" ".join(title_text.split())).strip()
         inbound.title = f"slack: {title_text[:53]}" if title_text else "slack: thread"
         return inbound
@@ -142,7 +163,9 @@ class SlackChannel:
             return None
         if event.get("type") != "message" or event.get("channel_type") == "im":
             return None
-        if event.get("subtype") not in (None, "file_share") or not event.get("thread_ts"):
+        if event.get("subtype") not in (None, "file_share") or not event.get(
+            "thread_ts"
+        ):
             return None
         text = str(event.get("text", ""))
         if any(user_id and f"<@{user_id}>" in text for user_id in bot_user_ids):
@@ -169,7 +192,9 @@ class SlackChannel:
             "display_text": html.unescape(str(event.get("text", ""))),
             "author": event.get("user", ""),
         }
-        return channels.Inbound(token=f"{channel_id}:{thread_ts}", text=text, state=state)
+        return channels.Inbound(
+            token=f"{channel_id}:{thread_ts}", text=text, state=state
+        )
 
     async def _sync_thread(
         self,
@@ -179,9 +204,14 @@ class SlackChannel:
         bus: channels.Bus,
         invoke: bool | None,
     ) -> None:
-        binding = await bus.binding(
-            f"{inbound.state['team_id']}:{inbound.token}"
-        )
+        actor = {
+            "team_id": inbound.state.get("team_id", ""),
+            "user_id": inbound.state.get("user_id", ""),
+        }
+        inbound.actor = actor
+        authorize = getattr(bus, "authorize", None)
+        actor_allowed = await authorize(inbound) if authorize is not None else True
+        binding = await bus.binding(f"{inbound.state['team_id']}:{inbound.token}")
         is_thread = bool(event.get("thread_ts")) and event.get("channel_type") != "im"
         messages = [event]
         if is_thread:
@@ -194,11 +224,15 @@ class SlackChannel:
             while True:
                 body = await self._api("conversations.replies", **params)
                 messages.extend(body.get("messages") or [])
-                cursor = (body.get("response_metadata") or {}).get("next_cursor", "").strip()
+                cursor = (
+                    (body.get("response_metadata") or {}).get("next_cursor", "").strip()
+                )
                 if not cursor:
                     break
                 params["cursor"] = cursor
-            if not any(str(item.get("ts", "")) == str(event.get("ts", "")) for item in messages):
+            if not any(
+                str(item.get("ts", "")) == str(event.get("ts", "")) for item in messages
+            ):
                 messages.append(event)
 
         newest_ts = str(event.get("ts", ""))
@@ -217,7 +251,10 @@ class SlackChannel:
         }
         subscribed = any(
             message.get("user") in bot_user_ids
-            or any(user_id and f"<@{user_id}>" in str(message.get("text", "")) for user_id in bot_user_ids)
+            or any(
+                user_id and f"<@{user_id}>" in str(message.get("text", ""))
+                for user_id in bot_user_ids
+            )
             for message in messages
         )
         if invoke is None and binding is None and not subscribed:
@@ -233,15 +270,23 @@ class SlackChannel:
                 or message.get("subtype") not in (None, "file_share")
             ):
                 continue
-            synced = self._inbound(payload, {**message, "channel": inbound.state["channel_id"], "thread_ts": inbound.state["thread_ts"]})
+            synced = self._inbound(
+                payload,
+                {
+                    **message,
+                    "channel": inbound.state["channel_id"],
+                    "thread_ts": inbound.state["thread_ts"],
+                },
+            )
             if synced is None:
                 continue
             synced.title = inbound.title
+            synced.actor = actor
             synced.invoke = invoke is True and ts == str(event.get("ts", ""))
             await bus.dispatch(synced)
             trigger_stored = trigger_stored or ts == str(event.get("ts", ""))
 
-        if invoke is not None or not trigger_stored:
+        if invoke is not None or not trigger_stored or not actor_allowed:
             return
         try:
             chat_id = str((binding or {}).get("_hatchery_chat_id") or "")
@@ -284,7 +329,11 @@ class SlackChannel:
             [ai.system_message(THREAD_REPLY_SYSTEM), ai.user_message(request)],
             output_type=ThreadReplyDecision,
             params=ai.InferenceRequestParams(
-                sampling={ai.TemperatureSamplerParams: ai.TemperatureSamplerParams(temperature=0)},
+                sampling={
+                    ai.TemperatureSamplerParams: ai.TemperatureSamplerParams(
+                        temperature=0
+                    )
+                },
             ),
         ) as result:
             async for _ in result:
@@ -301,12 +350,17 @@ class SlackChannel:
                 state, f"assigned {event.data.get('space', {}).get('name', 'space')}"
             )
         elif event.type == channels.protocol.STATUS_UPDATED:
-            await self._set_status(state, str(event.data.get("status", ""))[:STATUS_LIMIT])
+            await self._set_status(
+                state, str(event.data.get("status", ""))[:STATUS_LIMIT]
+            )
         elif event.type == channels.protocol.MESSAGE_RECEIVED:
             text = str(event.data.get("message", ""))
-            if text and event.data.get("origin") == "ui" and event.data.get(
-                "slack_team_id"
-            ) == state.get("team_id") and event.data.get("slack_user_id"):
+            if (
+                text
+                and event.data.get("origin") == "ui"
+                and event.data.get("slack_team_id") == state.get("team_id")
+                and event.data.get("slack_user_id")
+            ):
                 await self._post_ui_message(
                     state, text[:TEXT_LIMIT], str(event.data["slack_user_id"])
                 )
@@ -327,7 +381,10 @@ class SlackChannel:
             else:
                 await self._set_status(state, "is working...")
         elif event.type == channels.protocol.TURN_FAILED:
-            await self._post(state, f"something went wrong: {event.data.get('error', 'unknown error')}")
+            await self._post(
+                state,
+                f"something went wrong: {event.data.get('error', 'unknown error')}",
+            )
 
     async def _post_ui_message(
         self, state: dict, text: str, slack_user_id: str
@@ -371,12 +428,23 @@ class SlackChannel:
 
     async def _post(self, state: dict, text: str) -> None:
         if text:
-            await self._api("chat.postMessage", channel=state["channel_id"], thread_ts=state["thread_ts"], text=text)
+            await self._api(
+                "chat.postMessage",
+                channel=state["channel_id"],
+                thread_ts=state["thread_ts"],
+                text=text,
+            )
 
     async def _api(self, method: str, **params: str) -> dict:
-        token = await connect.get_token(self._connector, subject=connect.ConnectAppTokenSubject())
-        response = await self._client.post(f"/{method}", data=params, headers={"authorization": f"Bearer {token}"})
+        token = await connect.get_token(
+            self._connector, subject=connect.ConnectAppTokenSubject()
+        )
+        response = await self._client.post(
+            f"/{method}", data=params, headers={"authorization": f"Bearer {token}"}
+        )
         body = response.json()
         if not body.get("ok"):
-            raise RuntimeError(f"slack {method} failed: {body.get('error', response.status_code)}")
+            raise RuntimeError(
+                f"slack {method} failed: {body.get('error', response.status_code)}"
+            )
         return body

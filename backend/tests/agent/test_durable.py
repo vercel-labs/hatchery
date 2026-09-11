@@ -234,18 +234,28 @@ async def test_start_thread_uses_trusted_chat_and_turn_ids(monkeypatch):
             pass
 
     monkeypatch.setattr(durable, "start_thread_step", step)
-    agent = durable.DurableDispatcher("chat_trusted", Writer(), "turn_1")
+    agent = durable.DurableDispatcher(
+        "chat_trusted", Writer(), "turn_1", actor_user_id="user_actor"
+    )
     token = durable.current_agent.set(agent)
     try:
-        assert await durable.start_thread.fn(
-            "slack", "T1/C1", "done", ["user_1"]
-        ) == {"status": "sent"}
+        assert await durable.start_thread.fn("slack", "T1/C1", "done", ["user_1"]) == {
+            "status": "sent"
+        }
         assert agent.linked is True
     finally:
         durable.current_agent.reset(token)
 
     assert calls == [
-        ("chat_trusted", "slack", "T1/C1", "done", ["user_1"], "turn_1")
+        (
+            "chat_trusted",
+            "slack",
+            "T1/C1",
+            "done",
+            ["user_1"],
+            "turn_1",
+            "user_actor",
+        )
     ]
 
 
@@ -288,14 +298,14 @@ async def test_create_sandbox_tool_forwards_size(monkeypatch):
             pass
 
     monkeypatch.setattr(durable, "create_sandbox_step", step)
-    agent = durable.DurableDispatcher("chat_1", Writer())
+    agent = durable.DurableDispatcher("chat_1", Writer(), actor_user_id="user_actor")
     token = durable.current_agent.set(agent)
     try:
         assert await durable.create_sandbox.fn(size="big") == {"id": "wrk_1"}
     finally:
         durable.current_agent.reset(token)
 
-    assert calls[0][-1] == "big"
+    assert calls[0][-2:] == ("big", "user_actor")
 
 
 async def test_commit_messages_is_idempotent():
@@ -388,7 +398,8 @@ async def test_cron_register_turn_rejects_duplicate_run(monkeypatch):
         await durable.register_turn.func(turn, "run_2")
 
     started = [
-        data for _, data in await events.read("chat_1", "turns")
+        data
+        for _, data in await events.read("chat_1", "turns")
         if data.get("type") == "turn.started"
     ]
     assert [event["run_id"] for event in started] == ["run_1"]
@@ -407,7 +418,9 @@ async def test_start_turn_registers_before_announcing(monkeypatch):
 
     monkeypatch.setattr(durable.vercel.workflow, "start", start)
 
-    turn = await durable.start_turn("chat_1", "worker", "task_1")
+    turn = await durable.start_turn(
+        "chat_1", "worker", "task_1", actor_user_id="user_actor"
+    )
 
     assert turn.run_id == "run_1"
     assert turn.turn_id.startswith("turn_")
@@ -417,6 +430,7 @@ async def test_start_turn_registers_before_announcing(monkeypatch):
         turn_id=turn.turn_id,
         origin="worker",
         task_id="task_1",
+        actor_user_id="user_actor",
     )
     assert await events.read("chat_1", "turns") == [
         (
@@ -427,6 +441,7 @@ async def test_start_turn_registers_before_announcing(monkeypatch):
                 "run_id": "run_1",
                 "origin": "worker",
                 "task_id": "task_1",
+                "actor_user_id": "user_actor",
             },
         )
     ]

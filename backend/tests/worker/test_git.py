@@ -263,3 +263,4 @@ def test_agent_environment_scrubs_control_plane_secrets():
     assert "VERCEL_QUEUE_TOKEN" not in env
     assert env["GH_TOKEN"] == "sandbox-network-policy-placeholder"
     assert env["GH_TOKEN"] != "github"
+    assert env["VERCEL_TOKEN"] == "sandbox-vercel-policy-placeholder"

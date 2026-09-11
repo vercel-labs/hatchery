@@ -35,7 +35,18 @@ import fastapi
 from channels import protocol
 from channels.protocol import Event, Message, event
 
-__all__ = ["Ack", "App", "Bus", "Channel", "Event", "Hub", "Inbound", "Message", "Webhook", "event"]
+__all__ = [
+    "Ack",
+    "App",
+    "Bus",
+    "Channel",
+    "Event",
+    "Hub",
+    "Inbound",
+    "Message",
+    "Webhook",
+    "event",
+]
 
 
 @dataclasses.dataclass
@@ -53,6 +64,7 @@ class Inbound:
     repo: str | None = None  # "owner/repo" for project routing, github only
     persist: bool = True  # false when waking a chat after a separate sync
     invoke: bool = True  # persist every message; only some messages wake the agent
+    actor: dict | None = None  # external identity requesting this dispatch
 
 
 @dataclasses.dataclass
@@ -72,6 +84,8 @@ class Bus(typing.Protocol):
 
     async def binding(self, token: str) -> dict | None: ...
 
+    async def authorize(self, inbound: "Inbound") -> bool: ...
+
 
 class Hub(typing.Protocol):
     """Where inbound messages land; the store/agent side implements this."""
@@ -81,6 +95,8 @@ class Hub(typing.Protocol):
     async def dedupe(self, key: str) -> bool: ...
 
     async def binding(self, channel: str, token: str) -> dict | None: ...
+
+    async def authorize(self, channel: str, inbound: "Inbound") -> bool: ...
 
 
 class Channel(typing.Protocol):
@@ -111,14 +127,19 @@ class App:
         self.channels[channel.name] = channel
 
     async def _endpoint(
-        self, channel_name: str, request: fastapi.Request, background: fastapi.BackgroundTasks
+        self,
+        channel_name: str,
+        request: fastapi.Request,
+        background: fastapi.BackgroundTasks,
     ) -> fastapi.Response:
         async with ai.experimental_telemetry.span("channel.webhook") as span:
             span.set_attrs(channel=channel_name)
             channel = self.channels.get(channel_name)
             if channel is None:
                 span.set_attrs(status_code=404)
-                return fastapi.Response('{"error": "unknown channel"}', 404, media_type="application/json")
+                return fastapi.Response(
+                    '{"error": "unknown channel"}', 404, media_type="application/json"
+                )
             webhook = Webhook(body=await request.body(), headers=request.headers)
             ack = await channel.handle(webhook, _Bus(self.hub, channel.name))
             span.set_attrs(status_code=ack.status, dispatched=ack.work is not None)
@@ -142,6 +163,9 @@ class _Bus:
 
     async def binding(self, token: str) -> dict | None:
         return await self._hub.binding(self._channel, token)
+
+    async def authorize(self, inbound: Inbound) -> bool:
+        return await self._hub.authorize(self._channel, inbound)
 
 
 async def _await(coro: typing.Coroutine) -> None:

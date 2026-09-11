@@ -66,11 +66,16 @@ class GitHubChannel:
         self._bot_name = bot_name or os.environ.get("GITHUB_APP_SLUG", "")
         self._client = httpx.AsyncClient(
             base_url=api_base,
-            headers={"accept": "application/vnd.github+json", "x-github-api-version": "2022-11-28"},
+            headers={
+                "accept": "application/vnd.github+json",
+                "x-github-api-version": "2022-11-28",
+            },
             transport=transport,
         )
 
-    async def handle(self, webhook: channels.Webhook, bus: channels.Bus) -> channels.Ack:
+    async def handle(
+        self, webhook: channels.Webhook, bus: channels.Bus
+    ) -> channels.Ack:
         try:
             await connect.verify_connect_webhook(webhook.headers)
         except connect.ConnectWebhookVerificationError:
@@ -80,7 +85,10 @@ class GitHubChannel:
         if event_name == "ping":
             return channels.Ack()
         payload = json.loads(webhook.body)
-        if event_name not in ("issue_comment", "pull_request_review_comment") or payload.get("action") != "created":
+        if (
+            event_name not in ("issue_comment", "pull_request_review_comment")
+            or payload.get("action") != "created"
+        ):
             return channels.Ack(200, '{"ok": true, "ignored": true}')
 
         inbound = self._gate(event_name, payload)
@@ -88,7 +96,59 @@ class GitHubChannel:
             return channels.Ack(200, '{"ok": true, "ignored": true}')
         if not inbound.invoke and await bus.binding(inbound.token) is None:
             return channels.Ack(200, '{"ok": true, "ignored": true}')
-        return channels.Ack(work=bus.dispatch(inbound))
+        return channels.Ack(work=self._sync_thread(event_name, payload, inbound, bus))
+
+    async def _sync_thread(
+        self,
+        event_name: str,
+        payload: dict,
+        inbound: channels.Inbound,
+        bus: channels.Bus,
+    ) -> None:
+        actor = {
+            "sender_id": inbound.state.get("sender_id", ""),
+        }
+        inbound.actor = actor
+        binding = await bus.binding(inbound.token)
+        authorize = getattr(bus, "authorize", None)
+        authorized = await authorize(inbound) if authorize is not None else False
+        if inbound.invoke and binding is None and authorized:
+            page = 1
+            while True:
+                if event_name == "pull_request_review_comment":
+                    path = (
+                        f"/repos/{inbound.state['owner']}/{inbound.state['repo']}"
+                        f"/pulls/{inbound.state['number']}/comments"
+                    )
+                else:
+                    path = (
+                        f"/repos/{inbound.state['owner']}/{inbound.state['repo']}"
+                        f"/issues/{inbound.state['number']}/comments"
+                    )
+                comments = await self._api(
+                    "GET", path, params={"per_page": 100, "page": page}
+                )
+                if not isinstance(comments, list):
+                    break
+                for comment in comments:
+                    if str(comment.get("id", "")) == str(
+                        inbound.state.get("message_id", "")
+                    ):
+                        continue
+                    if event_name == "pull_request_review_comment":
+                        root = comment.get("in_reply_to_id") or comment.get("id")
+                        if str(root) != str(inbound.state.get("root_comment_id")):
+                            continue
+                    synced = self._gate(event_name, {**payload, "comment": comment})
+                    if synced is None:
+                        continue
+                    synced.actor = actor
+                    synced.invoke = False
+                    await bus.dispatch(synced)
+                if len(comments) < 100:
+                    break
+                page += 1
+        await bus.dispatch(inbound)
 
     def _gate(self, event_name: str, payload: dict) -> channels.Inbound | None:
         comment = payload.get("comment") or {}
@@ -129,7 +189,9 @@ class GitHubChannel:
             number = issue.get("number")
             root = None
             kind = "pull" if issue.get("pull_request") else "issue"
-            token = f"repo:{repository_id}:{'pull' if kind == 'pull' else 'issue'}:{number}"
+            token = (
+                f"repo:{repository_id}:{'pull' if kind == 'pull' else 'issue'}:{number}"
+            )
         if number is None:
             return None
 
@@ -177,7 +239,10 @@ class GitHubChannel:
         elif event.type == channels.protocol.MESSAGE_COMPLETED:
             await self._comment(state, str(event.data.get("message", "")))
         elif event.type == channels.protocol.TURN_FAILED:
-            await self._comment(state, f"something went wrong: {event.data.get('error', 'unknown error')}")
+            await self._comment(
+                state,
+                f"something went wrong: {event.data.get('error', 'unknown error')}",
+            )
 
     async def _react(self, state: dict) -> None:
         comment_id = state.get("comment_id")
@@ -202,11 +267,29 @@ class GitHubChannel:
             path = f"/repos/{state['owner']}/{state['repo']}/issues/{state['number']}/comments"
         size = COMMENT_LIMIT - len(MARKER) - 2
         for start in range(0, len(text), size):
-            await self._api("POST", path, {"body": f"{text[start : start + size]}\n\n{MARKER}"})
+            await self._api(
+                "POST", path, {"body": f"{text[start : start + size]}\n\n{MARKER}"}
+            )
 
-    async def _api(self, method: str, path: str, body: dict) -> dict:
-        token = await connect.get_token(self._connector, subject=connect.ConnectAppTokenSubject())
-        response = await self._client.request(method, path, json=body, headers={"authorization": f"Bearer {token}"})
+    async def _api(
+        self,
+        method: str,
+        path: str,
+        body: dict | None = None,
+        params: dict | None = None,
+    ) -> dict | list:
+        token = await connect.get_token(
+            self._connector, subject=connect.ConnectAppTokenSubject()
+        )
+        response = await self._client.request(
+            method,
+            path,
+            json=body,
+            params=params,
+            headers={"authorization": f"Bearer {token}"},
+        )
         if response.status_code >= 300:
-            raise RuntimeError(f"github {method} {path} failed: {response.status_code} {response.text[:200]}")
+            raise RuntimeError(
+                f"github {method} {path} failed: {response.status_code} {response.text[:200]}"
+            )
         return response.json() if response.content else {}

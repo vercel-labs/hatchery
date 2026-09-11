@@ -15,7 +15,15 @@ class Launch(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(
         extra="forbid",
         json_schema_extra={
-            "required": ["title", "repos", "setup_script", "ports", "branch", "git_sha", "size"]
+            "required": [
+                "title",
+                "repos",
+                "setup_script",
+                "ports",
+                "branch",
+                "git_sha",
+                "size",
+            ]
         },
     )
 
@@ -37,7 +45,11 @@ class Launch(pydantic.BaseModel):
     def valid_repos(cls, repos: list[str]) -> list[str]:
         for repo in repos:
             parts = repo.split("/")
-            if len(parts) != 2 or not all(parts) or any(part.strip() != part for part in parts):
+            if (
+                len(parts) != 2
+                or not all(parts)
+                or any(part.strip() != part for part in parts)
+            ):
                 raise ValueError("repos must use owner/repo form")
         return repos
 
@@ -87,7 +99,9 @@ async def suggest(space: models.Space) -> Launch:
         [ai.system_message(_SYSTEM), ai.user_message(request)],
         output_type=Launch,
         params=ai.InferenceRequestParams(
-            sampling={ai.TemperatureSamplerParams: ai.TemperatureSamplerParams(temperature=0)},
+            sampling={
+                ai.TemperatureSamplerParams: ai.TemperatureSamplerParams(temperature=0)
+            },
             output=ai.OutputParams(max_tokens=4096),
         ),
     ) as result:
@@ -96,13 +110,16 @@ async def suggest(space: models.Space) -> Launch:
         return result.output
 
 
-async def create(chat_id: str, launch: Launch) -> worker.Worker:
+async def create(
+    chat_id: str, launch: Launch, actor_user_id: str | None = None
+) -> worker.Worker:
     async with telemetry.use_chat(chat_id):
         chat = await chats.get(chat_id)
+        user_id = actor_user_id or (chat.user_id if chat else None)
         created = await worker.create(
             chat_id,
             worker.WorkerSpec(**launch.model_dump()),
-            user_id=chat.user_id if chat is not None else None,
+            user_id=user_id,
         )
         await events.append(chat_id, "ui", {"type": "sandbox.changed"})
         return created
@@ -121,9 +138,21 @@ async def destroy(chat_id: str, sandbox_id: str) -> None:
         await events.append(chat_id, "ui", {"type": "sandbox.changed"})
 
 
-async def launch_task(chat_id: str, sandbox_id: str, prompt: str, model: str) -> worker.Task:
+async def launch_task(
+    chat_id: str,
+    sandbox_id: str,
+    prompt: str,
+    model: str,
+    actor_user_id: str | None = None,
+) -> worker.Task:
     async with telemetry.use_chat(chat_id):
-        task = await worker.launch_task(chat_id, sandbox_id, prompt, model)
+        task = await worker.launch_task(
+            chat_id,
+            sandbox_id,
+            prompt,
+            model,
+            actor_user_id=actor_user_id,
+        )
         await events.append(
             chat_id,
             "ui",
@@ -137,9 +166,16 @@ async def launch_task(chat_id: str, sandbox_id: str, prompt: str, model: str) ->
         return task
 
 
-async def send_task_input(chat_id: str, task_id: str, prompt: str) -> worker.Task:
+async def send_task_input(
+    chat_id: str,
+    task_id: str,
+    prompt: str,
+    actor_user_id: str | None = None,
+) -> worker.Task:
     async with telemetry.use_chat(chat_id):
-        return await worker.send_task_input(chat_id, task_id, prompt)
+        return await worker.send_task_input(
+            chat_id, task_id, prompt, actor_user_id=actor_user_id
+        )
 
 
 async def cancel_task(chat_id: str, task_id: str) -> worker.Task:

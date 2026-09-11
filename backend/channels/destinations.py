@@ -40,20 +40,34 @@ class SlackScopeRequired(RuntimeError):
         provided = body.get("provided")
         for field, value in {
             "needed": body.get("needed"),
-            "provided": provided if provided is not None else headers.get("x-oauth-scopes"),
+            "provided": provided
+            if provided is not None
+            else headers.get("x-oauth-scopes"),
             "accepted_scopes": headers.get("x-accepted-oauth-scopes"),
         }.items():
-            parsed = sorted(set(value.replace(",", " ").split())) if isinstance(value, str) else None
+            parsed = (
+                sorted(set(value.replace(",", " ").split()))
+                if isinstance(value, str)
+                else None
+            )
             scopes[field] = parsed
         connector = os.environ.get("SLACK_CONNECTOR", "unconfigured")
-        message = json.dumps({
-            field: body[field] for field in ("error", "needed", "provided")
-            if isinstance(body.get(field), str)
-        })
+        message = json.dumps(
+            {
+                field: body[field]
+                for field in ("error", "needed", "provided")
+                if isinstance(body.get(field), str)
+            }
+        )
         super().__init__(message)
         self.result = {
-            "status": "failed", "provider": "slack", "error": "missing_scope",
-            "method": method, "connector": connector, **scopes, "detail": message,
+            "status": "failed",
+            "provider": "slack",
+            "error": "missing_scope",
+            "method": method,
+            "connector": connector,
+            **scopes,
+            "detail": message,
         }
 
 
@@ -78,17 +92,20 @@ def _rank(query: str, candidates: list[dict]) -> list[dict]:
             ranked.append((score, candidate))
     ranked.sort(key=lambda item: (-item[0], item[1]["id"]))
     return [
-        {**{key: value for key, value in candidate.items() if key != "aliases"},
-         "match": "exact" if score == 3 else "partial" if score == 2 else "fuzzy"}
+        {
+            **{key: value for key, value in candidate.items() if key != "aliases"},
+            "match": "exact" if score == 3 else "partial" if score == 2 else "fuzzy",
+        }
         for score, candidate in ranked[:LIMIT]
     ]
 
 
-async def _context(chat_id: str):
+async def _context(chat_id: str, actor_user_id: str | None):
     chat = await chats.get(chat_id)
-    user = await auth_store.get_user(chat.user_id) if chat and chat.user_id else None
-    if not auth.allowed_user(user):
-        raise ValueError("communication requires a chat owned by an allowed Hatchery user")
+    user_id = actor_user_id or (chat.user_id if chat else None)
+    user = await auth_store.get_user(user_id) if user_id else None
+    if chat is None or not auth.allowed_user(user):
+        raise ValueError("communication requires an allowed Hatchery user")
     space = await spaces.get(chat.space_id) if chat.space_id else None
     return user, space
 
@@ -102,7 +119,9 @@ async def _client(provider: Provider):
         raise ValueError(f"{provider} connector is not configured")
     token = await connect.get_token(connector, subject=connect.ConnectAppTokenSubject())
     async with httpx.AsyncClient(
-        base_url="https://slack.com/api/" if provider == "slack" else "https://api.github.com/",
+        base_url="https://slack.com/api/"
+        if provider == "slack"
+        else "https://api.github.com/",
         headers={
             "authorization": f"Bearer {token}",
             "accept": "application/json",
@@ -118,14 +137,20 @@ async def _api(client: httpx.AsyncClient, method: str, path: str, **kwargs) -> d
     if response.status_code >= 500:
         response.raise_for_status()
     if response.status_code >= 300:
-        raise RuntimeError(f"provider request failed (HTTP {response.status_code}); check permissions or rate limits")
+        raise RuntimeError(
+            f"provider request failed (HTTP {response.status_code}); check permissions or rate limits"
+        )
     body = response.json()
     if body.get("ok") is False:
         if body.get("error") == "missing_scope":
             error = SlackScopeRequired(path, body, response.headers)
             log.warning("%s", error)
             raise error
-        if path == "chat.postMessage" and body.get("error") in {"internal_error", "fatal_error", "request_timeout"}:
+        if path == "chat.postMessage" and body.get("error") in {
+            "internal_error",
+            "fatal_error",
+            "request_timeout",
+        }:
             raise _UncertainDelivery("Slack may have accepted the message")
         raise RuntimeError(f"Slack {path} failed: {body.get('error', 'unknown_error')}")
     return body
@@ -136,7 +161,9 @@ async def _slack_team(client: httpx.AsyncClient, user: dict) -> str:
     team = identity["team_id"]
     connection = user.get("slack") or {}
     if connection.get("team_id") != team or not connection.get("user_id"):
-        raise ValueError("connect Slack in the bot's workspace before using Slack destinations")
+        raise ValueError(
+            "connect Slack in the bot's workspace before using Slack destinations"
+        )
     return team
 
 
@@ -144,9 +171,16 @@ async def _slack_members(client: httpx.AsyncClient, channel_id: str) -> set[str]
     members = set()
     cursor = ""
     while True:
-        body = await _api(client, "POST", "conversations.members", data={
-            "channel": channel_id, "limit": "200", "cursor": cursor,
-        })
+        body = await _api(
+            client,
+            "POST",
+            "conversations.members",
+            data={
+                "channel": channel_id,
+                "limit": "200",
+                "cursor": cursor,
+            },
+        )
         members.update(body.get("members", []))
         cursor = (body.get("response_metadata") or {}).get("next_cursor", "")
         if not cursor:
@@ -162,30 +196,44 @@ def _github_ref(query: str) -> tuple[str, int] | None:
     return (match[1], int(match[2])) if match else None
 
 
-async def find_channels(chat_id: str, provider: Provider, query: str) -> list[dict]:
+async def find_channels(
+    chat_id: str, provider: Provider, query: str, actor_user_id: str | None = None
+) -> list[dict]:
     """Find public Slack bot-member channels or GitHub issues/PRs in this space."""
     _rank(query, [])  # reject empty queries before making provider calls
-    user, space = await _context(chat_id)
+    user, space = await _context(chat_id, actor_user_id)
     candidates = []
     async with _client(provider) as client:
         if provider == "slack":
             team = await _slack_team(client, user)
             cursor = ""
             while True:
-                body = await _api(client, "POST", "users.conversations", data={
-                    "types": "public_channel", "exclude_archived": "true",
-                    "limit": "200", "cursor": cursor,
-                })
+                body = await _api(
+                    client,
+                    "POST",
+                    "users.conversations",
+                    data={
+                        "types": "public_channel",
+                        "exclude_archived": "true",
+                        "limit": "200",
+                        "cursor": cursor,
+                    },
+                )
                 for channel in body.get("channels", []):
                     if channel.get("is_archived") or channel.get("is_private"):
                         continue
                     identifier = f"{team}/{channel['id']}"
-                    candidates.append({
-                        "id": identifier, "provider": "slack", "name": channel["name"],
-                        "team_id": team, "channel_id": channel["id"],
-                        "private": bool(channel.get("is_private")),
-                        "aliases": [identifier, channel["id"], channel["name"]],
-                    })
+                    candidates.append(
+                        {
+                            "id": identifier,
+                            "provider": "slack",
+                            "name": channel["name"],
+                            "team_id": team,
+                            "channel_id": channel["id"],
+                            "private": bool(channel.get("is_private")),
+                            "aliases": [identifier, channel["id"], channel["name"]],
+                        }
+                    )
                 cursor = (body.get("response_metadata") or {}).get("next_cursor", "")
                 if not cursor:
                     break
@@ -195,7 +243,9 @@ async def find_channels(chat_id: str, provider: Provider, query: str) -> list[di
             if reference:
                 repo, number = reference
                 if repo.casefold() not in repos:
-                    raise ValueError("GitHub destination must belong to this space's repositories")
+                    raise ValueError(
+                        "GitHub destination must belong to this space's repositories"
+                    )
                 items = [await _api(client, "GET", f"repos/{repo}/issues/{number}")]
             else:
                 items = []
@@ -205,11 +255,19 @@ async def find_channels(chat_id: str, provider: Provider, query: str) -> list[di
                     raise ValueError("provide an issue title or owner/repo#number")
                 terms = " ".join(f'"{word}"' for word in words)
                 for repo in repos.values():
-                    body = await _api(client, "GET", "search/issues", params={
-                        "q": f"repo:{repo} {terms} in:title", "per_page": LIMIT,
-                    })
+                    body = await _api(
+                        client,
+                        "GET",
+                        "search/issues",
+                        params={
+                            "q": f"repo:{repo} {terms} in:title",
+                            "per_page": LIMIT,
+                        },
+                    )
                     if body.get("incomplete_results"):
-                        raise RuntimeError("GitHub search was incomplete; narrow the query")
+                        raise RuntimeError(
+                            "GitHub search was incomplete; narrow the query"
+                        )
                     items.extend(body.get("items", []))
             for item in items:
                 ref = _github_ref(item.get("html_url", ""))
@@ -217,65 +275,115 @@ async def find_channels(chat_id: str, provider: Provider, query: str) -> list[di
                     continue
                 repo, number = ref
                 identifier = f"{repo}#{number}"
-                candidates.append({
-                    "id": identifier, "provider": "github", "name": item["title"],
-                    "repo": repo, "number": number, "url": item["html_url"],
-                    "kind": "pull" if "pull_request" in item else "issue",
-                    "match": "exact" if reference else "search",
-                })
+                candidates.append(
+                    {
+                        "id": identifier,
+                        "provider": "github",
+                        "name": item["title"],
+                        "repo": repo,
+                        "number": number,
+                        "url": item["html_url"],
+                        "kind": "pull" if "pull_request" in item else "issue",
+                        "match": "exact" if reference else "search",
+                    }
+                )
             return candidates[:LIMIT]
     return _rank(query, candidates)
 
 
-async def find_people(chat_id: str, query: str) -> list[dict]:
+async def find_people(
+    chat_id: str, query: str, actor_user_id: str | None = None
+) -> list[dict]:
     """Search linked identities, not unrelated global provider directories."""
     _rank(query, [])
-    user, _ = await _context(chat_id)
+    user, _ = await _context(chat_id, actor_user_id)
     candidates = []
     for person in await auth_store.list_people():
         if not auth.allowed_user(person):
             continue
         slack = person.get("slack") or {}
         gh = person.get("github") or {}
-        candidates.append({
-            "id": person["id"], "name": person.get("name"), "username": person.get("username"),
-            "slack": {key: slack.get(key) for key in ("team_id", "user_id", "user")}
-            if slack.get("team_id") and slack.get("user_id") else None,
-            "github": {key: gh.get(key) for key in ("id", "login", "name")}
-            if gh.get("id") and gh.get("login") else None,
-            "aliases": [person["id"], person.get("name"), person.get("username"),
-                        slack.get("user"), gh.get("login"), gh.get("name"),
-                        *( ["me", "myself"] if person["id"] == user["id"] else [])],
-        })
+        candidates.append(
+            {
+                "id": person["id"],
+                "name": person.get("name"),
+                "username": person.get("username"),
+                "slack": {key: slack.get(key) for key in ("team_id", "user_id", "user")}
+                if slack.get("team_id") and slack.get("user_id")
+                else None,
+                "github": {key: gh.get(key) for key in ("id", "login", "name")}
+                if gh.get("id") and gh.get("login")
+                else None,
+                "aliases": [
+                    person["id"],
+                    person.get("name"),
+                    person.get("username"),
+                    slack.get("user"),
+                    gh.get("login"),
+                    gh.get("name"),
+                    *(["me", "myself"] if person["id"] == user["id"] else []),
+                ],
+            }
+        )
     found = _rank(query, candidates)
     # Exact linked handles need no directory scan. On a miss, enrich only linked
     # people in the owner's workspace with current Slack names (never new users).
-    if not any(item["match"] == "exact" for item in found) and os.environ.get("SLACK_CONNECTOR") and user.get("slack"):
+    if (
+        not any(item["match"] == "exact" for item in found)
+        and os.environ.get("SLACK_CONNECTOR")
+        and user.get("slack")
+    ):
         try:
             async with _client("slack") as client:
                 team = await _slack_team(client, user)
                 linked = {
-                    item["slack"]["user_id"]: item for item in candidates
+                    item["slack"]["user_id"]: item
+                    for item in candidates
                     if item["slack"] and item["slack"]["team_id"] == team
                 }
                 cursor = ""
                 while linked:
-                    body = await _api(client, "POST", "users.list", data={"limit": "200", "cursor": cursor})
+                    body = await _api(
+                        client,
+                        "POST",
+                        "users.list",
+                        data={"limit": "200", "cursor": cursor},
+                    )
                     for profile in body.get("members", []):
                         candidate = linked.pop(profile.get("id"), None)
-                        if candidate is None or profile.get("deleted") or profile.get("is_bot"):
+                        if (
+                            candidate is None
+                            or profile.get("deleted")
+                            or profile.get("is_bot")
+                        ):
                             continue
                         details = profile.get("profile") or {}
                         candidate["slack"]["user"] = profile.get("name")
-                        candidate["slack"]["display_name"] = details.get("display_name") or details.get("real_name")
-                        candidate["aliases"].extend([
-                            profile.get("name"), details.get("display_name"), details.get("real_name"),
-                        ])
-                    cursor = (body.get("response_metadata") or {}).get("next_cursor", "")
+                        candidate["slack"]["display_name"] = details.get(
+                            "display_name"
+                        ) or details.get("real_name")
+                        candidate["aliases"].extend(
+                            [
+                                profile.get("name"),
+                                details.get("display_name"),
+                                details.get("real_name"),
+                            ]
+                        )
+                    cursor = (body.get("response_metadata") or {}).get(
+                        "next_cursor", ""
+                    )
                     if not cursor:
                         break
-        except (httpx.HTTPError, connect.ConnectError, RuntimeError, ValueError) as error:
-            log.warning("Slack profile enrichment unavailable (%s); using linked names", type(error).__name__)
+        except (
+            httpx.HTTPError,
+            connect.ConnectError,
+            RuntimeError,
+            ValueError,
+        ) as error:
+            log.warning(
+                "Slack profile enrichment unavailable (%s); using linked names",
+                type(error).__name__,
+            )
         found = _rank(query, candidates)
     return found
 
@@ -288,9 +396,10 @@ async def start_thread(
     people: list[str] | None = None,
     *,
     delivery_key: str,
+    actor_user_id: str | None = None,
 ) -> dict:
     """Send a notification and link its provider conversation to this chat."""
-    user, space = await _context(chat_id)
+    user, space = await _context(chat_id, actor_user_id)
     if not text.strip():
         raise ValueError("message cannot be empty")
     people = sorted(set(people or []))
@@ -302,7 +411,9 @@ async def start_thread(
         recipients.append(person)
 
     digest = hashlib.sha256(
-        json.dumps([delivery_key, provider, destination, text, people], ensure_ascii=False).encode()
+        json.dumps(
+            [delivery_key, provider, destination, text, people], ensure_ascii=False
+        ).encode()
     ).hexdigest()
     for _, receipt in reversed(await events.read(chat_id, "notifications")):
         if receipt.get("key") != digest:
@@ -326,21 +437,31 @@ async def start_thread(
             if not match or match[1] != team:
                 raise ValueError("use a Slack destination returned by find_channels")
             channel_id = match[2]
-            body = await _api(client, "POST", "conversations.info", data={"channel": channel_id})
+            body = await _api(
+                client, "POST", "conversations.info", data={"channel": channel_id}
+            )
             channel = body["channel"]
             if channel.get("is_archived") or not channel.get("is_member"):
                 raise ValueError("the bot must be a member of an active channel")
             for person in recipients:
                 identity = person.get("slack") or {}
                 if identity.get("team_id") != team or not identity.get("user_id"):
-                    raise ValueError("recipient has no connected Slack identity in this workspace")
-                profile = (await _api(client, "POST", "users.info", data={"user": identity["user_id"]}))["user"]
+                    raise ValueError(
+                        "recipient has no connected Slack identity in this workspace"
+                    )
+                profile = (
+                    await _api(
+                        client, "POST", "users.info", data={"user": identity["user_id"]}
+                    )
+                )["user"]
                 if profile.get("deleted") or profile.get("is_bot"):
                     raise ValueError("recipient's Slack identity is inactive or a bot")
                 mentions.append(f"<@{identity['user_id']}>")
             if recipients:
                 members = await _slack_members(client, channel_id)
-                if any(person["slack"]["user_id"] not in members for person in recipients):
+                if any(
+                    person["slack"]["user_id"] not in members for person in recipients
+                ):
                     raise ValueError("a recipient is not in this Slack channel")
             content = " ".join([*mentions, html.escape(text, quote=False)])
             if len(content) > 40_000:
@@ -371,7 +492,10 @@ async def start_thread(
                 if str(profile["id"]) != str(identity["id"]):
                     raise ValueError("GitHub identity changed; reconnect the recipient")
                 mentions.append(f"@{profile['login']}")
-            content = " ".join([*mentions, text.replace("@", "@\u200b")]) + f"\n\n{github.MARKER}"
+            content = (
+                " ".join([*mentions, text.replace("@", "@\u200b")])
+                + f"\n\n{github.MARKER}"
+            )
             if len(content) > github.COMMENT_LIMIT:
                 raise ValueError("GitHub comment is too long")
             path = f"repos/{repo}/issues/{number}/comments"
@@ -390,34 +514,50 @@ async def start_thread(
                     "status": "unknown",
                     "detail": "Delivery was already attempted. Check the destination before retrying.",
                 }
-            await events.append(chat_id, "notifications", {
-                "key": digest, "provider": provider, "destination": destination, "people": people,
-            })
+            await events.append(
+                chat_id,
+                "notifications",
+                {
+                    "key": digest,
+                    "provider": provider,
+                    "destination": destination,
+                    "people": people,
+                },
+            )
             try:
                 posted = await _api(client, "POST", path, **params)
                 if provider == "slack":
                     message_id = str(posted["ts"])
                     token = f"slack:{team}:{channel_id}:{message_id}"
                     state = {
-                        "team_id": team, "channel_id": channel_id, "thread_ts": message_id,
+                        "team_id": team,
+                        "channel_id": channel_id,
+                        "thread_ts": message_id,
                         "user_id": user["slack"]["user_id"],
                     }
                     url = f"https://app.slack.com/client/{team}/{channel_id}"
                 else:
                     message_id = str(posted["id"])
                     state = {
-                        "owner": owner, "repo": name, "repository_id": repository["id"],
-                        "kind": kind, "number": number, "root_comment_id": None,
+                        "owner": owner,
+                        "repo": name,
+                        "repository_id": repository["id"],
+                        "kind": kind,
+                        "number": number,
+                        "root_comment_id": None,
                         "comment_id": posted["id"],
                         "sender_id": str((user.get("github") or {}).get("id", "")),
                     }
                     url = posted["html_url"]
                 result = {
-                    "status": "sent", "provider": provider, "destination": destination,
-                    "message_id": message_id, "url": url,
+                    "status": "sent",
+                    "provider": provider,
+                    "destination": destination,
+                    "message_id": message_id,
+                    "url": url,
                 }
                 binding = {"token": token, "state": state}
-            except (httpx.HTTPError, ValueError, KeyError, _UncertainDelivery):
+            except httpx.HTTPError, ValueError, KeyError, _UncertainDelivery:
                 result = {
                     "status": "unknown",
                     "detail": "Provider acceptance is uncertain. Check the destination; do not resend blindly.",

@@ -33,7 +33,9 @@ async def test_suggest_uses_luna_and_space_description(monkeypatch):
 
     class Agent:
         def run(self, model, messages, output_type, params):
-            seen.update(model=model, messages=messages, output_type=output_type, params=params)
+            seen.update(
+                model=model, messages=messages, output_type=output_type, params=params
+            )
             return Run()
 
     monkeypatch.setattr(sandbox.ai, "Agent", Agent)
@@ -119,9 +121,12 @@ async def test_launch_task_immediately_invalidates_ui(monkeypatch):
         updated_at="2026-08-31T00:00:00+00:00",
     )
 
-    async def launch_task(chat_id, sandbox_id, prompt, model):
+    async def launch_task(chat_id, sandbox_id, prompt, model, actor_user_id=None):
         assert (chat_id, sandbox_id, prompt, model) == (
-            "chat_1", "wrk_1", "fix it", "openai/test"
+            "chat_1",
+            "wrk_1",
+            "fix it",
+            "openai/test",
         )
         return task
 
@@ -136,10 +141,13 @@ async def test_launch_task_immediately_invalidates_ui(monkeypatch):
 
     assert created == task
     assert await sandbox.events.read("chat_1", "ui") == [
-        (0, {
-            "type": "task.changed",
-            "subagent_id": "task_1",
-            "sandbox_id": "wrk_1",
-            "state": "pending",
-        })
+        (
+            0,
+            {
+                "type": "task.changed",
+                "subagent_id": "task_1",
+                "sandbox_id": "wrk_1",
+                "state": "pending",
+            },
+        )
     ]
