@@ -878,3 +878,50 @@ def test_daemon_env_requires_public_origin_for_vercel_dev(monkeypatch):
         assert "HATCHERY_PUBLIC_URL" in str(error)
     else:
         raise AssertionError("missing public origin should fail")
+
+
+async def test_run_bash_uses_bounded_chat_sandbox_process(monkeypatch):
+    calls = []
+    record = types.SimpleNamespace(
+        id="wrk_1",
+        sandbox_name="hatchery-wrk_1",
+        spec=models.WorkerSpec(repos=["acme/app"]),
+    )
+
+    class Box:
+        async def run_process(self, command, args, **options):
+            calls.append((command, args, options))
+            options["stdout"].write("x" * (sandbox.MAX_BASH_OUTPUT_LENGTH + 1))
+            options["stderr"].write("problem")
+            return types.SimpleNamespace(returncode=7)
+
+    async def prepare(current, *, actor_user_id=None):
+        calls.append(("prepare", current, actor_user_id))
+
+    async def get_sandbox(*, name):
+        assert name == "hatchery-wrk_1"
+        return Box()
+
+    monkeypatch.setattr(sandbox, "prepare_for_command", prepare)
+    monkeypatch.setattr(sandbox.vercel_sandbox, "get_sandbox", get_sandbox)
+
+    result = await sandbox.run_bash(record, "printf test", 12, actor_user_id="user_1")
+
+    assert calls[0] == ("prepare", record, "user_1")
+    command, args, options = calls[1]
+    assert command == "/bin/bash"
+    assert args[-1].endswith("printf test")
+    assert isinstance(options.pop("stdout"), sandbox._BoundedOutput)
+    assert isinstance(options.pop("stderr"), sandbox._BoundedOutput)
+    assert options == {
+        "cwd": "/vercel/app",
+        "env": {"GH_TOKEN": sandbox.GITHUB_TOKEN_PLACEHOLDER},
+        "kill_after": 12,
+    }
+    assert result == {
+        "exit_code": 7,
+        "stdout": "x" * sandbox.MAX_BASH_OUTPUT_LENGTH,
+        "stderr": "problem",
+        "stdout_truncated": True,
+        "stderr_truncated": False,
+    }

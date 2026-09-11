@@ -2,6 +2,7 @@
 
 import asyncio
 import dataclasses
+import io
 import os
 import pathlib
 import urllib.parse
@@ -27,6 +28,20 @@ AI_GATEWAY_PLACEHOLDER = "sandbox-network-policy-placeholder"
 GITHUB_TOKEN_PLACEHOLDER = "sandbox-network-policy-placeholder"
 QUEUE_TOKEN_PLACEHOLDER = "sandbox-queue-policy-placeholder"
 EXECUTION_TIME_LIMIT = 24 * 60 * 60
+MAX_BASH_OUTPUT_LENGTH = 20_000
+
+
+class _BoundedOutput(io.StringIO):
+    def __init__(self) -> None:
+        super().__init__()
+        self.truncated = False
+
+    def write(self, text: str) -> int:
+        remaining = MAX_BASH_OUTPUT_LENGTH - self.tell()
+        if len(text) > remaining:
+            self.truncated = True
+        super().write(text[: max(remaining, 0)])
+        return len(text)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -216,6 +231,32 @@ async def prepare_for_command(
             await repair_daemon(
                 box, record.id, record.spec, record.daemon_token, routes
             )
+
+
+async def run_bash(
+    record: models.Worker, command: str, timeout: int, *, actor_user_id: str | None = None
+) -> dict[str, int | str | bool]:
+    """Run bounded Bash in one prepared sandbox without exposing its SDK handle."""
+    await prepare_for_command(record, actor_user_id=actor_user_id)
+    box = await vercel_sandbox.get_sandbox(name=record.sandbox_name)
+    stdout = _BoundedOutput()
+    stderr = _BoundedOutput()
+    result = await box.run_process(
+        "/bin/bash",
+        ["--noprofile", "--norc", "-lc", f"export PATH={SHIM_PATH}:$PATH; {command}"],
+        cwd=_workspace(record.spec),
+        env={"GH_TOKEN": GITHUB_TOKEN_PLACEHOLDER},
+        kill_after=timeout,
+        stdout=stdout,
+        stderr=stderr,
+    )
+    return {
+        "exit_code": result.returncode,
+        "stdout": stdout.getvalue(),
+        "stderr": stderr.getvalue(),
+        "stdout_truncated": stdout.truncated,
+        "stderr_truncated": stderr.truncated,
+    }
 
 
 async def prepare_for_tty(record: models.Worker) -> None:

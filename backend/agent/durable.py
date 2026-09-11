@@ -11,6 +11,7 @@ import vercel.workflow
 
 MODEL_ID = "openai/gpt-5.6-sol"
 MAX_NOTE_CONTENT_LENGTH = 1_000_000
+MAX_BASH_COMMAND_LENGTH = 100_000
 
 workflow = vercel.workflow.Workflows(
     sandbox_policy=vercel.workflow.SandboxPolicy(
@@ -155,6 +156,21 @@ async def list_sandboxes_step(chat_id: str) -> list[dict[str, typing.Any]]:
         item.model_dump(exclude={"daemon_token"})
         for item in await sandbox.list_all(chat_id)
     ]
+
+
+@workflow.step(max_retries=0)
+async def bash_step(
+    chat_id: str,
+    sandbox_id: str,
+    command: str,
+    timeout: int,
+    actor_user_id: str | None = None,
+) -> dict[str, int | str | bool]:
+    from agent import sandbox
+
+    return await sandbox.run_bash(
+        chat_id, sandbox_id, command, timeout, actor_user_id
+    )
 
 
 @workflow.step(max_retries=0)
@@ -380,6 +396,34 @@ async def list_sandboxes() -> list[dict[str, typing.Any]]:
 
 
 @ai.tool
+async def bash(
+    sandbox_id: str,
+    command: typing.Annotated[
+        str, pydantic.Field(min_length=1, max_length=MAX_BASH_COMMAND_LENGTH)
+    ],
+    timeout: typing.Annotated[int, pydantic.Field(ge=1, le=300)] = 60,
+) -> dict[str, int | str | bool]:
+    """Run a Bash command in an existing sandbox owned by this chat.
+
+    Commands start in the primary repository, or ``/vercel`` for a sandbox with
+    no repositories. The sandbox's network and GitHub credential policies still
+    apply. Output is capped per stream; inspect ``exit_code`` and truncation flags.
+    Use this for quick inspection or small direct changes. Prefer a subagent for
+    involved work, long-running processes, or tasks that need iterative context.
+    """
+    if not command or len(command) > MAX_BASH_COMMAND_LENGTH:
+        raise ValueError(
+            f"command must contain 1 to {MAX_BASH_COMMAND_LENGTH} characters"
+        )
+    if timeout < 1 or timeout > 300:
+        raise ValueError("timeout must be between 1 and 300 seconds")
+    agent = current_agent.get()
+    return await bash_step(
+        agent.chat_id, sandbox_id, command, timeout, agent.actor_user_id
+    )
+
+
+@ai.tool
 async def create_subagent(
     sandbox_id: str,
     task: str,
@@ -572,6 +616,7 @@ async def edit_note(
 BASE_TOOLS = [
     create_sandbox,
     list_sandboxes,
+    bash,
     create_subagent,
     message_subagent,
     check_subagent,

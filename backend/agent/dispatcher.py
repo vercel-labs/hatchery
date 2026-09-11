@@ -32,9 +32,10 @@ Here's what you are working with:
 
 - SANDBOX is a durable, chat-owned computer. Its files, processes, and cloned
   repositories survive across subagent runs, and subagents in the same sandbox
-  share that state. You can see sandbox metadata through tools, but cannot
-  inspect or change its files yourself. Before creating a sandbox, check whether
-  an existing one has the required repositories and useful state.
+  share that state. You can run bounded Bash commands in it for quick inspection
+  and small direct changes. Use subagents for involved work that benefits from
+  iterative context. Before creating a sandbox, check whether an existing one has
+  the required repositories and useful state.
 
 - SUBAGENT CHAT is one worker's model conversation. It sees its task, later
   messages sent to it, and its sandbox. It does not see the dispatcher

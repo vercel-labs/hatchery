@@ -151,3 +151,31 @@ async def test_launch_task_immediately_invalidates_ui(monkeypatch):
             },
         )
     ]
+
+
+async def test_run_bash_enforces_chat_ownership(monkeypatch):
+    record = type("Worker", (), {"chat_id": "chat_1"})()
+    calls = []
+
+    async def get(sandbox_id):
+        return record if sandbox_id == "wrk_1" else None
+
+    async def run_bash(current, command, timeout, *, actor_user_id=None):
+        calls.append((current, command, timeout, actor_user_id))
+        return {"exit_code": 0}
+
+    @contextlib.asynccontextmanager
+    async def use_chat(_chat_id):
+        yield None
+
+    monkeypatch.setattr(sandbox.telemetry, "use_chat", use_chat)
+    monkeypatch.setattr(sandbox.worker, "get", get)
+    monkeypatch.setattr(sandbox.worker.sandbox, "run_bash", run_bash)
+
+    result = await sandbox.run_bash("chat_1", "wrk_1", "pwd", 10, "user_1")
+
+    assert result == {"exit_code": 0}
+    assert calls == [(record, "pwd", 10, "user_1")]
+    record.chat_id = "chat_2"
+    with pytest.raises(ValueError, match="does not belong"):
+        await sandbox.run_bash("chat_1", "wrk_1", "pwd", 10)
