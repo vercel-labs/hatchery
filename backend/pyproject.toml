@@ -7,7 +7,6 @@ dependencies = [
     "ai[otel,vercel]",
     "asyncpg>=0.31.0",
     "asyncssh>=2.21,<3",
-    "braintrust[otel]>=0.35.0",
     "fastapi>=0.115",
     "httpx>=0.28",
     "pyjwt[crypto]>=2.10",
@@ -16,6 +15,7 @@ dependencies = [
     "vercel-connect",
     "websockets>=15,<17",
     "croniter>=6,<7",
+    "requests>=2.32",
 ]
 
 [dependency-groups]

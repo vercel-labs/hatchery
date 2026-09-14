@@ -141,8 +141,11 @@ async def launch_task(
     run_span = ai.experimental_telemetry.create_span("hatchery.agent_run").stamp_start()
     run_span.set_attrs(
         {
-            "braintrust.input_json": json.dumps({"prompt": prompt}),
-            "braintrust.span_attributes": json.dumps({"type": "task"}),
+            "gen_ai.input.messages": json.dumps(
+                [{"role": "user", "parts": [{"type": "text", "content": prompt}]}]
+            ),
+            "gen_ai.operation.name": "invoke_agent",
+            "gen_ai.agent.name": "fx",
             "chat.id": chat_id,
             "worker.id": worker_id,
             "task.id": resolved_task_id,

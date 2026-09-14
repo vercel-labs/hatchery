@@ -34,5 +34,5 @@ the current branch with `scripts/triggers.sh`.
 ## how to verify and debug
 
 1. use `docs/use-agent-browser.md` to access live deployments and run real agent sessions.
-2. for completed runs, inspect telemetry traces in `docs/use-braintrust.md` to understand exactly what happened during the run.
+2. for completed runs, follow `docs/use-traces.md` to inspect traces. Use the copied trace URL; search only supports ID, name, and service, not chat/task attributes. Historical runs are not backfilled.
 

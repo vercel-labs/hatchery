@@ -268,7 +268,18 @@ async def _name_chat(chat_id: str, prompt: str) -> None:
             async with ai.experimental_telemetry.span("hatchery.title") as span:
                 span.set_attrs({"chat.id": chat_id})
                 generated = await topic.generate(prompt)
-                span.set_attrs({"braintrust.output_json": json.dumps(generated)})
+                span.set_attrs(
+                    {
+                        "gen_ai.output.messages": json.dumps(
+                            [
+                                {
+                                    "role": "assistant",
+                                    "parts": [{"type": "text", "content": generated}],
+                                }
+                            ]
+                        )
+                    }
+                )
                 if generated and await chats.set_topic(chat_id, generated):
                     await events.append(chat_id, "ui", {"type": "chat.changed"})
     finally:
@@ -1559,14 +1570,8 @@ async def worker_event(event: worker_protocol.Event) -> None:
                 kind = str(event.payload.get("kind") or "event")
                 if event.type == "task.transcript" and kind == "tool.call":
                     arguments = str(event.payload.get("arguments") or "{}")
-                    try:
-                        tool_input = json.loads(arguments)
-                    except json.JSONDecodeError:
-                        tool_input = arguments
                     span.set_attrs(
                         {
-                            "braintrust.input_json": json.dumps(tool_input),
-                            "braintrust.span_attributes": json.dumps({"type": "tool"}),
                             "gen_ai.operation.name": "execute_tool",
                             "gen_ai.tool.name": str(
                                 event.payload.get("tool_name") or "fx"
@@ -1582,8 +1587,6 @@ async def worker_event(event: worker_protocol.Event) -> None:
                     output = str(event.payload.get("output") or "")
                     span.set_attrs(
                         {
-                            "braintrust.output_json": json.dumps(output),
-                            "braintrust.span_attributes": json.dumps({"type": "tool"}),
                             "gen_ai.operation.name": "execute_tool",
                             "gen_ai.tool.call.id": str(
                                 event.payload.get("tool_call_id") or ""
@@ -1595,12 +1598,32 @@ async def worker_event(event: worker_protocol.Event) -> None:
                 elif event.type == "task.transcript" and kind == "user":
                     text = str(event.payload.get("text") or "")
                     span.set_attrs(
-                        {"braintrust.input_json": json.dumps({"text": text})}
+                        {
+                            "gen_ai.input.messages": json.dumps(
+                                [
+                                    {
+                                        "role": "user",
+                                        "parts": [{"type": "text", "content": text}],
+                                    }
+                                ]
+                            )
+                        }
                     )
                 elif event.type == "task.output":
                     text = str(event.payload.get("text") or "")
                     span.set_attrs(
-                        {"braintrust.output_json": json.dumps({"text": text[:8192]})}
+                        {
+                            "gen_ai.output.messages": json.dumps(
+                                [
+                                    {
+                                        "role": "assistant",
+                                        "parts": [
+                                            {"type": "text", "content": text[:8192]}
+                                        ],
+                                    }
+                                ]
+                            )
+                        }
                     )
                 task, changed = await worker.ingest(event)
                 span.set_attrs(applied=changed)
@@ -1654,7 +1677,18 @@ async def worker_event(event: worker_protocol.Event) -> None:
                     await complete_worker_task(task)
         if terminal and task is not None and parent is not None:
             parent.set_attrs(
-                {"braintrust.output_json": json.dumps(task.result)},
+                {
+                    "gen_ai.output.messages": json.dumps(
+                        [
+                            {
+                                "role": "assistant",
+                                "parts": [
+                                    {"type": "text", "content": json.dumps(task.result)}
+                                ],
+                            }
+                        ]
+                    )
+                },
                 task_state=task.status,
             )
             parent.stamp_end()

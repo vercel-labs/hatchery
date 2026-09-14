@@ -1,5 +1,7 @@
 # I don't know where to put this
 
+The browser experiments below are historical, from before the Traces migration. Their trace IDs and results refer to the previous tracing system and are not backfilled into Traces. For current inspection and search limits, use [Use Traces](use-traces.md).
+
 ## From `docs/arch/sandbox.md`
 
 ### Maybe bugs
@@ -13,7 +15,7 @@
 
 ## Goal
 
-Use agent-browser against the protected live Hatchery deployment to submit one dispatcher turn and verify its trace in Braintrust.
+Use agent-browser against the protected live Hatchery deployment to submit one dispatcher turn and verify its trace in the previous tracing system.
 
 ## Result
 
@@ -28,7 +30,7 @@ The corrected 2026-08-31 run completed successfully with `agent-browser 0.35.2`.
 
 Authentication succeeded through the dedicated persistent Chromium profile. The browser was kept alive through one persistent terminal session, `New chat` worked across separate agent-browser commands, and the dispatcher completed its turn.
 
-The Braintrust trace was found by chat ID. Its root trace was `8a7e0816d2d4eb01472ff97e84d28ca2`, rooted at `hatchery.turn`.
+The historical root trace was `8a7e0816d2d4eb01472ff97e84d28ca2`, rooted at `hatchery.turn`. This is not a Traces lookup example.
 
 ## Authentication
 
@@ -66,7 +68,7 @@ The browser window must be closed after login so its profile lock is released. T
 - The initial subagent prompt also used the stale `/home/vercel-sandbox/hatchery/README.md` path. The checkout was actually at `/vercel/hatchery`; a follow-up message recovered the run.
 - Waiting for visible text `# hatchery` timed out because the UI rendered the final answer as `hatchery`. Reading the page body and task status was more reliable.
 
-## Braintrust verification
+## Historical trace verification
 
 - Root trace: `8a7e0816d2d4eb01472ff97e84d28ca2`
 - Root span: `hatchery.turn`
@@ -92,7 +94,7 @@ The Playwright experiment in `playwright.md` was more reliable for this stateful
 | Element access | Snapshot refs and semantic locators worked | Stable locators |
 | Installation | Homebrew installation passed all doctor checks | Temporary installation required more setup |
 | Dispatcher result | Completed successfully | Completed successfully |
-| Braintrust result | Complete trace verified | Complete trace verified |
+| Historical trace result | Complete trace verified | Complete trace verified |
 
 Both tools completed the stateful authenticated flow. For this CLI environment, agent-browser must run inside one persistent terminal session so its daemon is not cleaned up between commands.
 
@@ -149,7 +151,7 @@ This document is the only intended repository change from this experiment. No ap
 
 ## Goal
 
-Use browser automation against the live Vercel production deployment to submit one dispatcher turn, wait for its subagent, and verify the complete trace in Braintrust.
+Use browser automation against the live Vercel production deployment to submit one dispatcher turn, wait for its subagent, and verify the complete trace in the previous tracing system.
 
 ## Result
 
@@ -182,9 +184,8 @@ x-vercel-protection-bypass: <secret>
 
 It was not printed, placed in a URL, or written to the repository.
 
-## Braintrust verification
+## Historical trace verification
 
-- Project: `braintrust-coffee-flame`
 - Root trace: `d22aaf8ac10fece617a7521149481289`
 - Root span: `hatchery.turn`
 - Deployment commit: `d5e47dbfc29426524bc0ca10b7181cb9b1820bfe`
@@ -216,8 +217,7 @@ The trace contained the expected chain:
 - Playwright is not installed in the project.
 - `pnpm dlx playwright` exposes the CLI but does not make `@playwright/test` importable by a temporary script. The runner had to be installed in a temporary directory.
 - The automation appeared to hang after the application had already completed. Its completion condition expected two assistant messages, but the messages API merged the initial and final dispatcher responses into one updated assistant message.
-- Braintrust free-text search found the run by `chat.id`, but not by the marker embedded in the user prompt. Metadata correlation is more reliable.
-- Braintrust summary and span-list views showed confusing root-span timing. Async child spans extended beyond one displayed root end time.
+- The previous tracing system's summary and span-list views showed confusing root-span timing. Async child spans extended beyond one displayed root end time.
 - A later standalone curl was redirected to SSO even though the same Keychain secret worked in Playwright and earlier curl checks. Bypass behavior across isolated requests may need investigation.
 
 ## Repository impact

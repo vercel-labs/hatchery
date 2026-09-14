@@ -28,7 +28,7 @@ agent-browser wait 30000
 agent-browser get text body
 ```
 
-Check the page until the task is complete. Record the `chat_...`, `task_...`, and `wrk_...` IDs for correlation in Braintrust. Close the browser when done:
+Check the page until the task is complete. Use **Copy trace URL** in the prompt form and follow [Use Traces](use-traces.md). Record the `chat_...`, `task_...`, and `wrk_...` IDs for correlation within the trace; Traces search does not support these attributes. Trace availability requires backend export, and historical runs are not backfilled. Close the browser when done:
 
 ```sh
 agent-browser close

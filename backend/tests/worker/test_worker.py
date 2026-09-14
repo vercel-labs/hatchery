@@ -1,3 +1,5 @@
+import json
+
 import ai.experimental_telemetry
 import pytest
 
@@ -91,14 +93,13 @@ async def test_launch_and_follow_up_rotate_actor_credentials(monkeypatch):
     assert task.telemetry_span["name"] == "hatchery.agent_run"
     assert task.telemetry_span["trace_id"] == turn_span.trace_id
     assert task.telemetry_span["parent_id"] == turn_span.id
-    assert (
-        task.telemetry_span["data"]["attrs"]["braintrust.input_json"]
-        == '{"prompt": "fix it"}'
-    )
-    assert (
-        task.telemetry_span["data"]["attrs"]["braintrust.span_attributes"]
-        == '{"type": "task"}'
-    )
+    attrs = task.telemetry_span["data"]["attrs"]
+    assert json.loads(attrs["gen_ai.input.messages"]) == [
+        {"role": "user", "parts": [{"type": "text", "content": "fix it"}]}
+    ]
+    assert attrs["gen_ai.operation.name"] == "invoke_agent"
+    assert attrs["gen_ai.agent.name"] == "fx"
+    assert not any(key.startswith("braintrust.") for key in attrs)
     assert task.command_sequence == 1
     assert task.completion_delivered is False
     with pytest.raises(ValueError, match="does not belong"):
