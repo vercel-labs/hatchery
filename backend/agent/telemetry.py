@@ -1,12 +1,17 @@
-"""Send AI SDK traces to Braintrust."""
+"""Send AI SDK traces to Traces over authenticated OTLP/HTTP."""
 
 import contextlib
-import json
 import os
-import typing
 
 import ai.experimental_telemetry
 import ai.experimental_telemetry.otel
+import opentelemetry.exporter.otlp.proto.http
+import opentelemetry.exporter.otlp.proto.http.trace_exporter
+import opentelemetry.sdk.resources
+import opentelemetry.sdk.trace
+import opentelemetry.sdk.trace.export
+import requests
+import vercel.oidc
 
 _adapter: ai.experimental_telemetry.otel.OtelAdapter | None = None
 
@@ -32,14 +37,7 @@ async def use_chat(chat_id: str):
     )
     if root is None:
         candidate = ai.experimental_telemetry.create_span("hatchery.chat").stamp_start()
-        candidate.set_attrs(
-            {
-                "braintrust.input_json": json.dumps({"chat_id": chat.id}),
-                "braintrust.span_attributes": json.dumps({"type": "task"}),
-                "chat.id": chat.id,
-            },
-            trigger=chat.trigger,
-        )
+        candidate.set_attrs({"chat.id": chat.id}, trigger=chat.trigger)
         candidate.stamp_end()
         if candidate.id:
             saved = await chats.set_telemetry_span_if_absent(
@@ -63,49 +61,63 @@ async def use_chat(chat_id: str):
             flush()
 
 
-class _BraintrustAdapter(ai.experimental_telemetry.otel.OtelAdapter):
-    def span_attrs(
-        self, span: ai.experimental_telemetry.Span, /
-    ) -> dict[str, typing.Any]:
-        return super().span_attrs(span) | {
-            "braintrust.metadata.vercel_deployment_id": os.environ.get(
-                "VERCEL_DEPLOYMENT_ID", "local"
-            ),
-            "braintrust.metadata.vercel_environment": os.environ.get(
-                "VERCEL_ENV", "development"
-            ),
-            "braintrust.metadata.git_commit_sha": os.environ.get(
-                "VERCEL_GIT_COMMIT_SHA", ""
-            ),
-        }
+class _TracesSession(requests.Session):
+    def send(self, request: requests.PreparedRequest, **kwargs) -> requests.Response:
+        # Resolve on every send, not at module import: function tokens rotate.
+        request.headers["x-vercel-trusted-oidc-idp-token"] = (
+            vercel.oidc.get_vercel_oidc_token()
+        )
+        # A protection login redirect is not an accepted export. Never forward
+        # the OIDC header to a redirect target or let OTLP count it as success.
+        kwargs["allow_redirects"] = False
+        response = super().send(request, **kwargs)
+        if 300 <= response.status_code < 400:
+            response.close()
+            raise requests.exceptions.HTTPError(
+                "Traces redirected; check deployment protection"
+            )
+        return response
 
 
 def install() -> ai.experimental_telemetry.otel.OtelAdapter | None:
-    """Install Braintrust tracing when its API key and project are configured."""
+    """Enable Traces on Vercel, or locally with an explicit TRACES_URL."""
     global _adapter
     if _adapter is not None:
         return _adapter
 
-    api_key = os.environ.get("BRAINTRUST_API_KEY")
-    parent = os.environ.get("BRAINTRUST_PARENT")
-    if not parent and (project_id := os.environ.get("BRAINTRUST_PROJECT_ID")):
-        parent = f"project_id:{project_id}"
-    if not api_key or not parent:
+    url = os.environ.get(
+        "TRACES_URL",
+        ("https://traces.playground-vercel.tools" if os.environ.get("VERCEL") else ""),
+    )
+    if not url:
         return None
-
-    import braintrust.otel
-    import opentelemetry.sdk.resources
-    import opentelemetry.sdk.trace
 
     provider = opentelemetry.sdk.trace.TracerProvider(
         resource=opentelemetry.sdk.resources.Resource.create(
-            {"service.name": "hatchery"}
+            {
+                "service.name": "hatchery",
+                "vercel.deployment.id": os.environ.get("VERCEL_DEPLOYMENT_ID", "local"),
+                "deployment.environment.name": os.environ.get(
+                    "VERCEL_ENV", "development"
+                ),
+                "vcs.ref.head.revision": os.environ.get("VERCEL_GIT_COMMIT_SHA", ""),
+            }
         )
     )
-    provider.add_span_processor(
-        braintrust.otel.BraintrustSpanProcessor(api_key=api_key, parent=parent)
+    exporter = opentelemetry.exporter.otlp.proto.http.trace_exporter.OTLPSpanExporter(
+        endpoint=f"{url.rstrip('/')}/v1/traces",
+        session=_TracesSession(),
+        timeout=5,
+        compression=opentelemetry.exporter.otlp.proto.http.Compression.NoCompression,
     )
-    _adapter = _BraintrustAdapter(tracer_provider=provider, capture_content=True)
+    # Export in the invocation's context, where Vercel's rotating OIDC header is
+    # available. A background BatchSpanProcessor thread loses that context.
+    provider.add_span_processor(
+        opentelemetry.sdk.trace.export.SimpleSpanProcessor(exporter)
+    )
+    _adapter = ai.experimental_telemetry.otel.OtelAdapter(
+        tracer_provider=provider, capture_content=True
+    )
     ai.experimental_telemetry.register(_adapter)
     return _adapter
 

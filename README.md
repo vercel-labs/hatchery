@@ -21,6 +21,6 @@ Point Slack and GitHub triggers at the branch when testing integrations:
 ./scripts/triggers.sh
 ```
 
-Use [`docs/use-agent-browser.md`](docs/use-agent-browser.md) for browser-driven testing and [`docs/use-braintrust.md`](docs/use-braintrust.md) to inspect agent runs.
+Use [`docs/use-agent-browser.md`](docs/use-agent-browser.md) for browser-driven testing and [`docs/use-traces.md`](docs/use-traces.md) to inspect agent runs. The Traces guide covers export configuration, search limits, and the future-only migration (no historical backfill).
 
 The frontend is built with Next.js and React. The backend uses FastAPI and the AI SDK for Python. Hatchery runs on Vercel Workflows, Queues, and Sandboxes, with Neon Postgres for storage and Vercel Connect for Slack and GitHub integrations.

@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import json
 from unittest import mock
 
 import httpx
@@ -847,6 +848,13 @@ async def test_name_chat_generates_and_persists_topic(monkeypatch):
     title = next(span for span in sink.finished_spans if span.name == "hatchery.title")
     assert title.trace_id == root.trace_id
     assert title.parent_id == root.id
+    assert json.loads(title.data.attrs["gen_ai.output.messages"]) == [
+        {
+            "role": "assistant",
+            "parts": [{"type": "text", "content": "Sidebar chat names"}],
+        }
+    ]
+    assert not any(key.startswith("braintrust.") for key in title.data.attrs)
     named = await chats.get(chat.id)
     assert named is not None and named.topic == "Sidebar chat names"
     assert await events.read(chat.id, "ui") == [(0, {"type": "chat.changed"})]
@@ -2079,7 +2087,16 @@ async def test_task_readiness_requires_actual_daemon_session(monkeypatch):
     assert readiness["session_ready"] is True
 
 
-async def test_worker_event_continues_and_closes_agent_run(monkeypatch):
+@pytest.mark.parametrize(
+    ("arguments", "assistant_text"),
+    [
+        ('{"path":"README.md"}', "Finished reading."),
+        ('{"path":', "x" * 8193),
+    ],
+)
+async def test_worker_event_continues_and_closes_agent_run(
+    monkeypatch, arguments, assistant_text
+):
     seen = []
 
     @ai.experimental_telemetry.adapter
@@ -2119,7 +2136,7 @@ async def test_worker_event_continues_and_closes_agent_run(monkeypatch):
                     "kind": "tool.call",
                     "tool_call_id": "call_trace",
                     "tool_name": "read_file",
-                    "arguments": '{"path":"README.md"}',
+                    "arguments": arguments,
                     "session_id": "session_trace",
                     "truncated": False,
                 },
@@ -2150,7 +2167,18 @@ async def test_worker_event_continues_and_closes_agent_run(monkeypatch):
                 sequence=2,
                 type="task.output",
                 created_at="2026-08-31T00:00:03+00:00",
-                payload={"text": "Finished reading."},
+                payload={"text": assistant_text},
+            )
+        )
+        await server.worker_event(
+            server.worker_protocol.Event(
+                id="evt_user",
+                worker_id=task.worker_id,
+                task_id=task.id,
+                sequence=3,
+                type="task.transcript",
+                created_at="2026-08-31T00:00:04+00:00",
+                payload={"kind": "user", "text": "trace it"},
             )
         )
         await server.worker_event(
@@ -2158,9 +2186,9 @@ async def test_worker_event_continues_and_closes_agent_run(monkeypatch):
                 id="evt_trace",
                 worker_id=task.worker_id,
                 task_id=task.id,
-                sequence=3,
+                sequence=4,
                 type="task.completed",
-                created_at="2026-08-31T00:00:04+00:00",
+                created_at="2026-08-31T00:00:05+00:00",
                 payload={"summary": "done"},
             )
         )
@@ -2173,28 +2201,40 @@ async def test_worker_event_continues_and_closes_agent_run(monkeypatch):
     completed = next(span for span in seen if span.name == "fx.task.completed")
     assert transcript.trace_id == parent.trace_id
     assert transcript.parent_id == parent.id
-    assert transcript.data.attrs["braintrust.input_json"] == '{"path": "README.md"}'
-    assert transcript.data.attrs["braintrust.span_attributes"] == '{"type": "tool"}'
     assert transcript.data.attrs["gen_ai.operation.name"] == "execute_tool"
     assert transcript.data.attrs["gen_ai.tool.name"] == "read_file"
+    assert transcript.data.attrs["gen_ai.tool.type"] == "function"
     assert transcript.data.attrs["gen_ai.tool.call.id"] == "call_trace"
-    assert transcript.data.attrs["gen_ai.tool.call.arguments"] == '{"path":"README.md"}'
-    assert result.data.attrs["braintrust.output_json"] == '"README contents"'
+    assert transcript.data.attrs["gen_ai.tool.call.arguments"] == arguments
+    assert result.data.attrs["gen_ai.operation.name"] == "execute_tool"
+    assert result.data.attrs["gen_ai.tool.call.id"] == "call_trace"
     assert result.data.attrs["gen_ai.tool.call.result"] == '"README contents"'
     assert result.data.attrs["tool_error"] is False
-    assert (
-        assistant.data.attrs["braintrust.output_json"]
-        == '{"text": "Finished reading."}'
-    )
+    assert json.loads(assistant.data.attrs["gen_ai.output.messages"]) == [
+        {
+            "role": "assistant",
+            "parts": [{"type": "text", "content": assistant_text[:8192]}],
+        }
+    ]
+    user = next(span for span in seen if span.name == "fx.user")
+    assert json.loads(user.data.attrs["gen_ai.input.messages"]) == [
+        {"role": "user", "parts": [{"type": "text", "content": "trace it"}]}
+    ]
+    for span in (transcript, result, assistant, user):
+        assert not any(key.startswith("braintrust.") for key in span.data.attrs)
     assert completed.trace_id == parent.trace_id
     assert completed.parent_id == parent.id
     stored = await server.worker.store.get_task(task.id)
     assert stored is not None
     assert stored.telemetry_span["ended_at"] is not None
-    assert (
-        stored.telemetry_span["data"]["attrs"]["braintrust.output_json"]
-        == '{"summary": "done"}'
-    )
+    attrs = stored.telemetry_span["data"]["attrs"]
+    assert json.loads(attrs["gen_ai.output.messages"]) == [
+        {
+            "role": "assistant",
+            "parts": [{"type": "text", "content": '{"summary": "done"}'}],
+        }
+    ]
+    assert not any(key.startswith("braintrust.") for key in attrs)
     assert stored.telemetry_span["data"]["attrs"]["fx.session_id"] == "session_trace"
     assert stored.telemetry_span["data"]["attrs"]["fx.tool_call_count"] == 1
     assert stored.telemetry_span["events"][0]["name"] == "fx.tool.call"
