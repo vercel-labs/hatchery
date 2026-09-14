@@ -2252,6 +2252,39 @@ async def test_worker_event_pushes_late_transcript_without_extending_run(monkeyp
     assert stored.transcript_event_count == 1
 
 
+async def test_worker_event_rejects_event_from_another_worker(monkeypatch):
+    task = server.worker.Task(
+        id="task_1",
+        chat_id="chat_1",
+        worker_id="wrk_1",
+        title="fix",
+        prompt="fix it",
+        model="openai/test",
+        created_at="2026-09-14T00:00:00+00:00",
+        updated_at="2026-09-14T00:00:00+00:00",
+    )
+    await server.worker.store.save_task(task)
+
+    async def ingest(event):
+        raise AssertionError("wrong-worker event reached ingestion")
+
+    monkeypatch.setattr(server.worker, "ingest", ingest)
+
+    await server.worker_event(
+        server.worker_protocol.Event(
+            id="evt_forged",
+            worker_id="wrk_2",
+            task_id=task.id,
+            sequence=0,
+            type="task.completed",
+            created_at="2026-09-14T00:00:01+00:00",
+            payload={"summary": "forged"},
+        )
+    )
+
+    assert await server.worker.store.get_task(task.id) == task
+
+
 def test_worker_event_subscriber_is_serialized():
     subscription = next(
         item

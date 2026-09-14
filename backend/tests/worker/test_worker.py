@@ -168,6 +168,38 @@ async def test_ingest_is_idempotent_and_ordered(monkeypatch):
     assert applied.result == {"summary": "done"}
 
 
+async def test_ingest_rejects_event_from_another_worker():
+    task = models.Task(
+        id="task_1",
+        chat_id="chat_1",
+        worker_id="wrk_1",
+        title="fix",
+        prompt="fix it",
+        model="openai/test",
+        created_at="2026-09-14T00:00:00+00:00",
+        updated_at="2026-09-14T00:00:00+00:00",
+    )
+    await worker.store.save_task(task)
+    event = protocol.Event(
+        id="evt_forged",
+        worker_id="wrk_2",
+        task_id=task.id,
+        sequence=0,
+        type="task.completed",
+        created_at="2026-09-14T00:00:01+00:00",
+        payload={"summary": "forged"},
+    )
+
+    returned, changed = await worker.ingest(event)
+
+    stored = await worker.store.get_task(task.id)
+    assert changed is False
+    assert returned == stored == task
+    assert stored.event_ids == []
+    assert stored.status == "pending"
+    assert stored.result is None
+
+
 async def test_ingest_accepts_late_transcript_without_reopening_task(monkeypatch):
     async def send(command):
         pass

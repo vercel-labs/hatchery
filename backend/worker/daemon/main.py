@@ -32,7 +32,7 @@ import uuid
 import asyncssh
 import websockets.asyncio.server
 
-VERSION = 14
+VERSION = 15
 FX_VERSION = "0.0.8"
 FX_BINARY = "/opt/hatchery/bin/fx"
 REPLAY_LIMIT = 1024 * 1024
@@ -109,13 +109,31 @@ class Runtime:
         sequence before scheduling background work could therefore lose a launch if
         the daemon crashed between those two steps.
         """
-        task_id = str(raw.get("task_id") or "")
-        if raw.get("worker_id") != self.worker_id:
+        fields = {
+            "version", "id", "worker_id", "task_id", "sequence", "type",
+            "created_at", "payload",
+        }
+        if not isinstance(raw, dict) or set(raw) != fields:
             return
+        task_id = raw.get("task_id")
         kind = raw.get("type")
-        if not task_id:
+        sequence = raw.get("sequence")
+        payload = raw.get("payload")
+        if (
+            raw.get("version") != 1
+            or not isinstance(raw.get("id"), str)
+            or not raw["id"]
+            or raw.get("worker_id") != self.worker_id
+            or not isinstance(task_id, str)
+            or not task_id
+            or type(sequence) is not int
+            or sequence < 0
+            or kind not in ("task.launch", "task.input", "task.cancel")
+            or not isinstance(raw.get("created_at"), str)
+            or not raw["created_at"]
+            or not isinstance(payload, dict)
+        ):
             return
-        sequence = int(raw.get("sequence", -1))
         async with self.command_lock:
             if sequence <= self.sequences.get(task_id, -1):
                 return
@@ -125,7 +143,6 @@ class Runtime:
                 if session is not None and session.exit_code is None:
                     session.send_signal("interrupt")
             elif kind in ("task.launch", "task.input"):
-                payload = raw.get("payload") or {}
                 prompt = str(payload.get("prompt") or "")
                 model = str(payload.get("model") or "")
                 session = self.processes.get(task_id)

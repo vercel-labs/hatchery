@@ -68,8 +68,11 @@ async def test_runtime_runs_interactive_fx_and_reuses_it_for_follow_up(monkeypat
 
     monkeypatch.setattr(runtime, "_stream_task", keep_streaming)
     base = {
+        "version": 1,
+        "id": "cmd_1",
         "worker_id": "wrk_1",
         "task_id": "task_1",
+        "created_at": "2026-09-14T00:00:00+00:00",
         "payload": {"prompt": "fix it", "model": "openai/test"},
     }
     await runtime.handle({**base, "sequence": 0, "type": "task.launch"})
@@ -95,6 +98,45 @@ async def test_runtime_runs_interactive_fx_and_reuses_it_for_follow_up(monkeypat
     assert [event["type"] for event in emitted] == ["task.started", "task.started"]
     assert [event["sequence"] for event in emitted] == [0, 1]
     assert main.Handler.sessions["task_1"] is session
+
+
+async def test_runtime_rejects_invalid_command_envelopes(monkeypatch, tmp_path):
+    runtime = main.Runtime("wrk_1", str(tmp_path), lambda event: None)
+    launched = []
+
+    async def launch(*args, **kwargs):
+        launched.append((args, kwargs))
+
+    monkeypatch.setattr(runtime, "_launch", launch)
+    valid = {
+        "version": 1,
+        "id": "cmd_1",
+        "worker_id": "wrk_1",
+        "task_id": "task_1",
+        "sequence": 0,
+        "type": "task.launch",
+        "created_at": "2026-09-14T00:00:00+00:00",
+        "payload": {"prompt": "fix it"},
+    }
+    invalid = [
+        {key: value for key, value in valid.items() if key != "version"},
+        {**valid, "unknown": True},
+        {**valid, "version": 2},
+        {**valid, "id": ""},
+        {**valid, "worker_id": "wrk_2"},
+        {**valid, "task_id": None},
+        {**valid, "sequence": True},
+        {**valid, "sequence": -1},
+        {**valid, "type": "task.unknown"},
+        {**valid, "created_at": ""},
+        {**valid, "payload": []},
+    ]
+
+    for command in invalid:
+        await runtime.handle(command)
+
+    assert launched == []
+    assert runtime.sequences == {}
 
 
 async def test_stream_drains_completion_buffered_after_process_exit(monkeypatch, tmp_path):
@@ -173,8 +215,10 @@ async def test_command_is_not_acknowledged_when_process_handoff_fails(monkeypatc
 
     monkeypatch.setattr(runtime, "_launch", launch)
     command = {
-        "worker_id": "wrk_1", "task_id": "task_1", "sequence": 0,
-        "type": "task.launch", "payload": {"prompt": "fix it"},
+        "version": 1, "id": "cmd_1", "worker_id": "wrk_1",
+        "task_id": "task_1", "sequence": 0, "type": "task.launch",
+        "created_at": "2026-09-14T00:00:00+00:00",
+        "payload": {"prompt": "fix it"},
     }
 
     try:
