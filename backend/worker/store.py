@@ -211,6 +211,8 @@ async def apply_event(event) -> tuple[models.Task | None, bool]:
 
     def apply(task: models.Task) -> models.Task | None:
         nonlocal changed
+        if event.worker_id != task.worker_id:
+            return None
         if event.id in task.event_ids:
             return None
         stale = event.sequence <= task.event_sequence

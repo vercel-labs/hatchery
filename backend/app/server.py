@@ -1527,6 +1527,8 @@ async def manual_tty(ws: fastapi.WebSocket, chat_id: str, terminal_id: str) -> N
 async def worker_event(event: worker_protocol.Event) -> None:
     """Persist one at-least-once worker event and wake the owning chat."""
     task = await worker.store.get_task(event.task_id) if event.task_id else None
+    if task is not None and event.worker_id != task.worker_id:
+        return
     parent = (
         ai.experimental_telemetry.Span[
             ai.experimental_telemetry.CustomSpanData
