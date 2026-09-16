@@ -16,6 +16,7 @@ dependencies = [
     "vercel-connect",
     "websockets>=15,<17",
     "croniter>=6,<7",
+    "rotorcore[vercel]==0.0.1",
 ]
 
 [dependency-groups]
@@ -31,8 +32,8 @@ entrypoint = "app.server:app"
 [[tool.vercel.subscribers]]
 entrypoint = "app.server:worker_event"
 
-[[tool.vercel.workflows]]
-entrypoint = "agent.durable:workflow"
+[[tool.vercel.subscribers]]
+entrypoint = "agent.runtime"
 
 [tool.uv]
 package = false
@@ -47,7 +48,7 @@ vercel-internal-telemetry = { git = "https://github.com/vercel/vercel-py", branc
 vercel-oidc = { git = "https://github.com/vercel/vercel-py", branch = "main", subdirectory = "src/vercel-oidc" }
 vercel-queue = { git = "https://github.com/vercel/vercel-py", branch = "main", subdirectory = "src/vercel-queue" }
 vercel-sandbox = { git = "https://github.com/vercel/vercel-py", branch = "main", subdirectory = "src/vercel-sandbox" }
-vercel-workflow = { git = "https://github.com/vercel/vercel-py", branch = "main", subdirectory = "src/vercel-workflow" }
+rotorcore = { git = "https://github.com/vercel-labs/rotor.git", rev = "1e7b99143b08f0e18a092c92b9c6306167cad4bf" }
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

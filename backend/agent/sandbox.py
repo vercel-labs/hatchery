@@ -111,7 +111,10 @@ async def suggest(space: models.Space) -> Launch:
 
 
 async def create(
-    chat_id: str, launch: Launch, actor_user_id: str | None = None
+    chat_id: str,
+    launch: Launch,
+    actor_user_id: str | None = None,
+    request_id: str | None = None,
 ) -> worker.Worker:
     async with telemetry.use_chat(chat_id):
         chat = await chats.get(chat_id)
@@ -120,6 +123,7 @@ async def create(
             chat_id,
             worker.WorkerSpec(**launch.model_dump()),
             user_id=user_id,
+            request_id=request_id,
         )
         await events.append(chat_id, "ui", {"type": "sandbox.changed"})
         return created
@@ -144,15 +148,26 @@ async def launch_task(
     prompt: str,
     model: str,
     actor_user_id: str | None = None,
+    request_id: str | None = None,
 ) -> worker.Task:
     async with telemetry.use_chat(chat_id):
-        task = await worker.launch_task(
-            chat_id,
-            sandbox_id,
-            prompt,
-            model,
-            actor_user_id=actor_user_id,
-        )
+        if request_id is None:
+            task = await worker.launch_task(
+                chat_id,
+                sandbox_id,
+                prompt,
+                model,
+                actor_user_id=actor_user_id,
+            )
+        else:
+            task = await worker.launch_task_idempotent(
+                chat_id,
+                sandbox_id,
+                prompt,
+                model,
+                request_id,
+                actor_user_id=actor_user_id,
+            )
         await events.append(
             chat_id,
             "ui",
@@ -171,10 +186,15 @@ async def send_task_input(
     task_id: str,
     prompt: str,
     actor_user_id: str | None = None,
+    request_id: str | None = None,
 ) -> worker.Task:
     async with telemetry.use_chat(chat_id):
         return await worker.send_task_input(
-            chat_id, task_id, prompt, actor_user_id=actor_user_id
+            chat_id,
+            task_id,
+            prompt,
+            actor_user_id=actor_user_id,
+            request_id=request_id,
         )
 
 

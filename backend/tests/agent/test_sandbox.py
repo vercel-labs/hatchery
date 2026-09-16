@@ -81,8 +81,10 @@ async def test_sandbox_operations_delegate_with_chat_scope(monkeypatch):
     async def get(_chat_id):
         return type("Chat", (), {"user_id": "user_1"})()
 
-    async def create(chat_id, spec, *, user_id=None):
-        seen.update(chat_id=chat_id, spec=spec, user_id=user_id)
+    async def create(chat_id, spec, *, user_id=None, request_id=None):
+        seen.update(
+            chat_id=chat_id, spec=spec, user_id=user_id, request_id=request_id
+        )
         return "created"
 
     @contextlib.asynccontextmanager

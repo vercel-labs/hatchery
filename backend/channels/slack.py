@@ -33,6 +33,7 @@ import logging
 import os
 import re
 import urllib.parse
+import uuid
 
 import ai
 import httpx
@@ -377,7 +378,11 @@ class SlackChannel:
                 )
         elif event.type == channels.protocol.MESSAGE_COMPLETED:
             if event.data.get("final", True):
-                await self._post(state, str(event.data.get("message", ""))[:TEXT_LIMIT])
+                await self._post(
+                    state,
+                    str(event.data.get("message", ""))[:TEXT_LIMIT],
+                    delivery_key=event.data.get("delivery_key"),
+                )
             else:
                 await self._set_status(state, "is working...")
         elif event.type == channels.protocol.TURN_FAILED:
@@ -426,14 +431,20 @@ class SlackChannel:
             status=status,
         )
 
-    async def _post(self, state: dict, text: str) -> None:
+    async def _post(
+        self, state: dict, text: str, delivery_key: str | None = None
+    ) -> None:
         if text:
-            await self._api(
-                "chat.postMessage",
-                channel=state["channel_id"],
-                thread_ts=state["thread_ts"],
-                text=text,
-            )
+            params = {
+                "channel": state["channel_id"],
+                "thread_ts": state["thread_ts"],
+                "text": text,
+            }
+            if delivery_key is not None:
+                params["client_msg_id"] = str(
+                    uuid.uuid5(uuid.NAMESPACE_URL, delivery_key)
+                )
+            await self._api("chat.postMessage", **params)
 
     async def _api(self, method: str, **params: str) -> dict:
         token = await connect.get_token(

@@ -1,5 +1,6 @@
 import json
 import urllib.parse
+import uuid
 
 import httpx
 import pytest
@@ -480,6 +481,23 @@ async def test_reply_posts_into_thread():
     assert request.url.path == "/api/chat.postMessage"
     params = dict(urllib.parse.parse_qsl(request.read().decode()))
     assert params == {"channel": "C1", "thread_ts": "100.1", "text": "done!"}
+
+
+async def test_reply_passes_stable_client_message_id():
+    calls: list[httpx.Request] = []
+    await api_channel(calls).on_event(
+        channels.event(
+            channels.protocol.MESSAGE_COMPLETED,
+            message="done!",
+            delivery_key="turn_1:0",
+        ),
+        state(),
+    )
+
+    params = dict(urllib.parse.parse_qsl(calls[0].read().decode()))
+    assert params["client_msg_id"] == str(
+        uuid.uuid5(uuid.NAMESPACE_URL, "turn_1:0")
+    )
 
 
 async def test_intermediate_reply_becomes_opaque_status():
