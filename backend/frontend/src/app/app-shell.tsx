@@ -1,8 +1,5 @@
-"use client";
-
+import { Link, useLocation, useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useRef, useState } from "react";
-import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
 import {
   ArchiveIcon,
   BookMarkedIcon,
@@ -158,7 +155,7 @@ function ChatSidebarItem({
         className="relative pl-3"
         isActive={selected}
         aria-current={selected ? "page" : undefined}
-        render={<Link href={`/chats/${encodeURIComponent(chat.id)}`} />}
+        render={<Link to="/chats/$chatId" params={{ chatId: chat.id }} />}
         tooltip={text.label}
         aria-label={text.label}
       >
@@ -198,8 +195,8 @@ function ChatSidebarItem({
 }
 
 export function AppShell() {
-  const pathname = usePathname();
-  const router = useRouter();
+  const pathname = useLocation({ select: (location) => location.pathname });
+  const navigate = useNavigate();
   const spaceMatch = pathname.match(/^\/spaces\/([^/]+)$/);
   const chatMatch = pathname.match(/^\/chats\/([^/]+)$/);
   const selection: Selection = spaceMatch
@@ -353,7 +350,7 @@ export function AppShell() {
     if (!res.ok) return;
     const space: Space = await res.json();
     setSpaces((current) => [...(current ?? []), space]);
-    router.push(`/spaces/${encodeURIComponent(space.id)}`);
+    await navigate({ to: "/spaces/$spaceId", params: { spaceId: space.id } });
     setChatFilters((current) => selectSidebarSpace(current, space.id));
     setSpaceName("");
     setSpaceColor(null);
@@ -369,7 +366,9 @@ export function AppShell() {
     }
     if (!res.ok) return;
     setSpaces((current) => current?.filter((item) => item.id !== space.id) ?? null);
-    if (selection?.kind === "space" && selection.id === space.id) router.push("/");
+    if (selection?.kind === "space" && selection.id === space.id) {
+      void navigate({ to: "/" });
+    }
     setChatFilters((current) =>
       current.spaceId === space.id ? selectSidebarSpace(current, null) : current,
     );
@@ -424,22 +423,30 @@ export function AppShell() {
     setChatHandoff(null);
     newChatGenerationRef.current += 1;
     setNewChatGeneration(newChatGenerationRef.current);
-    if (pathname !== "/") router.push("/");
+    if (pathname !== "/") void navigate({ to: "/" });
   };
 
   const openPersistedChat = useCallback(
     (chatId: string) => {
-      router.replace(`/chats/${encodeURIComponent(chatId)}`);
+      void navigate({
+        to: "/chats/$chatId",
+        params: { chatId },
+        replace: true,
+      });
     },
-    [router],
+    [navigate],
   );
 
   const handoffPersistedChat = useCallback(
     (chat: Chat, startup: NewChatHandoff) => {
       setChatHandoff({ chat, startup });
-      router.replace(`/chats/${encodeURIComponent(chat.id)}`);
+      void navigate({
+        to: "/chats/$chatId",
+        params: { chatId: chat.id },
+        replace: true,
+      });
     },
-    [router],
+    [navigate],
   );
 
   const setChatArchived = async (chat: Chat, archived: boolean) => {
@@ -685,7 +692,10 @@ export function AppShell() {
                                 )
                               }
                               render={
-                                <Link href={`/spaces/${encodeURIComponent(space.id)}`} />
+                                <Link
+                                  to="/spaces/$spaceId"
+                                  params={{ spaceId: space.id }}
+                                />
                               }
                               tooltip={space.name}
                             >

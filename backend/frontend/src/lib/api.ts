@@ -1,9 +1,10 @@
 // mirrors backend/models.py
 
-// Chat SSE defaults to same-origin — vercel routes /api to the backend service.
-// When running bare `next dev` + `uv run dev.py`, set
-// NEXT_PUBLIC_BACKEND_ORIGIN=http://127.0.0.1:8000 to dial the backend directly.
-const BACKEND_ORIGIN = process.env.NEXT_PUBLIC_BACKEND_ORIGIN ?? "";
+// Production is same-origin. Vite development dials FastAPI directly so SSE
+// and WebSocket connections do not pass through a development proxy.
+const BACKEND_ORIGIN =
+  import.meta.env.VITE_BACKEND_ORIGIN ??
+  (import.meta.env.DEV ? "http://127.0.0.1:8000" : "");
 
 export function apiBase(): string {
   return BACKEND_ORIGIN;
