@@ -1,19 +1,15 @@
 {
   "services": {
-    "frontend": {
-      "root": "frontend/"
-    },
-    "backend": {
+    "app": {
       "root": "backend/",
-      "entrypoint": "pyproject.toml"
+      "entrypoint": "pyproject.toml",
+      "buildCommand": "cd frontend && corepack pnpm install --frozen-lockfile && corepack pnpm build"
     }
   },
   "crons": [
     { "path": "/api/cron", "schedule": "* * * * *" }
   ],
   "rewrites": [
-    { "source": "/api/(.*)", "destination": { "service": "backend" } },
-    { "source": "/channels/(.*)", "destination": { "service": "backend" } },
-    { "source": "/(.*)", "destination": { "service": "frontend" } }
+    { "source": "/(.*)", "destination": { "service": "app" } }
   ]
 }
