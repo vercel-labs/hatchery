@@ -1,9 +1,9 @@
 """Postgres pool, keyed by the running event loop (seal's backend/db.py).
 
 The FastAPI service runs on one long-lived ASGI loop, so a cached pool is safe
-there. A workflow worker is different: a warm process handles each queue
-message on a fresh event loop and closes it afterwards. An asyncpg pool is
-bound to the loop that created it, so a globally cached pool poisons the next
+there. Queue subscribers may handle messages on fresh event loops and close
+them afterwards. An asyncpg pool is bound to the loop that created it, so a
+globally cached pool poisons the next
 invocation. We key the cache by the running loop and rebuild when it changes;
 the stale pool is dropped for GC (closing it would just re-raise "Event loop
 is closed").

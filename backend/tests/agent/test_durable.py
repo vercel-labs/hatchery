@@ -1,326 +1,284 @@
-import ast
-import inspect
-import textwrap
+import asyncio
 
 import ai
+import httpx
 import pytest
+import rotor.testing
 
 from agent import durable
-from store import chats, events
+from app import server
+from store import chats, events, spaces
 import worker
 
 
-def test_workflow_body_does_not_import_side_effect_modules():
-    tree = ast.parse(textwrap.dedent(inspect.getsource(durable.run_turn.func)))
-    imported = {
-        node.module
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom) and node.module is not None
+async def _chat(prompt: str = "help"):
+    space = await spaces.default()
+    chat = await chats.create(space.id, "dispatcher")
+    message = ai.user_message(prompt)
+    await events.append(chat.id, "messages", message.model_dump(mode="json"))
+    return chat, message
+
+
+def test_dispatcher_registers_only_rotor_processes():
+    assert {process.__name__ for process in durable.PROCESSES} == {
+        "DurableDispatcher",
+        "announce_turn",
+        "deliver_turn",
+        "project_turn",
+        "run_tool",
     }
-    imported.update(
-        alias.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Import)
-        for alias in node.names
-    )
-
-    assert not imported
+    assert durable.DurableDispatcher.spool is True
+    assert not hasattr(durable, "workflow")
+    assert not hasattr(durable, "run_turn")
 
 
-async def test_ship_spans_flushes_before_step_exit(monkeypatch):
-    calls = []
+async def test_direct_answer_commits_and_returns_process_to_idle(monkeypatch):
+    chat, message = await _chat()
+    delivered = []
 
-    async def push_all(spans):
-        calls.append(("push", spans))
-
-    monkeypatch.setattr(ai.experimental_telemetry, "push_all", push_all)
-    monkeypatch.setattr("agent.telemetry.flush", lambda: calls.append(("flush", None)))
-
-    await durable.ship_spans.func([])
-
-    assert calls == [("push", []), ("flush", None)]
-
-
-async def test_durable_tools_keep_effects_non_retriable():
-    assert durable.llm_step.max_retries > 0
-    assert durable.list_sandboxes_step.max_retries > 0
-    assert durable.check_subagent_step.max_retries > 0
-    assert durable.create_sandbox_step.max_retries == 0
-    assert durable.create_subagent_step.max_retries == 0
-    assert durable.message_subagent_step.max_retries == 0
-    assert durable.require_attention_step.max_retries == 0
-    assert durable.start_thread_step.max_retries == 0
-    assert durable.read_notes_step.max_retries > 0
-    assert durable.create_note_step.max_retries == 0
-    assert durable.edit_note_step.max_retries == 0
-    assert durable.deliver_replies.max_retries == 0
-
-
-def test_start_thread_tool_is_removed_for_linked_chats():
-    class Writer:
-        async def write(self, value):
-            pass
-
-    unlinked = durable.DurableDispatcher("chat_1", Writer())
-    linked = durable.DurableDispatcher("chat_1", Writer(), linked=True)
-
-    assert "start_thread" in {tool.name for tool in unlinked.tools}
-    assert "start_thread" not in {tool.name for tool in linked.tools}
-
-
-async def test_prepare_turn_detects_linked_chat():
-    from store import spaces
-
-    space = await spaces.default()
-    chat = await chats.create(space.id, "linked")
-    await chats.bind("slack:T1:C1:1.0", chat.id, "slack", {})
-
-    prepared = await durable.prepare_turn.func(
-        durable.TurnInput(chat_id=chat.id, origin="ui")
-    )
-
-    assert prepared.linked is True
-    assert "Reply normally without a notification tool call" in prepared.history[0].text
-
-
-async def test_prepare_turn_reuses_the_chat_trace():
-    from store import spaces
-
-    space = await spaces.default()
-    chat = await chats.create(space.id, "traced")
-    sink = ai.experimental_telemetry.DictSink()
-
-    async with ai.experimental_telemetry.use_sink(sink):
-        first = await durable.prepare_turn.func(
-            durable.TurnInput(chat_id=chat.id, turn_id="turn_1", origin="ui")
-        )
-        second = await durable.prepare_turn.func(
-            durable.TurnInput(chat_id=chat.id, turn_id="turn_2", origin="worker")
-        )
-
-    assert first.telemetry_span is not None
-    assert second.telemetry_span is not None
-    assert first.telemetry_span["trace_id"] == second.telemetry_span["trace_id"]
-    prepared = [
-        span for span in sink.finished_spans if span.name == "hatchery.prepare_turn"
-    ]
-    assert {span.trace_id for span in prepared} == {first.telemetry_span["trace_id"]}
-    assert {span.parent_id for span in prepared} == {first.telemetry_span["id"]}
-
-
-async def test_custom_loop_uses_context_and_workflow_stream(monkeypatch):
-    calls = []
-
-    async def model_step(context, writer):
-        calls.append((context, writer))
+    async def model_step(history, tools, turn_id):
+        assert history[-1].text == "help"
+        assert turn_id == "turn_1"
         return ai.assistant_message("done")
 
-    class Writer:
-        async def write(self, value):
-            pass
-
-    monkeypatch.setattr(durable, "llm_step", model_step)
-    writer = Writer()
-    agent = durable.DurableDispatcher("chat_1", writer)
-    history = [ai.user_message("help")]
-    token = durable.current_agent.set(agent)
-    try:
-        async with agent.run(ai.get_model("openai/test"), history) as result:
-            async for _ in result:
-                pass
-    finally:
-        durable.current_agent.reset(token)
-
-    assert result.messages[-1].text == "done"
-    assert len(calls) == 1
-    assert calls[0][0].messages[0].role == "user"
-    assert calls[0][1] is writer
-
-
-async def test_tools_read_trusted_chat_id_from_current_agent(monkeypatch):
-    calls = []
-
-    async def step(chat_id):
-        calls.append(chat_id)
+    async def deliver(chat_id, text, *, final=True, delivery_key=None):
+        delivered.append((chat_id, text, final, delivery_key))
         return []
 
-    class Writer:
-        async def write(self, value):
-            pass
+    monkeypatch.setattr(durable, "model_step", model_step)
+    monkeypatch.setattr(server, "_deliver", deliver)
+    async with rotor.testing.LocalRuntime(*durable.PROCESSES) as runtime:
+        handle = await runtime.client.start(
+            durable.DurableDispatcher,
+            input={"chat_id": chat.id},
+            key="dispatcher",
+            scope=chat.id,
+        )
+        await handle.send(
+            durable.TurnInput(
+                chat.id,
+                "turn_1",
+                "ui",
+                [message.model_dump(mode="json")],
+            ),
+            idempotency_key="turn_1",
+        )
+        assert await runtime.drain() > 0
+        activity, _ = await handle.query(durable.DurableDispatcher.activity)
 
-    monkeypatch.setattr(durable, "list_sandboxes_step", step)
-    agent = durable.DurableDispatcher("chat_1", Writer())
-    token = durable.current_agent.set(agent)
-    try:
-        assert await durable.list_sandboxes.fn() == []
-    finally:
-        durable.current_agent.reset(token)
+    assert activity == {
+        "chat_id": chat.id,
+        "phase": "idle",
+        "active_turn": None,
+        "pending_turns": 0,
+        "turns": 1,
+        "error": "",
+    }
+    assert delivered == [(chat.id, "done", True, "turn_1:0")]
+    transcript = await server._transcript(chat.id)
+    assert [(item.role, item.text) for item in transcript] == [
+        ("user", "help"),
+        ("assistant", "done"),
+    ]
 
-    assert calls == ["chat_1"]
+
+async def test_model_tools_run_as_children_and_preserve_message_order(monkeypatch):
+    chat, message = await _chat("inspect")
+    calls = []
+
+    async def model_step(history, tools, _turn_id):
+        calls.append(({tool.name for tool in tools}, history[-1].role))
+        if history[-1].role == "tool":
+            assert history[-1].tool_results[0].result == []
+            return ai.assistant_message("inspected")
+        return ai.assistant_message(
+            ai.messages.ToolCallPart(
+                tool_call_id="call_1",
+                tool_name="list_sandboxes",
+                tool_args="{}",
+            )
+        )
+
+    monkeypatch.setattr(durable, "model_step", model_step)
+    monkeypatch.setattr(
+        server, "_deliver", lambda *_args, **_kwargs: asyncio.sleep(0, result=[])
+    )
+    async with rotor.testing.LocalRuntime(*durable.PROCESSES) as runtime:
+        handle = await runtime.client.start(
+            durable.DurableDispatcher,
+            input={"chat_id": chat.id},
+            key="dispatcher",
+            scope=chat.id,
+        )
+        await handle.send(
+            durable.TurnInput(
+                chat.id,
+                "turn_tools",
+                "ui",
+                [message.model_dump(mode="json")],
+            )
+        )
+        await runtime.drain()
+
+    transcript = await server._transcript(chat.id)
+    assert [item.role for item in transcript] == [
+        "user",
+        "assistant",
+        "tool",
+        "assistant",
+    ]
+    assert transcript[1].tool_calls[0].tool_call_id == "call_1"
+    assert transcript[2].tool_results[0].tool_call_id == "call_1"
+    assert transcript[3].text == "inspected"
+    assert calls[0][1] == "user"
+    assert calls[1][1] == "tool"
+
+
+async def test_linked_chat_hides_start_thread_from_model(monkeypatch):
+    chat, message = await _chat()
+    offered = []
+
+    async def model_step(_history, tools, _turn_id):
+        offered.append({tool.name for tool in tools})
+        return ai.assistant_message("done")
+
+    monkeypatch.setattr(durable, "model_step", model_step)
+    monkeypatch.setattr(
+        server, "_deliver", lambda *_args, **_kwargs: asyncio.sleep(0, result=[])
+    )
+    async with rotor.testing.LocalRuntime(*durable.PROCESSES) as runtime:
+        handle = await runtime.client.start(
+            durable.DurableDispatcher, input={"chat_id": chat.id}
+        )
+        await handle.send(
+            durable.TurnInput(
+                chat.id,
+                "turn_linked",
+                "ui",
+                [message.model_dump(mode="json")],
+                linked=True,
+            )
+        )
+        await runtime.drain()
+
+    assert "start_thread" not in offered[0]
+    assert {"create_sandbox", "create_subagent", "read_notes"} <= offered[0]
+
+
+async def test_duplicate_turn_delivery_runs_model_once(monkeypatch):
+    chat, message = await _chat()
+    model_calls = 0
+
+    async def model_step(_history, _tools, _turn_id):
+        nonlocal model_calls
+        model_calls += 1
+        return ai.assistant_message("done")
+
+    monkeypatch.setattr(durable, "model_step", model_step)
+    monkeypatch.setattr(
+        server, "_deliver", lambda *_args, **_kwargs: asyncio.sleep(0, result=[])
+    )
+    async with rotor.testing.LocalRuntime(*durable.PROCESSES) as runtime:
+        handle = await runtime.client.start(
+            durable.DurableDispatcher, input={"chat_id": chat.id}
+        )
+        turn = durable.TurnInput(
+            chat.id,
+            "turn_same",
+            "ui",
+            [message.model_dump(mode="json")],
+        )
+        assert await handle.send(turn, idempotency_key="turn_same") == "delivered"
+        assert await handle.send(turn, idempotency_key="turn_same") == "duplicate"
+        await runtime.drain()
+
+    assert model_calls == 1
+
+
+async def test_mailbox_queues_a_second_turn(monkeypatch):
+    chat, first = await _chat("first")
+    second = ai.user_message("second")
+    await events.append(chat.id, "messages", second.model_dump(mode="json"))
+    seen = []
+
+    async def model_step(history, _tools, turn_id):
+        seen.append((turn_id, history[-1].text))
+        return ai.assistant_message(f"answer {history[-1].text}")
+
+    monkeypatch.setattr(durable, "model_step", model_step)
+    monkeypatch.setattr(
+        server, "_deliver", lambda *_args, **_kwargs: asyncio.sleep(0, result=[])
+    )
+    async with rotor.testing.LocalRuntime(*durable.PROCESSES) as runtime:
+        handle = await runtime.client.start(
+            durable.DurableDispatcher, input={"chat_id": chat.id}
+        )
+        await handle.send(
+            durable.TurnInput(
+                chat.id,
+                "turn_1",
+                "ui",
+                [first.model_dump(mode="json")],
+            )
+        )
+        await handle.send(
+            durable.TurnInput(
+                chat.id,
+                "turn_2",
+                "worker",
+                [
+                    first.model_dump(mode="json"),
+                    second.model_dump(mode="json"),
+                ],
+            )
+        )
+        await runtime.drain()
+        state, _ = await handle.read_state(durable.DurableDispatcher)
+
+    assert seen == [("turn_1", "first"), ("turn_2", "second")]
+    assert [
+        ai.messages.Message.model_validate(item).text for item in state.messages
+    ] == [
+        "first",
+        "answer first",
+        "second",
+        "answer second",
+    ]
+
+
+async def test_tool_task_uses_trusted_chat_context(monkeypatch):
+    chat, _ = await _chat()
+    seen = []
+
+    async def list_all(chat_id):
+        seen.append(chat_id)
+        return []
+
+    monkeypatch.setattr("agent.sandbox.list_all", list_all)
+    call = ai.messages.ToolCallPart(
+        tool_call_id="call_1", tool_name="list_sandboxes", tool_args="{}"
+    )
+    async with rotor.testing.LocalRuntime(durable.run_tool) as runtime:
+        handle = await runtime.client.start(
+            durable.run_tool,
+            input={
+                "chat_id": chat.id,
+                "turn_id": "turn_1",
+                "actor_user_id": "user_actor",
+                "call": call.model_dump(mode="json"),
+            },
+        )
+        await runtime.drain()
+        snapshot = await handle.snapshot()
+
+    result = ai.messages.ToolResultPart.model_validate(snapshot.output)
+    assert result.result == []
+    assert seen == [chat.id]
     assert durable.list_sandboxes.tool.spec.params["properties"] == {}
 
 
-async def test_note_tools_share_memory_with_the_current_chats_space():
-    from store import notes, spaces
-
-    space = await spaces.create("recurring")
-    chat = await chats.create(space.id, "scheduled review")
-
-    assert {"read_notes", "create_note", "edit_note"} <= {
-        tool.name for tool in durable.BASE_TOOLS
-    }
-    assert durable.MAX_NOTE_CONTENT_LENGTH == notes.MAX_CONTENT_LENGTH
-    assert await durable.read_notes_step.func(chat.id, None) == []
-    created = await durable.create_note_step.func(
-        chat.id, "reviewed_issues.md", "- issue 12 reviewed"
-    )
-    listed = await durable.read_notes_step.func(chat.id, None)
-    read = await durable.read_notes_step.func(chat.id, "reviewed_issues.md")
-    updated = await durable.edit_note_step.func(
-        chat.id,
-        "reviewed_issues.md",
-        "- issue 12 reviewed",
-        "- issue 12 closed",
-    )
-
-    assert created["status"] == "created"
-    assert listed == [
-        {
-            "filename": "reviewed_issues.md",
-            "updated_at": created["updated_at"],
-        }
-    ]
-    assert read["content"] == "- issue 12 reviewed"
-    assert updated["status"] == "saved"
-    assert updated["match"] == "exact"
-    assert updated["content"] == "- issue 12 closed"
-    properties = durable.edit_note.tool.spec.params["properties"]
-    assert set(properties) == {"filename", "find", "replacement"}
-    assert "expected_revision" not in properties
-
-
-async def test_note_tool_rejects_unsafe_find_replace_without_writing():
-    from store import spaces
-
-    space = await spaces.create("safe edits")
-    chat = await chats.create(space.id, "scheduled review")
-    await durable.create_note_step.func(
-        chat.id,
-        "reviewed_issues.md",
-        "duplicate line\nduplicate line\n",
-    )
-
-    result = await durable.edit_note_step.func(
-        chat.id,
-        "reviewed_issues.md",
-        "duplicate line",
-        "changed",
-    )
-
-    assert result["status"] == "ambiguous"
-    current = await durable.read_notes_step.func(chat.id, "reviewed_issues.md")
-    assert current["content"] == "duplicate line\nduplicate line\n"
-
-
-async def test_start_thread_uses_trusted_chat_and_turn_ids(monkeypatch):
-    calls = []
-
-    async def step(*args):
-        calls.append(args)
-        return {"status": "sent"}
-
-    class Writer:
-        async def write(self, value):
-            pass
-
-    monkeypatch.setattr(durable, "start_thread_step", step)
-    agent = durable.DurableDispatcher(
-        "chat_trusted", Writer(), "turn_1", actor_user_id="user_actor"
-    )
-    token = durable.current_agent.set(agent)
-    try:
-        assert await durable.start_thread.fn("slack", "T1/C1", "done", ["user_1"]) == {
-            "status": "sent"
-        }
-        assert agent.linked is True
-    finally:
-        durable.current_agent.reset(token)
-
-    assert calls == [
-        (
-            "chat_trusted",
-            "slack",
-            "T1/C1",
-            "done",
-            ["user_1"],
-            "turn_1",
-            "user_actor",
-        )
-    ]
-
-
-async def test_durable_require_attention_uses_trusted_chat_id(monkeypatch):
-    calls = []
-
-    async def step(chat_id, reason):
-        calls.append((chat_id, reason))
-        return {"reason": reason}
-
-    class Writer:
-        async def write(self, value):
-            pass
-
-    monkeypatch.setattr(durable, "require_attention_step", step)
-    agent = durable.DurableDispatcher("chat_trusted", Writer())
-    token = durable.current_agent.set(agent)
-    try:
-        assert await durable.require_attention.fn("result_available") == {
-            "reason": "result_available"
-        }
-    finally:
-        durable.current_agent.reset(token)
-
-    assert calls == [("chat_trusted", "result_available")]
-    properties = durable.require_attention.tool.spec.params["properties"]
-    assert set(properties) == {"reason"}
-    assert properties["reason"]["enum"] == ["result_available", "blocked"]
-
-
-async def test_create_sandbox_tool_forwards_size(monkeypatch):
-    calls = []
-
-    async def step(*args):
-        calls.append(args)
-        return {"id": "wrk_1"}
-
-    class Writer:
-        async def write(self, value):
-            pass
-
-    monkeypatch.setattr(durable, "create_sandbox_step", step)
-    agent = durable.DurableDispatcher("chat_1", Writer(), actor_user_id="user_actor")
-    token = durable.current_agent.set(agent)
-    try:
-        assert await durable.create_sandbox.fn(size="big") == {"id": "wrk_1"}
-    finally:
-        durable.current_agent.reset(token)
-
-    assert calls[0][-2:] == ("big", "user_actor")
-
-
-async def test_commit_messages_is_idempotent():
-    message = ai.assistant_message("done")
-
-    assert await durable.commit_messages.func("chat_1", [message]) == ["done"]
-    assert await durable.commit_messages.func("chat_1", [message]) == ["done"]
-
-    stored = await events.read("chat_1", "messages")
-    assert len(stored) == 1
-    assert ai.messages.Message.model_validate(stored[0][1]).text == "done"
-
-
-async def test_deliver_replies_finishes_worker_completion(monkeypatch):
-    chat = await chats.create("spc_1", "task")
+async def test_delivery_finishes_worker_completion(monkeypatch):
+    chat, _ = await _chat()
     task = worker.Task(
         id="task_1",
         chat_id=chat.id,
@@ -335,119 +293,250 @@ async def test_deliver_replies_finishes_worker_completion(monkeypatch):
         updated_at="2026-09-03T00:00:00+00:00",
     )
     await worker.store.save_task(task)
-    delivered = []
+    monkeypatch.setattr(
+        server, "_deliver", lambda *_args, **_kwargs: asyncio.sleep(0, result=[])
+    )
+    final = ai.assistant_message("done")
 
-    async def deliver(chat_id, message, *, final=True):
-        delivered.append((chat_id, message, final))
-        return []
+    async with rotor.testing.LocalRuntime(durable.deliver_turn) as runtime:
+        handle = await runtime.client.start(
+            durable.deliver_turn,
+            input={
+                "chat_id": chat.id,
+                "turn_id": "turn_1",
+                "task_id": task.id,
+                "replies": ["done"],
+                "messages": [final.model_dump(mode="json")],
+            },
+        )
+        await runtime.drain()
+        assert (await handle.snapshot()).terminal_status == "completed"
 
-    from app import server
-
-    monkeypatch.setattr(server, "_deliver", deliver)
-    turn = durable.TurnInput(chat_id=chat.id, origin="worker", task_id=task.id)
-    await durable.deliver_replies.func(turn, ["working", "done"])
-
-    assert delivered == [
-        (chat.id, "working", False),
-        (chat.id, "done", True),
-    ]
     current = await worker.get_task(chat.id, task.id)
+    assert current is not None
     assert current.completion_message == "done"
     assert current.completion_delivered is True
     assert (await chats.get(chat.id)).status == "done"
 
 
-async def test_active_turn_reconciles_failed_workflow(monkeypatch):
+async def test_delivery_marks_latest_worker_record_without_overwriting_it(monkeypatch):
+    chat, _ = await _chat()
+    task = worker.Task(
+        id="task_race",
+        chat_id=chat.id,
+        worker_id="wrk_1",
+        title="fix",
+        prompt="fix it",
+        model="openai/test",
+        status="complete",
+        event_sequence=2,
+        result={"summary": "old"},
+        created_at="2026-09-03T00:00:00+00:00",
+        updated_at="2026-09-03T00:00:00+00:00",
+    )
+    await worker.store.save_task(task)
+    original_mutate = worker.store.mutate_task
+
+    async def mutate_task(task_id, mutate):
+        def receive_newer_event(current):
+            current.status = "attention"
+            current.event_sequence = 3
+            current.result = {"question": "newer"}
+            return current
+
+        await original_mutate(task_id, receive_newer_event)
+        return await original_mutate(task_id, mutate)
+
+    monkeypatch.setattr(worker.store, "mutate_task", mutate_task)
+    monkeypatch.setattr(
+        server,
+        "_deliver",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result=[]),
+    )
+    final = ai.assistant_message("done")
+
+    await durable.deliver_turn.fn(
+        chat.id,
+        "turn_1",
+        task.id,
+        ["done"],
+        [final.model_dump(mode="json")],
+    )
+
+    current = await worker.get_task(chat.id, task.id)
+    assert current is not None
+    assert current.status == "attention"
+    assert current.event_sequence == 3
+    assert current.result == {"question": "newer"}
+    assert current.completion_delivered is True
+
+
+async def test_register_turn_is_idempotent_for_rotor_process():
+    turn = durable.TurnInput("chat_1", "turn_1", "ui")
+
+    assert await durable.register_turn(turn, "process_1") == 0
+    assert await durable.register_turn(turn, "process_1") == 0
+
+    assert len(await events.read("chat_1", "turns")) == 1
+    assert (await events.read("chat_1", "ui"))[-1][1] == {
+        "type": "stream.available",
+        "turn_id": "turn_1",
+        "run_id": "process_1",
+        "generation": 0,
+    }
+
+
+async def test_register_turn_rejects_another_process_owner():
+    turn = durable.TurnInput("chat_1", "turn_1", "ui")
+    await durable.register_turn(turn, "process_1")
+
+    with pytest.raises(RuntimeError, match="already owned"):
+        await durable.register_turn(turn, "process_2")
+
+
+async def test_delivery_retries_with_the_same_receipt_key(monkeypatch):
+    chat, _ = await _chat()
+    final = ai.assistant_message("done")
+    attempts = []
+
+    async def deliver(_chat_id, _text, *, final=True, delivery_key=None):
+        attempts.append((final, delivery_key))
+        return ["slack: unavailable"] if len(attempts) == 1 else []
+
+    monkeypatch.setattr(server, "_deliver", deliver)
+    async with rotor.testing.LocalRuntime(durable.deliver_turn) as runtime:
+        handle = await runtime.client.start(
+            durable.deliver_turn,
+            input={
+                "chat_id": chat.id,
+                "turn_id": "turn_1",
+                "task_id": None,
+                "replies": ["done"],
+                "messages": [final.model_dump(mode="json")],
+            },
+        )
+        await runtime.drain()
+        assert (await handle.snapshot()).phase == "idle"
+        await runtime.advance("3s")
+        snapshot = await handle.snapshot()
+
+    assert snapshot.terminal_status == "completed"
+    assert attempts == [(True, "turn_1:0"), (True, "turn_1:0")]
+    assert len(await events.read(chat.id, "messages")) == 2
+
+
+async def test_transient_model_failure_retries_from_durable_timer(monkeypatch):
+    chat, message = await _chat()
+    attempts = 0
+
+    async def model_step(_history, _tools, _turn_id):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise httpx.ConnectError("temporary")
+        return ai.assistant_message("recovered")
+
+    monkeypatch.setattr(durable, "model_step", model_step)
+    monkeypatch.setattr(
+        server,
+        "_deliver",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result=[]),
+    )
+    async with rotor.testing.LocalRuntime(*durable.PROCESSES) as runtime:
+        handle = await runtime.client.start(
+            durable.DurableDispatcher, input={"chat_id": chat.id}
+        )
+        await handle.send(
+            durable.TurnInput(
+                chat.id,
+                "turn_retry",
+                "ui",
+                [message.model_dump(mode="json")],
+            )
+        )
+        await runtime.drain()
+        activity, _ = await handle.query(durable.DurableDispatcher.activity)
+        assert activity["phase"] == "generating"
+        await runtime.advance("6s")
+        activity, _ = await handle.query(durable.DurableDispatcher.activity)
+
+    assert attempts == 2
+    assert activity["phase"] == "idle"
+    assert (await server._transcript(chat.id))[-1].text == "recovered"
+
+
+async def test_terminal_projection_retries_before_dispatcher_returns_idle(monkeypatch):
+    chat, message = await _chat()
+    attempts = 0
+
+    async def model_step(_history, _tools, _turn_id):
+        return ai.assistant_message("done")
+
+    from store import turns
+
+    original_finish = turns.finish
+
+    async def finish(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ConnectionError("database unavailable")
+        return await original_finish(*args, **kwargs)
+
+    monkeypatch.setattr(durable, "model_step", model_step)
+    monkeypatch.setattr(turns, "finish", finish)
+    monkeypatch.setattr(
+        server,
+        "_deliver",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result=[]),
+    )
+    async with rotor.testing.LocalRuntime(*durable.PROCESSES) as runtime:
+        handle = await runtime.client.start(
+            durable.DurableDispatcher, input={"chat_id": chat.id}
+        )
+        turn = durable.TurnInput(
+            chat.id,
+            "turn_projection",
+            "ui",
+            [message.model_dump(mode="json")],
+        )
+        await durable.register_turn(turn, handle.id)
+        await handle.send(turn)
+        await runtime.drain()
+        activity, _ = await handle.query(durable.DurableDispatcher.activity)
+        assert activity["phase"] == "finishing"
+        await runtime.advance("3s")
+        activity, _ = await handle.query(durable.DurableDispatcher.activity)
+
+    assert attempts == 2
+    assert activity["phase"] == "idle"
+    assert await turns.active(chat.id) is None
+
+
+async def test_active_turn_repairs_terminal_rotor_process(monkeypatch):
+    from agent import runtime
+
     await events.append(
         "chat_1",
         "turns",
         {
             "type": "turn.started",
             "turn_id": "turn_1",
-            "run_id": "run_1",
+            "run_id": "process_1",
             "origin": "ui",
             "task_id": None,
         },
     )
 
-    class Run:
-        async def status(self):
-            return "failed"
+    class Client:
+        async def snapshot(self, _process_id):
+            return type(
+                "Snapshot",
+                (),
+                {"phase": "terminal", "failure": "crash loop"},
+            )()
 
-    monkeypatch.setattr(durable.vercel.workflow, "Run", lambda _run_id: Run())
+    monkeypatch.setattr(runtime, "client", Client())
 
     assert await durable.active_turn("chat_1") is None
     assert (await events.read("chat_1", "turns"))[-1][1]["type"] == "turn.failed"
-
-
-async def test_cron_register_turn_rejects_duplicate_run(monkeypatch):
-    async def claim_run(_turn_id, run_id):
-        return run_id == "run_1"
-
-    async def started_run(_turn_id):
-        return "run_1"
-
-    from store import jobs
-
-    monkeypatch.setattr(jobs, "claim_run", claim_run)
-    monkeypatch.setattr(jobs, "started_run", started_run)
-    turn = durable.TurnInput(chat_id="chat_1", turn_id="turn_stable", origin="cron")
-
-    await durable.register_turn.func(turn, "run_1")
-    with pytest.raises(RuntimeError, match="already owned"):
-        await durable.register_turn.func(turn, "run_2")
-
-    started = [
-        data
-        for _, data in await events.read("chat_1", "turns")
-        if data.get("type") == "turn.started"
-    ]
-    assert [event["run_id"] for event in started] == ["run_1"]
-
-
-async def test_start_turn_registers_before_announcing(monkeypatch):
-    seen = {}
-
-    class Run:
-        run_id = "run_1"
-
-    async def start(workflow, payload):
-        seen["workflow"] = workflow
-        seen["payload"] = payload
-        return Run()
-
-    monkeypatch.setattr(durable.vercel.workflow, "start", start)
-
-    turn = await durable.start_turn(
-        "chat_1", "worker", "task_1", actor_user_id="user_actor"
-    )
-
-    assert turn.run_id == "run_1"
-    assert turn.turn_id.startswith("turn_")
-    assert seen["workflow"] is durable.run_turn
-    assert seen["payload"] == durable.TurnInput(
-        chat_id="chat_1",
-        turn_id=turn.turn_id,
-        origin="worker",
-        task_id="task_1",
-        actor_user_id="user_actor",
-    )
-    assert await events.read("chat_1", "turns") == [
-        (
-            0,
-            {
-                "type": "turn.started",
-                "turn_id": turn.turn_id,
-                "run_id": "run_1",
-                "origin": "worker",
-                "task_id": "task_1",
-                "actor_user_id": "user_actor",
-            },
-        )
-    ]
-    assert (await events.read("chat_1", "ui"))[-1][1] == {
-        "type": "stream.available",
-        "turn_id": turn.turn_id,
-        "run_id": "run_1",
-        "generation": 0,
-    }

@@ -1,0 +1,627 @@
+{
+  "format": 1,
+  "processes": [
+    {
+      "module": "agent.durable",
+      "name": "DurableDispatcher",
+      "state": {
+        "fields": [
+          {
+            "name": "chat_id",
+            "required": false
+          },
+          {
+            "name": "messages",
+            "required": false
+          },
+          {
+            "name": "phase",
+            "required": false
+          },
+          {
+            "name": "active_turn",
+            "required": false
+          },
+          {
+            "name": "pending_turns",
+            "required": false
+          },
+          {
+            "name": "linked",
+            "required": false
+          },
+          {
+            "name": "tool_calls",
+            "required": false
+          },
+          {
+            "name": "tool_results",
+            "required": false
+          },
+          {
+            "name": "tools",
+            "required": false
+          },
+          {
+            "name": "replies",
+            "required": false
+          },
+          {
+            "name": "unprojected",
+            "required": false
+          },
+          {
+            "name": "turns",
+            "required": false
+          },
+          {
+            "name": "error",
+            "required": false
+          }
+        ],
+        "module": "agent.durable",
+        "name": "DispatcherState"
+      }
+    },
+    {
+      "module": "rotor.patterns.group",
+      "name": "Group",
+      "state": {
+        "fields": [
+          {
+            "name": "members",
+            "required": false
+          }
+        ],
+        "module": "rotor.patterns.group",
+        "name": "GroupState"
+      }
+    },
+    {
+      "module": "rotor.patterns.task",
+      "name": "announce_turn",
+      "state": {
+        "fields": [],
+        "module": "rotor.messages",
+        "name": "EmptyState"
+      }
+    },
+    {
+      "module": "rotor.patterns.task",
+      "name": "deliver_turn",
+      "state": {
+        "fields": [],
+        "module": "rotor.messages",
+        "name": "EmptyState"
+      }
+    },
+    {
+      "module": "rotor.patterns.task",
+      "name": "project_turn",
+      "state": {
+        "fields": [],
+        "module": "rotor.messages",
+        "name": "EmptyState"
+      }
+    },
+    {
+      "module": "rotor.patterns.task",
+      "name": "run_tool",
+      "state": {
+        "fields": [],
+        "module": "rotor.messages",
+        "name": "EmptyState"
+      }
+    },
+    {
+      "module": "rotor.patterns.ticker",
+      "name": "Ticker",
+      "state": {
+        "fields": [
+          {
+            "name": "repeat",
+            "required": false
+          },
+          {
+            "name": "paused",
+            "required": false
+          },
+          {
+            "name": "next_at",
+            "required": false
+          },
+          {
+            "name": "ticks",
+            "required": false
+          }
+        ],
+        "module": "rotor.patterns.ticker",
+        "name": "TickerState"
+      }
+    }
+  ],
+  "types": [
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "chat_id",
+          "required": false
+        },
+        {
+          "name": "messages",
+          "required": false
+        },
+        {
+          "name": "phase",
+          "required": false
+        },
+        {
+          "name": "active_turn",
+          "required": false
+        },
+        {
+          "name": "pending_turns",
+          "required": false
+        },
+        {
+          "name": "linked",
+          "required": false
+        },
+        {
+          "name": "tool_calls",
+          "required": false
+        },
+        {
+          "name": "tool_results",
+          "required": false
+        },
+        {
+          "name": "tools",
+          "required": false
+        },
+        {
+          "name": "replies",
+          "required": false
+        },
+        {
+          "name": "unprojected",
+          "required": false
+        },
+        {
+          "name": "turns",
+          "required": false
+        },
+        {
+          "name": "error",
+          "required": false
+        }
+      ],
+      "module": "agent.durable",
+      "name": "DispatcherState",
+      "role": "state",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "turn_id",
+          "required": true
+        },
+        {
+          "name": "attempt",
+          "required": false
+        }
+      ],
+      "module": "agent.durable",
+      "name": "Generate",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "chat_id",
+          "required": true
+        },
+        {
+          "name": "turn_id",
+          "required": true
+        },
+        {
+          "name": "origin",
+          "required": true
+        },
+        {
+          "name": "history",
+          "required": false
+        },
+        {
+          "name": "linked",
+          "required": false
+        },
+        {
+          "name": "task_id",
+          "required": false
+        },
+        {
+          "name": "actor_user_id",
+          "required": false
+        }
+      ],
+      "module": "agent.durable",
+      "name": "TurnInput",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "by",
+          "required": false
+        }
+      ],
+      "module": "rotor.messages",
+      "name": "Cancelled",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "ref",
+          "required": true
+        },
+        {
+          "name": "output",
+          "required": false
+        },
+        {
+          "name": "process",
+          "required": false
+        }
+      ],
+      "module": "rotor.messages",
+      "name": "ChildDone",
+      "role": "fact",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "ref",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "required": false
+        },
+        {
+          "name": "process",
+          "required": false
+        }
+      ],
+      "module": "rotor.messages",
+      "name": "ChildFailed",
+      "role": "fact",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [],
+      "module": "rotor.messages",
+      "name": "EmptyState",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "type",
+          "required": true
+        },
+        {
+          "name": "detail",
+          "required": true
+        },
+        {
+          "name": "traceback",
+          "required": false
+        }
+      ],
+      "module": "rotor.messages",
+      "name": "ErrorInfo",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "original",
+          "required": true
+        },
+        {
+          "name": "error",
+          "required": true
+        },
+        {
+          "name": "attempt",
+          "required": false
+        }
+      ],
+      "module": "rotor.messages",
+      "name": "HandlingFailed",
+      "role": "fact",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "key",
+          "required": true
+        },
+        {
+          "name": "hook",
+          "required": false
+        }
+      ],
+      "module": "rotor.messages",
+      "name": "HookExpired",
+      "role": "fact",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "payload",
+          "required": true
+        },
+        {
+          "name": "key",
+          "required": true
+        }
+      ],
+      "module": "rotor.messages",
+      "name": "HookResolved",
+      "role": "fact",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "input",
+          "required": false
+        }
+      ],
+      "module": "rotor.messages",
+      "name": "Start",
+      "role": "fact",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "name",
+          "required": false
+        },
+        {
+          "name": "round",
+          "required": false
+        },
+        {
+          "name": "count",
+          "required": false
+        },
+        {
+          "name": "pending",
+          "required": false
+        }
+      ],
+      "module": "rotor.patterns.fanout",
+      "name": "Fanout",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "body",
+          "required": true
+        }
+      ],
+      "module": "rotor.patterns.group",
+      "name": "Broadcast",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "member",
+          "required": true
+        }
+      ],
+      "module": "rotor.patterns.group",
+      "name": "Join",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "member",
+          "required": true
+        }
+      ],
+      "module": "rotor.patterns.group",
+      "name": "Leave",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "model",
+          "required": true
+        },
+        {
+          "name": "data",
+          "required": false
+        },
+        {
+          "name": "key",
+          "required": false
+        }
+      ],
+      "module": "rotor.patterns.hookchain",
+      "name": "Hook",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "hooks",
+          "required": false
+        },
+        {
+          "name": "timeout",
+          "required": false
+        },
+        {
+          "name": "name",
+          "required": false
+        },
+        {
+          "name": "cursor",
+          "required": false
+        },
+        {
+          "name": "resolved",
+          "required": false
+        }
+      ],
+      "module": "rotor.patterns.hookchain",
+      "name": "HookChain",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "input",
+          "required": true
+        },
+        {
+          "name": "attempt",
+          "required": true
+        },
+        {
+          "name": "operation_id",
+          "required": true
+        }
+      ],
+      "module": "rotor.patterns.task",
+      "name": "TaskRetry",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "expr",
+          "required": true
+        },
+        {
+          "name": "tz",
+          "required": false
+        }
+      ],
+      "module": "rotor.patterns.ticker",
+      "name": "Cron",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "period",
+          "required": true
+        },
+        {
+          "name": "anchor",
+          "required": false
+        }
+      ],
+      "module": "rotor.patterns.ticker",
+      "name": "Interval",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "schedule",
+          "required": true
+        },
+        {
+          "name": "payload",
+          "required": true
+        }
+      ],
+      "module": "rotor.patterns.ticker",
+      "name": "Repeat",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "slot",
+          "required": true
+        }
+      ],
+      "module": "rotor.patterns.ticker",
+      "name": "TickerFire",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [],
+      "module": "rotor.patterns.ticker",
+      "name": "TickerPause",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [],
+      "module": "rotor.patterns.ticker",
+      "name": "TickerResume",
+      "role": "message",
+      "version": 1
+    }
+  ]
+}

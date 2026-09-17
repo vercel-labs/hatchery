@@ -1,4 +1,4 @@
-"""Durable ownership and workflow discovery for dispatcher turns."""
+"""Short chat locks and UI projections for Rotor dispatcher turns."""
 
 import asyncio
 import contextlib
@@ -18,10 +18,6 @@ class ActiveTurn:
     task_id: str | None
     generation: int
     actor_user_id: str | None = None
-
-
-class BusyError(RuntimeError):
-    pass
 
 
 _locks: dict[str, asyncio.Lock] = {}
@@ -66,7 +62,7 @@ async def _run_once(chat_id: str):
 
 
 async def active(chat_id: str) -> ActiveTurn | None:
-    """Fold the registry and return its newest unterminated turn."""
+    """Fold the UI projection and return its newest unterminated turn."""
     started: list[ActiveTurn] = []
     terminal: set[str] = set()
     for index, data in await events.read(chat_id, "turns"):

@@ -1,18 +1,16 @@
-"""Append-only event streams, keyed by (stream_id, namespace).
+"""Append-only application projections keyed by (stream_id, namespace).
 
-seal's storage shape: the stream is the source of truth, snapshots are just
-streams whose tail wins. One stream per chat per concern:
+One stream per chat per concern:
 
-- (chat_id, "messages"): the transcript, one model message per event. The UI
-  loads it on open, turns derive their history from it, channel inbound
-  appends to it.
+- (chat_id, "messages"): UI transcript and bootstrap history for a chat's Rotor
+  dispatcher process. Channel inbound appends user messages; completed Rotor
+  turns project assistant and tool messages in order.
 - (chat_id, "ui"): lightweight change notifications consumed by the UI.
 
 Postgres when DATABASE_URL is set, otherwise one jsonl file per stream under
-HATCHERY_DATA_DIR. The jsonl locks are threading.Locks on purpose: a workflow
-worker runs each queue message on a fresh event loop (often another thread),
-so an asyncio.Lock would bind to the first loop and raise on the next. They
-are only ever held across synchronous file I/O — never across an await.
+HATCHERY_DATA_DIR. The jsonl locks are threading.Locks because Queue workers
+may handle messages on fresh event loops. They are only held across synchronous
+file I/O, never across an await.
 """
 
 import asyncio

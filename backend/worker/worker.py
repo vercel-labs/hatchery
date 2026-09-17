@@ -1,6 +1,5 @@
 """App-side Worker and task lifecycle."""
 
-import asyncio
 import datetime
 import json
 import secrets
@@ -41,23 +40,45 @@ async def _send_command(
 
 
 async def create(
-    chat_id: str, spec: models.WorkerSpec, *, user_id: str | None = None
+    chat_id: str,
+    spec: models.WorkerSpec,
+    *,
+    user_id: str | None = None,
+    request_id: str | None = None,
 ) -> models.Worker:
     now = _now()
-    worker_id = f"wrk_{uuid.uuid4().hex[:12]}"
-    record = models.Worker(
-        id=worker_id,
-        chat_id=chat_id,
-        user_id=user_id,
-        sandbox_name=f"hatchery-{worker_id}",
-        command_topic=protocol.command_topic(worker_id),
-        title=spec.title,
-        status="creating",
-        spec=spec,
-        daemon_token=secrets.token_urlsafe(32),
-        created_at=now,
-        updated_at=now,
+    worker_id = (
+        f"wrk_{uuid.uuid5(uuid.NAMESPACE_URL, f'{chat_id}:{request_id}').hex[:12]}"
+        if request_id is not None
+        else f"wrk_{uuid.uuid4().hex[:12]}"
     )
+    existing = await store.get(worker_id)
+    if existing is not None:
+        if (
+            existing.chat_id != chat_id
+            or existing.user_id != user_id
+            or existing.spec != spec
+        ):
+            raise ValueError("worker idempotency key conflicts with an existing sandbox")
+        if existing.status in ("running", "stopped"):
+            return existing
+        record = existing
+        record.status = "creating"
+        record.updated_at = now
+    else:
+        record = models.Worker(
+            id=worker_id,
+            chat_id=chat_id,
+            user_id=user_id,
+            sandbox_name=f"hatchery-{worker_id}",
+            command_topic=protocol.command_topic(worker_id),
+            title=spec.title,
+            status="creating",
+            spec=spec,
+            daemon_token=secrets.token_urlsafe(32),
+            created_at=now,
+            updated_at=now,
+        )
     await store.save(record)
     try:
         async with ai.experimental_telemetry.span("sandbox.provision") as span:
@@ -191,6 +212,9 @@ async def launch_task(
             await run_span.push()
         await store.save_task(task)
         raise
+    task.inputs[0].delivered_at = _now()
+    task.updated_at = task.inputs[0].delivered_at
+    await store.save_task(task)
     if resume_required:
         record.status = "running"
         record.updated_at = _now()
@@ -204,19 +228,34 @@ async def send_task_input(
     prompt: str,
     *,
     actor_user_id: str | None = None,
+    request_id: str | None = None,
 ) -> models.Task:
     if not prompt.strip():
         raise ValueError("task input must not be empty")
     current = await _required_task(chat_id, task_id)
     now = _now()
+    input_id = (
+        f"input_{uuid.uuid5(uuid.NAMESPACE_URL, f'{task_id}:{request_id}').hex}"
+        if request_id is not None
+        else f"input_{uuid.uuid4().hex}"
+    )
+    input_sequence = -1
 
-    def record(task: models.Task) -> models.Task:
+    def save_input(task: models.Task) -> models.Task | None:
+        nonlocal input_sequence
+        existing = next((item for item in task.inputs if item.id == input_id), None)
+        if existing is not None:
+            if existing.text != prompt:
+                raise ValueError("task input idempotency key conflicts with existing input")
+            input_sequence = existing.sequence
+            return None
         task.command_sequence += 1
+        input_sequence = task.command_sequence
         task.user_id = actor_user_id
         task.inputs.append(
             models.TaskInput(
-                id=f"input_{uuid.uuid4().hex}",
-                sequence=task.command_sequence,
+                id=input_id,
+                sequence=input_sequence,
                 text=prompt,
                 created_at=now,
             )
@@ -226,13 +265,12 @@ async def send_task_input(
         task.active_question_id = None
         task.result = None
         task.completion_sequence = None
-        task.completion_run_id = None
         task.completion_message = None
         task.completion_delivered = False
         task.updated_at = now
         return task
 
-    task = await store.mutate_task(current.id, record)
+    task = await store.mutate_task(current.id, save_input)
     if task is None:
         raise KeyError(task_id)
     record = await _required(task.worker_id)
@@ -247,15 +285,28 @@ async def send_task_input(
         record,
         protocol.command(
             task.worker_id,
-            task.command_sequence,
+            input_sequence,
             "task.input",
             task_id=task.id,
             payload={"prompt": prompt},
+            command_id=(
+                f"cmd_{uuid.uuid5(uuid.NAMESPACE_URL, f'{task.id}:{request_id}:input').hex}"
+                if request_id is not None
+                else None
+            ),
         ),
         parent,
         actor_user_id=task.user_id,
     )
-    return task
+    delivered_at = _now()
+
+    def delivered(current: models.Task) -> models.Task:
+        item = next(value for value in current.inputs if value.id == input_id)
+        item.delivered_at = delivered_at
+        current.updated_at = delivered_at
+        return current
+
+    return await store.mutate_task(task.id, delivered) or task
 
 
 async def create_terminal(chat_id: str, worker_id: str) -> models.Terminal:
@@ -360,6 +411,8 @@ async def launch_task_idempotent(
             or existing.model != model
         ):
             raise ValueError("task idempotency key conflicts with an existing task")
+        if any(item.delivered_at is None for item in existing.inputs):
+            return await reconcile_task(existing.id)
         return existing
     return await launch_task(
         chat_id,

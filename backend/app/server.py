@@ -5,10 +5,11 @@ Health check, channel webhooks, and the dispatcher chat:
 - /channels/v1/github  needs GITHUB_CONNECTOR + GITHUB_APP_SLUG
 - /api/chat            dispatcher agent turn, AI SDK UI message stream (SSE)
 
-State lives in the store (postgres via DATABASE_URL, local files without):
-a chat's transcript is its (chat_id, "messages") stream.
-Slack/github inbound lands in its chat via
-_StoreHub (dedupe, claim binding, append); no turn runs on inbound yet.
+Application projections live in the store (Postgres via DATABASE_URL, local
+files without). Rotor checkpoints the canonical dispatcher conversation; the
+(chat_id, "messages") stream feeds the UI and bootstraps existing chats.
+Slack/GitHub inbound lands in its chat through _StoreHub, then enters the
+chat's Rotor mailbox.
 """
 
 import asyncio
@@ -21,6 +22,7 @@ import json
 import logging
 import os
 import re
+import urllib.parse
 
 import fastapi
 import fastapi.middleware.cors
@@ -38,7 +40,7 @@ import models
 import store
 import vercel.functions
 import vercel.queue
-from agent import classifier, durable, sandbox, stream as agent_stream, telemetry, topic
+from agent import classifier, durable, runtime as rotor_runtime, sandbox, stream as agent_stream, telemetry, topic
 import worker
 from worker import protocol as worker_protocol
 from channels import github, slack
@@ -46,6 +48,7 @@ from store import chats, events, jobs, notes, spaces, turns
 
 log = logging.getLogger("app")
 _background: set[asyncio.Task] = set()
+_rotor_promotion_lock = asyncio.Lock()
 
 # This module is also the queue subscriber entrypoint, where FastAPI's lifespan
 # does not run.
@@ -322,12 +325,43 @@ async def lifespan(_: fastapi.FastAPI):
 app = fastapi.FastAPI(title="hatchery", lifespan=lifespan)
 
 
+def _configured_host(value: str | None) -> str | None:
+    if not value:
+        return None
+    parsed = urllib.parse.urlsplit(value if "://" in value else f"//{value}")
+    return parsed.hostname
+
+
+async def _ensure_rotor_deployment(request: fastapi.Request) -> None:
+    """Activate only the deployment reached through a promoted app URL."""
+    deployment = os.environ.get("VERCEL_DEPLOYMENT_ID")
+    if not deployment or os.environ.get("VERCEL_ENV") != "production":
+        return
+    allowed = {
+        host
+        for host in (
+            _configured_host(os.environ.get("HATCHERY_PUBLIC_URL")),
+            _configured_host(os.environ.get("VERCEL_PROJECT_PRODUCTION_URL")),
+        )
+        if host is not None
+    }
+    if request.url.hostname not in allowed:
+        return
+    async with _rotor_promotion_lock:
+        store = rotor_runtime.worker.backends.store
+        await store.setup()
+        if await store.active_deployment() != deployment:
+            await rotor_runtime.platform.activate(rotor_runtime.worker)
+
+
 @app.middleware("http")
 async def browser_session(request: fastapi.Request, call_next):
+    await _ensure_rotor_deployment(request)
     path = request.url.path
     public = (
         path == "/api/health"
         or path == "/api/cron"
+        or path == "/api/rotor/activate"
         or path.startswith("/api/auth/")
         or path.startswith("/channels/")
     )
@@ -362,6 +396,17 @@ app.add_middleware(
 @app.get("/api/health")
 async def health() -> dict:
     return {"ok": True, "channels": list(bot.channels)}
+
+
+@app.post("/api/rotor/activate")
+async def activate_rotor(request: fastapi.Request) -> dict[str, bool]:
+    """Explicitly transfer dispatcher execution to this Vercel deployment."""
+    secret = os.environ.get("ROTOR_RELEASE_SECRET")
+    authorization = request.headers.get("authorization", "")
+    if not secret or not hmac.compare_digest(authorization, f"Bearer {secret}"):
+        raise fastapi.HTTPException(401, "invalid release authorization")
+    await rotor_runtime.platform.activate(rotor_runtime.worker)
+    return {"ok": True}
 
 
 @app.get("/api/auth/login")
@@ -778,6 +823,8 @@ async def cron_heartbeat(request: fastapi.Request) -> dict:
     authorization = request.headers.get("authorization", "")
     if not secret or not hmac.compare_digest(authorization, f"Bearer {secret}"):
         raise fastapi.HTTPException(401, "invalid cron authorization")
+    if os.environ.get("VERCEL_DEPLOYMENT_ID"):
+        await rotor_runtime.platform.maintain(rotor_runtime.worker)
     now = datetime.datetime.now(datetime.UTC)
     await jobs.claim_due(now)
     started = 0
@@ -998,88 +1045,93 @@ class ChatRequest(pydantic.BaseModel):
 async def chat(
     request: ChatRequest, http_request: fastapi.Request
 ) -> fastapi.responses.StreamingResponse:
-    """Persist the user input, then attach to its durable workflow stream."""
+    """Persist user input, enqueue a Rotor turn, and attach to its live stream."""
     incoming, _ = ai.ui.ai_sdk.to_messages(request.messages)
-    try:
-        async with turns.run(request.chat_id):
-            current = await chats.get(request.chat_id)
-            if current is None:
-                raise fastapi.HTTPException(404, "unknown chat")
-            user = http_request.state.user
-            if current.archived_at is not None:
-                raise fastapi.HTTPException(
-                    409, "chat is archived; unarchive it before posting"
-                )
-            if await durable.active_turn(request.chat_id) is not None:
-                raise turns.BusyError(
-                    f"chat {request.chat_id} already has an active turn"
-                )
-            stored = await _transcript(request.chat_id)
-            known = {message.id for message in stored}
-            received = []
-            author = _user_display_name(user) or "User"
-            for message in incoming:
-                if message.role == "user" and message.id not in known:
-                    message.provider_metadata = {
-                        **(message.provider_metadata or {}),
-                        "hatchery": {
-                            "origin": "ui",
-                            "author": author,
-                            "actor_user_id": user["id"],
-                        },
-                    }
-                    await events.append(
-                        request.chat_id,
-                        "messages",
-                        message.model_dump(mode="json"),
-                    )
-                    stored.append(message)
-                    known.add(message.id)
-                    received.append(message)
-            slack_attribution = {}
-            if received:
-                identity = user.get("slack") or {}
-                if identity.get("team_id") and identity.get("user_id"):
-                    slack_attribution = {
-                        "slack_team_id": identity["team_id"],
-                        "slack_user_id": identity["user_id"],
-                    }
-            for message in received:
-                await _emit(
-                    request.chat_id,
-                    channels.event(
-                        channels.protocol.MESSAGE_RECEIVED,
-                        message=message.text,
-                        message_id=message.id,
-                        origin="ui",
-                        author=author,
-                        **slack_attribution,
-                    ),
-                )
-
-            if received and current.topic is None:
-                first = next(
-                    (message for message in stored if message.role == "user"), None
-                )
-                if first is not None:
-                    _spawn(_name_chat(request.chat_id, first.text))
-            if current.space_id is None:
-                first = next(
-                    (message for message in stored if message.role == "user"), None
-                )
-                if first is None:
-                    raise fastapi.HTTPException(409, "chat has no first prompt")
-                await _classify_chat(
-                    request.chat_id,
-                    first.text,
-                    {"origin": "ui", "author": "current user"},
-                    await spaces.list_all() or [await spaces.default()],
-                )
-            turn = await durable.start_turn(
-                request.chat_id, "ui", actor_user_id=user["id"]
+    async with turns.run(request.chat_id):
+        current = await chats.get(request.chat_id)
+        if current is None:
+            raise fastapi.HTTPException(404, "unknown chat")
+        user = http_request.state.user
+        if current.archived_at is not None:
+            raise fastapi.HTTPException(
+                409, "chat is archived; unarchive it before posting"
             )
-    except turns.BusyError as error:
-        raise fastapi.HTTPException(409, str(error)) from error
+        stored = await _transcript(request.chat_id)
+        known = {message.id for message in stored}
+        received = []
+        author = _user_display_name(user) or "User"
+        for message in incoming:
+            if message.role == "user" and message.id not in known:
+                message.provider_metadata = {
+                    **(message.provider_metadata or {}),
+                    "hatchery": {
+                        "origin": "ui",
+                        "author": author,
+                        "actor_user_id": user["id"],
+                    },
+                }
+                await events.append(
+                    request.chat_id,
+                    "messages",
+                    message.model_dump(mode="json"),
+                )
+                stored.append(message)
+                known.add(message.id)
+                received.append(message)
+        slack_attribution = {}
+        if received:
+            identity = user.get("slack") or {}
+            if identity.get("team_id") and identity.get("user_id"):
+                slack_attribution = {
+                    "slack_team_id": identity["team_id"],
+                    "slack_user_id": identity["user_id"],
+                }
+        for message in received:
+            await _emit(
+                request.chat_id,
+                channels.event(
+                    channels.protocol.MESSAGE_RECEIVED,
+                    message=message.text,
+                    message_id=message.id,
+                    origin="ui",
+                    author=author,
+                    **slack_attribution,
+                ),
+            )
+
+        if received and current.topic is None:
+            first = next(
+                (message for message in stored if message.role == "user"), None
+            )
+            if first is not None:
+                _spawn(_name_chat(request.chat_id, first.text))
+        if current.space_id is None:
+            first = next(
+                (message for message in stored if message.role == "user"), None
+            )
+            if first is None:
+                raise fastapi.HTTPException(409, "chat has no first prompt")
+            await _classify_chat(
+                request.chat_id,
+                first.text,
+                {"origin": "ui", "author": "current user"},
+                await spaces.list_all() or [await spaces.default()],
+            )
+        request_message = next(
+            (message for message in reversed(incoming) if message.role == "user"),
+            None,
+        )
+        if request_message is None:
+            raise fastapi.HTTPException(409, "chat request has no user message")
+        turn_id = "turn_" + hashlib.sha256(
+            f"ui:{request.chat_id}:{request_message.id}".encode()
+        ).hexdigest()
+        turn = await durable.start_turn(
+            request.chat_id,
+            "ui",
+            turn_id=turn_id,
+            actor_user_id=user["id"],
+        )
     return fastapi.responses.StreamingResponse(
         agent_stream.to_sse(turn.run_id, turn.turn_id),
         headers=ai.ui.ai_sdk.UI_MESSAGE_STREAM_HEADERS,
@@ -1707,28 +1759,29 @@ async def complete_worker_task(task: worker.Task) -> None:
             current.completion_message = None
             await worker.store.save_task(current)
 
-        if current.completion_run_id is not None:
-            run = vercel.workflow.Run(current.completion_run_id)
-            if await run.status() in ("pending", "running", "completed"):
-                return
-        turn = await durable.start_turn(
+        completion_turn_id = "turn_" + hashlib.sha256(
+            f"worker:{current.id}:{current.completion_sequence}".encode()
+        ).hexdigest()
+        await durable.start_turn(
             current.chat_id,
             "worker",
             current.id,
+            turn_id=completion_turn_id,
             actor_user_id=current.user_id,
         )
 
-        def record_run(latest: worker.Task) -> worker.Task:
-            latest.completion_run_id = turn.run_id
-            return latest
 
-        await worker.store.mutate_task(current.id, record_run)
-
-
-async def _emit(chat_id: str, event: channels.Event) -> list[str]:
+async def _emit(
+    chat_id: str, event: channels.Event, *, delivery_key: str | None = None
+) -> list[str]:
     async with telemetry.use_chat(chat_id):
         async with ai.experimental_telemetry.span("channel.deliver") as span:
             bindings = await chats.bindings(chat_id)
+            delivered = {
+                str(data.get("key"))
+                for _, data in await events.read(chat_id, "deliveries")
+                if data.get("key") is not None
+            }
             span.set_attrs(
                 {"chat.id": chat_id},
                 event_type=event.type,
@@ -1741,8 +1794,29 @@ async def _emit(chat_id: str, event: channels.Event) -> list[str]:
                 channel = bot.channels.get(binding.channel)
                 if channel is None:
                     continue
+                receipt = (
+                    hashlib.sha256(
+                        f"{delivery_key}:{event.type}:{binding.token}".encode()
+                    ).hexdigest()
+                    if delivery_key is not None
+                    else None
+                )
+                if receipt in delivered:
+                    continue
                 try:
                     await channel.on_event(event, binding.state)
+                    if receipt is not None:
+                        await events.append(
+                            chat_id,
+                            "deliveries",
+                            {
+                                "key": receipt,
+                                "delivery_key": delivery_key,
+                                "binding": binding.token,
+                                "event_type": event.type,
+                            },
+                        )
+                        delivered.add(receipt)
                 except Exception as error:
                     log.exception(
                         "channel delivery failed: %s -> %s", chat_id, binding.channel
@@ -1752,13 +1826,22 @@ async def _emit(chat_id: str, event: channels.Event) -> list[str]:
             return failures
 
 
-async def _deliver(chat_id: str, message: str, *, final: bool = True) -> list[str]:
+async def _deliver(
+    chat_id: str,
+    message: str,
+    *,
+    final: bool = True,
+    delivery_key: str | None = None,
+) -> list[str]:
     data = {"message": message}
     if not final:
         data["final"] = False
-    return await _emit(
-        chat_id, channels.event(channels.protocol.MESSAGE_COMPLETED, **data)
-    )
+    if delivery_key is not None:
+        data["delivery_key"] = delivery_key
+    event = channels.event(channels.protocol.MESSAGE_COMPLETED, **data)
+    if delivery_key is not None:
+        event.meta.id = "evt_" + hashlib.sha256(delivery_key.encode()).hexdigest()
+    return await _emit(chat_id, event, delivery_key=delivery_key)
 
 
 async def _run_inbound_turn(chat_id: str, actor_user_id: str | None = None) -> None:
