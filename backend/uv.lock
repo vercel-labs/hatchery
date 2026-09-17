@@ -6,6 +6,9 @@ requires-python = "==3.14.*"
 exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
 exclude-newer-span = "P2D"
 
+[options.exclude-newer-package]
+rotorcore = "2026-09-17T00:00:00Z"
+
 [[package]]
 name = "ai"
 version = "0.5.2.dev2+14930fb"
@@ -449,7 +452,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.10" },
-    { name = "rotorcore", extras = ["vercel"], git = "https://github.com/vercel-labs/rotor.git?rev=1e7b99143b08f0e18a092c92b9c6306167cad4bf" },
+    { name = "rotorcore", extras = ["vercel"], specifier = "==0.0.2" },
     { name = "vercel", git = "https://github.com/vercel/vercel-py?subdirectory=src%2Fvercel&branch=main" },
     { name = "vercel-connect" },
     { name = "websockets", specifier = ">=15,<17" },
@@ -869,8 +872,12 @@ wheels = [
 
 [[package]]
 name = "rotorcore"
-version = "0.0.1"
-source = { git = "https://github.com/vercel-labs/rotor.git?rev=1e7b99143b08f0e18a092c92b9c6306167cad4bf#1e7b99143b08f0e18a092c92b9c6306167cad4bf" }
+version = "0.0.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/1a/e9/d710698622340c788a66136266c11df5826af6899d5931feaa6c6d2da9a5/rotorcore-0.0.2.tar.gz", hash = "sha256:f29c116a834836de90db3bf5b4cfe6d19144113cad857b7d22924be8d849aa2d", size = 89706, upload-time = "2026-09-16T23:54:45.196Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0a/81/c6ac45a0c8de9f0cb4de055fac018a8896d63ab2fba599223f72730dc87f/rotorcore-0.0.2-py3-none-any.whl", hash = "sha256:3e5d06046007fb1a4d949bf381c1aa81c8e632f84e6dec236c227a8bd1229f8d", size = 105871, upload-time = "2026-09-16T23:54:43.991Z" },
+]
 
 [package.optional-dependencies]
 vercel = [
