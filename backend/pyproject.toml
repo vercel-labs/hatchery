@@ -31,12 +31,15 @@ entrypoint = "app.server:app"
 
 [[tool.vercel.subscribers]]
 entrypoint = "app.server:worker_event"
+topics = ["hatchery-worker-events-v1"]
 
 [[tool.vercel.subscribers]]
 entrypoint = "agent.runtime"
+topics = ["hatchery-dispatcher-v1", "hatchery-dispatcher-maintenance-v1"]
 
 [tool.uv]
 package = false
+exclude-newer-package = { rotorcore = "2026-09-17T00:00:00Z" }
 
 [tool.uv.sources]
 ai = { git = "https://github.com/vercel-labs/ai-python", branch = "main" }
