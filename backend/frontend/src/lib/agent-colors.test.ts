@@ -8,10 +8,10 @@ import {
   accentColor,
   isAccentColor,
   normalizeAccentColor,
-  resolveSpaceColor,
-  resolveSpaceForeground,
+  resolveAgentColor,
+  resolveAgentForeground,
   splitAccentColor,
-} from "./space-colors.ts";
+} from "./agent-colors.ts";
 
 const expectedColors = [
   "blue-600",
@@ -71,12 +71,12 @@ test("builds and splits only complete picker values", () => {
 });
 
 test("resolves explicit IDs, aliases, foregrounds, and legacy colors", () => {
-  assert.equal(resolveSpaceColor("purple-600"), "var(--geist-purple-600)");
-  assert.equal(resolveSpaceColor("purple-800"), "var(--geist-purple-800)");
-  assert.equal(resolveSpaceColor("purple-900"), "var(--geist-purple-900)");
-  assert.equal(resolveSpaceColor("purple"), "var(--geist-purple-700)");
-  assert.equal(resolveSpaceForeground("purple"), "var(--geist-purple-1000)");
-  assert.equal(resolveSpaceColor("#38bdf8"), "#38bdf8");
-  assert.equal(resolveSpaceColor("oklch(50% 0.2 200)"), "oklch(50% 0.2 200)");
-  assert.equal(resolveSpaceColor(undefined), "var(--muted-foreground)");
+  assert.equal(resolveAgentColor("purple-600"), "var(--geist-purple-600)");
+  assert.equal(resolveAgentColor("purple-800"), "var(--geist-purple-800)");
+  assert.equal(resolveAgentColor("purple-900"), "var(--geist-purple-900)");
+  assert.equal(resolveAgentColor("purple"), "var(--geist-purple-700)");
+  assert.equal(resolveAgentForeground("purple"), "var(--geist-purple-1000)");
+  assert.equal(resolveAgentColor("#38bdf8"), "#38bdf8");
+  assert.equal(resolveAgentColor("oklch(50% 0.2 200)"), "oklch(50% 0.2 200)");
+  assert.equal(resolveAgentColor(undefined), "var(--muted-foreground)");
 });

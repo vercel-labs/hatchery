@@ -6,7 +6,7 @@ import rotor.testing
 
 from agent import durable, runtime, stream
 from app import server
-from store import chats, events, spaces
+from store import chats, events, agents
 
 
 async def _never_terminal(_process_id, _turn_id):
@@ -130,8 +130,8 @@ async def test_to_sse_emits_reload_marker_for_discarded_activation(monkeypatch):
 async def test_to_sse_finishes_from_durable_record_after_live_spool_settles(
     monkeypatch,
 ):
-    space = await spaces.default()
-    chat = await chats.create(space.id, "settled")
+    agent = await agents.default()
+    chat = await chats.create(agent.id, "settled")
     user = ai.user_message("fast")
     await events.append(chat.id, "messages", user.model_dump(mode="json"))
 

@@ -8,12 +8,12 @@ import {
   ACCENT_SHADES,
   accentColor,
   type AccentColor,
-  resolveSpaceColor,
-  resolveSpaceForeground,
-} from "@/lib/space-colors";
+  resolveAgentColor,
+  resolveAgentForeground,
+} from "@/lib/agent-colors";
 import { cn } from "@/lib/utils";
 
-export function SpaceColorPicker({
+export function AgentColorPicker({
   value,
   onValueChange,
   label = "Accent color",
@@ -46,8 +46,8 @@ export function SpaceColorPicker({
                   "ring-2 ring-ring ring-offset-2 ring-offset-background",
               )}
               style={{
-                backgroundColor: resolveSpaceColor(color),
-                color: resolveSpaceForeground(family),
+                backgroundColor: resolveAgentColor(color),
+                color: resolveAgentForeground(family),
               }}
               onClick={() => {
                 if (selected && allowUnselected) onValueChange(null);

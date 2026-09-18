@@ -126,7 +126,7 @@ function TaskTerminal({ chatId, tab }: { chatId: string; tab: TerminalTab }) {
             ? `terminals/${tab.id}`
             : `subagents/${tab.id}`;
         ws = new WebSocket(
-          `${wsBase()}/api/chats/${chatId}/${path}/tty?offset=${offset}&cols=${term.cols}&rows=${term.rows}`,
+          `${wsBase()}/api/threads/${chatId}/${path}/tty?offset=${offset}&cols=${term.cols}&rows=${term.rows}`,
         );
         ws.onmessage = (event) => {
           const frame = JSON.parse(event.data);
@@ -202,6 +202,7 @@ export function TerminalPane({
   chatId,
   sandboxes,
   preferredSandboxId,
+  preferredTaskId,
   onClose,
   onCreateSandbox,
   onChanged,
@@ -209,6 +210,7 @@ export function TerminalPane({
   chatId: string;
   sandboxes: SandboxWorkspace[];
   preferredSandboxId?: string;
+  preferredTaskId?: string;
   onClose: () => void;
   onCreateSandbox: () => void;
   onChanged: () => void;
@@ -218,7 +220,11 @@ export function TerminalPane({
     sandboxes.findLast((box) => tabs(box).length) ??
     sandboxes.at(-1);
   const [selectedSandboxId, setSelectedSandboxId] = useState(latest?.id ?? "");
-  const [selectedTabId, setSelectedTabId] = useState(tabs(latest).at(-1)?.id ?? "");
+  const [selectedTabId, setSelectedTabId] = useState(
+    tabs(latest).find((tab) => tab.id === preferredTaskId)?.id ??
+      tabs(latest).at(-1)?.id ??
+      "",
+  );
   const [creating, setCreating] = useState(false);
   const [deletingId, setDeletingId] = useState("");
   const [authorizedSandboxIds, setAuthorizedSandboxIds] = useState<Set<string>>(
@@ -242,7 +248,7 @@ export function TerminalPane({
     setCreating(true);
     try {
       const response = await apiFetch(
-        `/api/chats/${chatId}/sandboxes/${activeSandbox.id}/terminals`,
+        `/api/threads/${chatId}/sandboxes/${activeSandbox.id}/terminals`,
         { method: "POST" },
       );
       if (!response.ok) return;
@@ -267,7 +273,7 @@ export function TerminalPane({
     try {
       const collection = tab.kind === "subagent" ? "subagents" : "terminals";
       const response = await apiFetch(
-        `/api/chats/${chatId}/${collection}/${tab.id}`,
+        `/api/threads/${chatId}/${collection}/${tab.id}`,
         { method: "DELETE" },
       );
       if (!response.ok) return;
@@ -284,7 +290,7 @@ export function TerminalPane({
     setDeletingId(box.id);
     try {
       const response = await apiFetch(
-        `/api/chats/${chatId}/sandboxes/${box.id}`,
+        `/api/threads/${chatId}/sandboxes/${box.id}`,
         { method: "DELETE" },
       );
       if (!response.ok) return;

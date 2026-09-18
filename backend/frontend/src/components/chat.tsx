@@ -28,26 +28,26 @@ import {
   MessageScrollerProvider,
   MessageScrollerViewport,
 } from "@/components/ui/message-scroller";
-import { apiBase, apiFetch, type Chat, type Space } from "@/lib/api";
+import { apiBase, apiFetch, type Thread, type Agent } from "@/lib/api";
 import { submissionLabel } from "@/components/chat-status";
 import type { ChatUIMessage } from "@/lib/messages";
 
 export function NewChatView({
-  spaces,
+  agents,
   onPersist,
   onHandoff,
   onOpenChat,
-  onCreateSpace,
+  onCreateAgent,
   isCurrent,
 }: {
-  spaces: Space[];
-  onPersist: (spaceId: string | null) => Promise<Chat>;
-  onHandoff: (chat: Chat, handoff: NewChatHandoff) => void;
+  agents: Agent[];
+  onPersist: (agentId: string | null) => Promise<Thread>;
+  onHandoff: (chat: Thread, handoff: NewChatHandoff) => void;
   onOpenChat: (chatId: string) => void;
-  onCreateSpace: () => void;
+  onCreateAgent: () => void;
   isCurrent: () => boolean;
 }) {
-  const [spaceId, setSpaceId] = useState<string | null>(null);
+  const [agentId, setAgentId] = useState<string | null>(null);
   const [showSandboxForm, setShowSandboxForm] = useState(false);
   const [persisting, setPersisting] = useState(false);
   const [error, setError] = useState("");
@@ -55,17 +55,17 @@ export function NewChatView({
   const handoff = useRef<NewChatHandoff | null>(null);
 
   const submit = async ({ text }: { text: string }) => {
-    if (submitting.current) throw new Error("Chat creation is already in progress");
+    if (submitting.current) throw new Error("Thread creation is already in progress");
     submitting.current = true;
     setPersisting(true);
     setError("");
     try {
       handoff.current ??= newChatHandoff(text);
-      const chat = await onPersist(spaceId);
+      const chat = await onPersist(agentId);
       if (!isCurrent()) return;
       onHandoff(chat, handoff.current);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not create chat");
+      setError(reason instanceof Error ? reason.message : "Could not create thread");
       submitting.current = false;
       setPersisting(false);
       throw reason;
@@ -76,7 +76,7 @@ export function NewChatView({
     <div className="flex min-h-0 flex-1 items-center justify-center p-6">
       <div className="flex w-full max-w-2xl flex-col gap-3">
         <h1 className="px-1 text-sm font-medium text-muted-foreground">
-          New chat
+          New thread
         </h1>
         {error && (
           <Alert variant="destructive">
@@ -88,14 +88,14 @@ export function NewChatView({
           autoFocus
           isBusy={persisting}
           traceId={null}
-          spaces={spaces}
-          spaceId={spaceId}
-          showAutoSpace
+          agents={agents}
+          agentId={agentId}
+          showAutoAgent
           showMarkAsRead={false}
           isMarkingAsRead={false}
           onSubmit={submit}
           onStop={() => {}}
-          onSpaceChange={(nextSpaceId) => setSpaceId(nextSpaceId)}
+          onAgentChange={(nextAgentId) => setAgentId(nextAgentId)}
           onMarkAsRead={() => {}}
         />
         <div className="flex flex-wrap gap-2 px-1">
@@ -103,17 +103,17 @@ export function NewChatView({
             <PlusIcon data-icon="inline-start" />
             Create sandbox manually
           </Button>
-          <Button variant="outline" onClick={onCreateSpace}>
+          <Button variant="outline" onClick={onCreateAgent}>
             <PlusIcon data-icon="inline-start" />
-            New space
+            New agent
           </Button>
         </div>
       </div>
       <SandboxForm
-        spaceId={spaceId}
+        agentId={agentId}
         open={showSandboxForm}
         onOpenChange={setShowSandboxForm}
-        onPersist={() => onPersist(spaceId)}
+        onPersist={() => onPersist(agentId)}
         onCreated={(_sandboxId, chatId) => onOpenChat(chatId)}
         isCurrent={isCurrent}
       />
@@ -124,8 +124,8 @@ export function NewChatView({
 export function ChatView({
   chatId,
   initialMessages,
-  spaceId,
-  spaces,
+  agentId,
+  agents,
   messageRevision,
   streamGeneration,
   traceId,
@@ -134,27 +134,27 @@ export function ChatView({
   handoff,
   onMessagesChange,
   onSeen,
-  onSpaceChange,
+  onAgentChange,
   onUnarchive,
   onCreateSandbox,
-  onCreateSpace,
+  onCreateAgent,
 }: {
   chatId: string;
   initialMessages: ChatUIMessage[];
-  spaceId: string | null;
-  spaces: Space[];
+  agentId: string | null;
+  agents: Agent[];
   messageRevision: number;
   streamGeneration: number;
   traceId: string | null;
   archived: boolean;
-  attentionReason: Chat["attention_reason"];
+  attentionReason: Thread["attention_reason"];
   handoff?: NewChatHandoff;
   onMessagesChange?: (messages: ChatUIMessage[]) => void;
-  onSeen: (chat: Chat) => void;
-  onSpaceChange: (spaceId: string) => void | Promise<void>;
+  onSeen: (chat: Thread) => void;
+  onAgentChange: (agentId: string) => void | Promise<void>;
   onUnarchive: () => void;
   onCreateSandbox: () => void;
-  onCreateSpace: () => void;
+  onCreateAgent: () => void;
 }) {
   const transport = useMemo(
     () =>
@@ -236,7 +236,7 @@ export function ChatView({
     ) {
       return;
     }
-    apiFetch(`/api/chats/${chatId}/messages`)
+    apiFetch(`/api/threads/${chatId}/messages`)
       .then((response) => (response.ok ? response.json() : null))
       .then((stored: ChatUIMessage[] | null) => {
         if (stored) setMessages(stored);
@@ -250,7 +250,7 @@ export function ChatView({
     setMarkingSeen(true);
     setSeenError("");
     try {
-      const response = await apiFetch(`/api/chats/${chatId}/seen`, {
+      const response = await apiFetch(`/api/threads/${chatId}/seen`, {
         method: "POST",
       });
       if (!response.ok) throw new Error();
@@ -268,7 +268,7 @@ export function ChatView({
       <div className="flex min-h-0 flex-1 items-center justify-center p-6">
         <div className="flex w-full max-w-2xl flex-col gap-3">
           <h1 className="px-1 text-sm font-medium text-muted-foreground">
-            New chat
+            New thread
           </h1>
           {error && (
             <Alert variant="destructive">
@@ -280,16 +280,16 @@ export function ChatView({
             autoFocus
             isBusy={isStreaming}
             traceId={traceId}
-            spaces={spaces}
-            spaceId={spaceId}
-            showAutoSpace={spaceId === null}
+            agents={agents}
+            agentId={agentId}
+            showAutoAgent={agentId === null}
             showMarkAsRead={false}
             isMarkingAsRead={markingSeen}
             onSubmit={({ text }) => {
               void sendMessage({ text });
             }}
             onStop={() => void stop()}
-            onSpaceChange={onSpaceChange}
+            onAgentChange={onAgentChange}
             onMarkAsRead={() => void markAsSeen()}
           />
           <div className="flex flex-wrap gap-2 px-1">
@@ -297,9 +297,9 @@ export function ChatView({
               <PlusIcon data-icon="inline-start" />
               Create sandbox manually
             </Button>
-            <Button variant="outline" onClick={onCreateSpace}>
+            <Button variant="outline" onClick={onCreateAgent}>
               <PlusIcon data-icon="inline-start" />
-              New space
+              New agent
             </Button>
           </div>
         </div>
@@ -347,7 +347,7 @@ export function ChatView({
                 {status === "submitted" && (
                   <MessageScrollerItem messageId="thinking">
                     <div className="flex animate-pulse items-center gap-2 px-3 text-sm text-muted-foreground">
-                      {submissionLabel(spaceId)}
+                      {submissionLabel(agentId)}
                     </div>
                   </MessageScrollerItem>
                 )}
@@ -385,15 +385,15 @@ export function ChatView({
           <PromptForm
             isBusy={isStreaming}
             traceId={traceId}
-            spaces={spaces}
-            spaceId={spaceId}
+            agents={agents}
+            agentId={agentId}
             showMarkAsRead={Boolean(attentionReason)}
             isMarkingAsRead={markingSeen}
             onSubmit={({ text }) => {
               void sendMessage({ text });
             }}
             onStop={() => void stop()}
-            onSpaceChange={onSpaceChange}
+            onAgentChange={onAgentChange}
             onMarkAsRead={() => void markAsSeen()}
           />
         )}

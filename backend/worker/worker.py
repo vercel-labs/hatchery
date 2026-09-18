@@ -11,6 +11,10 @@ from worker import models, protocol, queue, sandbox, store
 from worker.daemon import VERSION as DAEMON_VERSION
 
 
+MAX_DELEGATION_DEPTH = 6
+MAX_DELEGATIONS_PER_THREAD = 8
+
+
 def _now() -> str:
     return datetime.datetime.now(datetime.UTC).isoformat()
 
@@ -150,6 +154,7 @@ async def launch_task(
     task_id: str | None = None,
     command_id: str | None = None,
     actor_user_id: str | None = None,
+    parent_task_id: str | None = None,
 ) -> models.Task:
     record = await _required(worker_id)
     if record.chat_id != chat_id:
@@ -159,6 +164,20 @@ async def launch_task(
     resume_required = record.status == "stopped"
     now = _now()
     resolved_task_id = task_id or f"task_{uuid.uuid4().hex[:12]}"
+    parent_task = None
+    if parent_task_id is not None:
+        parent_task = await store.get_task(parent_task_id)
+        if parent_task is None or parent_task.chat_id != chat_id:
+            raise ValueError("parent subagent does not belong to this chat")
+    siblings = [
+        item
+        for item in await store.list_tasks(chat_id)
+        if item.parent_task_id == parent_task_id
+    ]
+    if parent_task is not None and parent_task.depth >= MAX_DELEGATION_DEPTH:
+        raise ValueError("subagent delegation depth limit reached")
+    if len(siblings) >= MAX_DELEGATIONS_PER_THREAD:
+        raise ValueError("subagent delegation fan-out limit reached")
     run_span = ai.experimental_telemetry.create_span("hatchery.agent_run").stamp_start()
     run_span.set_attrs(
         {
@@ -178,6 +197,15 @@ async def launch_task(
         title=prompt.strip().splitlines()[0][:80] or "subagent",
         prompt=prompt,
         model=model,
+        parent_task_id=parent_task_id,
+        root_task_id=(
+            parent_task.root_task_id or parent_task.id
+            if parent_task is not None
+            else resolved_task_id
+        ),
+        depth=(parent_task.depth + 1 if parent_task is not None else 1),
+        objective=prompt,
+        delegation_order=len(siblings),
         telemetry_span=run_span.model_dump(mode="json") if run_span.id else None,
         inputs=[
             models.TaskInput(
@@ -348,8 +376,12 @@ async def list_terminals(chat_id: str) -> list[models.Terminal]:
 async def delete_task(
     chat_id: str, task_id: str, actor_user_id: str | None = None
 ) -> None:
-    task = await cancel_task(chat_id, task_id, actor_user_id=actor_user_id)
-    await store.delete_task(task.id)
+    subtree = await store.list_task_subtree(task_id)
+    if not subtree or subtree[0].chat_id != chat_id:
+        raise ValueError("subagent does not belong to this thread")
+    for member in reversed(subtree):
+        await cancel_task(chat_id, member.id, actor_user_id=actor_user_id)
+        await store.delete_task(member.id)
 
 
 async def cancel_task(
@@ -397,6 +429,7 @@ async def launch_task_idempotent(
     model: str,
     request_id: str,
     actor_user_id: str | None = None,
+    parent_task_id: str | None = None,
 ) -> models.Task:
     """Create a task once for a caller-supplied idempotency key."""
     task_id = (
@@ -409,6 +442,7 @@ async def launch_task_idempotent(
             or existing.worker_id != worker_id
             or existing.prompt != prompt
             or existing.model != model
+            or existing.parent_task_id != parent_task_id
         ):
             raise ValueError("task idempotency key conflicts with an existing task")
         if any(item.delivered_at is None for item in existing.inputs):
@@ -422,6 +456,7 @@ async def launch_task_idempotent(
         task_id=task_id,
         command_id=f"cmd_{uuid.uuid5(uuid.NAMESPACE_URL, f'{worker_id}:{request_id}:launch').hex}",
         actor_user_id=actor_user_id,
+        parent_task_id=parent_task_id,
     )
 
 

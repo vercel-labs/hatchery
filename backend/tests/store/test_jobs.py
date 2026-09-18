@@ -17,7 +17,7 @@ def test_validate_schedule_accepts_only_five_fields():
 
 async def test_crud_and_owner_scoped_listing():
     created = await jobs.create(
-        "spc_1",
+        "agt_1",
         "user_1",
         "0 9 * * 1-5",
         "Check reports",
@@ -25,8 +25,8 @@ async def test_crud_and_owner_scoped_listing():
     )
 
     assert created.author_display_name == "Ada Lovelace"
-    assert await jobs.list_for_space("spc_1", "user_2") == []
-    assert (await jobs.list_for_space("spc_1", "user_1"))[0] == created
+    assert await jobs.list_for_agent("agt_1", "user_2") == []
+    assert (await jobs.list_for_agent("agt_1", "user_1"))[0] == created
 
     updated = await jobs.update(created.id, "30 10 * * *", "Check builds")
     assert updated.schedule == "30 10 * * *"
@@ -37,35 +37,24 @@ async def test_crud_and_owner_scoped_listing():
     assert await jobs.get(created.id) is None
 
 
-def test_legacy_job_and_execution_attribution_is_optional():
-    job = models.Job.model_validate(
-        {
-            "id": "job_legacy",
-            "space_id": "spc_1",
-            "owner_id": "user_1",
-            "schedule": "0 9 * * *",
-            "prompt": "Check reports",
-            "next_run_at": "2026-09-05T09:00:00+00:00",
-            "created_at": "2026-09-04T09:00:00+00:00",
-        }
-    )
-    execution = jobs.Execution.model_validate(
-        {
-            "job_id": job.id,
-            "scheduled_for": job.next_run_at,
-            "chat_id": "chat_legacy",
-            "turn_id": "turn_legacy",
-            "prompt": job.prompt,
-        }
-    )
+def test_interval_and_timezone_schedules_advance():
+    now = datetime.datetime(2026, 9, 4, 12, 0, tzinfo=datetime.UTC)
 
-    assert job.author_display_name is None
-    assert execution.author_display_name is None
+    assert jobs.validate_schedule("15m", "every") == "15m"
+    assert jobs.next_run("15m", now, "every") == now + datetime.timedelta(minutes=15)
+    assert jobs.validate_schedule("0 9 * * *", "cron", "America/New_York") == "0 9 * * *"
+    assert jobs.next_run("0 9 * * *", now, "cron", "America/New_York") == datetime.datetime(
+        2026, 9, 4, 13, 0, tzinfo=datetime.UTC
+    )
+    with pytest.raises(ValueError):
+        jobs.validate_schedule("30s", "every")
+    with pytest.raises(ValueError):
+        jobs.validate_schedule("1h", "every", "UTC")
 
 
 async def test_claim_due_coalesces_and_is_idempotent(monkeypatch):
     job = await jobs.create(
-        "spc_1",
+        "agt_1",
         "user_1",
         "* * * * *",
         "Run maintenance",
@@ -84,11 +73,11 @@ async def test_claim_due_coalesces_and_is_idempotent(monkeypatch):
     assert len(first) == 1
     assert duplicate == []
     chat = await chats.get(first[0].chat_id)
-    assert chat == models.Chat(
+    assert chat == models.Thread(
         id=chat.id,
         user_id="user_1",
         author_display_name="Ada Lovelace",
-        space_id="spc_1",
+        agent_id="agt_1",
         title="scheduled run · 2026-09-04 09:00 UTC",
         trigger=f"cron:{job.id}",
         created_at=chat.created_at,
@@ -115,11 +104,34 @@ async def test_claim_due_coalesces_and_is_idempotent(monkeypatch):
 
     assert await jobs.mark_started(leased[0], "run_1") is True
     assert await jobs.started_run(first[0].turn_id) == "run_1"
+    assert await jobs.mark_finished(first[0].turn_id, "completed") is True
+    assert await jobs.mark_finished(first[0].turn_id, "completed") is False
+
+
+async def test_due_schedule_skips_overlap_until_previous_turn_finishes():
+    now = datetime.datetime(2026, 9, 4, 12, 0, tzinfo=datetime.UTC)
+    job = await jobs.create("agt_1", "user_1", "1m", "Repeat", schedule_kind="every")
+    job.next_run_at = (now - datetime.timedelta(minutes=1)).isoformat()
+    jobs._write_job(job)
+    first = (await jobs.claim_due(now))[0]
+    leased = (await jobs.lease_pending(now))[0]
+    assert await jobs.mark_started(leased, "run_1")
+
+    job = await jobs.get(job.id)
+    job.next_run_at = now.isoformat()
+    jobs._write_job(job)
+    assert await jobs.claim_due(now) == []
+
+    assert await jobs.mark_finished(first.turn_id, "completed")
+    job = await jobs.get(job.id)
+    job.next_run_at = now.isoformat()
+    jobs._write_job(job)
+    assert len(await jobs.claim_due(now)) == 1
 
 
 async def test_pause_and_delete_cancel_pending_executions():
     now = datetime.datetime(2026, 9, 4, 12, 0, tzinfo=datetime.UTC)
-    paused = await jobs.create("spc_1", "user_1", "* * * * *", "Pause me")
+    paused = await jobs.create("agt_1", "user_1", "* * * * *", "Pause me")
     paused.next_run_at = (now - datetime.timedelta(minutes=1)).isoformat()
     jobs._write_job(paused)
     paused_execution = (await jobs.claim_due(now))[0]
@@ -132,7 +144,7 @@ async def test_pause_and_delete_cancel_pending_executions():
 
     assert await events.read(paused_execution.chat_id, "messages") == []
 
-    deleted = await jobs.create("spc_1", "user_1", "* * * * *", "Delete me")
+    deleted = await jobs.create("agt_1", "user_1", "* * * * *", "Delete me")
     deleted.next_run_at = (now - datetime.timedelta(minutes=1)).isoformat()
     jobs._write_job(deleted)
     deleted_execution = (await jobs.claim_due(now))[0]
@@ -146,7 +158,7 @@ async def test_pause_and_delete_cancel_pending_executions():
 
 async def test_pause_keeps_chat_after_turn_started():
     now = datetime.datetime(2026, 9, 4, 12, 0, tzinfo=datetime.UTC)
-    job = await jobs.create("spc_1", "user_1", "* * * * *", "Already started")
+    job = await jobs.create("agt_1", "user_1", "* * * * *", "Already started")
     job.next_run_at = (now - datetime.timedelta(minutes=1)).isoformat()
     jobs._write_job(job)
     execution = (await jobs.claim_due(now))[0]
@@ -160,7 +172,7 @@ async def test_pause_keeps_chat_after_turn_started():
 
 async def test_stable_turn_has_one_run_owner_and_cleanup_is_bounded():
     now = datetime.datetime(2026, 9, 4, 12, 0, tzinfo=datetime.UTC)
-    job = await jobs.create("spc_1", "user_1", "* * * * *", "Run once")
+    job = await jobs.create("agt_1", "user_1", "* * * * *", "Run once")
     job.next_run_at = (now - datetime.timedelta(days=40)).isoformat()
     jobs._write_job(job)
     execution = (await jobs.claim_due(now))[0]

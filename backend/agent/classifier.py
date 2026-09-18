@@ -1,4 +1,4 @@
-"""Pick the space for a new chat before the dispatcher can run."""
+"""Pick the agent for a new chat before the dispatcher can run."""
 
 import json
 
@@ -9,8 +9,8 @@ import models
 
 
 SYSTEM = """\
-You assign a new conversation to exactly one hatchery space. Use the user's
-first prompt and its source metadata. Prefer a space whose description,
+You assign a new conversation to exactly one hatchery agent. Use the user's
+first prompt and its source metadata. Prefer an agent whose description,
 repositories, or resources match the work. Return only the requested structured
 output. Never answer the user or do the work."""
 
@@ -18,7 +18,7 @@ output. Never answer the user or do the work."""
 class Classification(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra="forbid")
 
-    space_id: str
+    agent_id: str
 
 
 def model() -> ai.Model:
@@ -26,22 +26,32 @@ def model() -> ai.Model:
 
 
 async def classify(
-    prompt: str, metadata: dict, available: list[models.Space]
-) -> models.Space:
+    prompt: str, metadata: dict, available: list[models.Agent]
+) -> models.Agent:
+    from store import agent_files
+
     if not available:
-        raise RuntimeError("cannot classify a chat without spaces")
-    choices = [
-        {
-            "id": space.id,
-            "name": space.name,
-            "about": space.about,
-            "repos": space.repos,
-            "resources": [resource.model_dump() for resource in space.resources],
-        }
-        for space in available
-    ]
+        raise RuntimeError("cannot classify a chat without agents")
+    choices = []
+    for available_agent in available:
+        description = available_agent.about
+        if await agent_files.configured():
+            instructions = await agent_files.read(available_agent.slug, "AGENTS.md")
+            if instructions is not None:
+                description = instructions.content
+        choices.append(
+            {
+                "id": available_agent.id,
+                "name": available_agent.name,
+                "about": description,
+                "repos": available_agent.repos,
+                "resources": [
+                    resource.model_dump() for resource in available_agent.resources
+                ],
+            }
+        )
     request = json.dumps(
-        {"first_prompt": prompt, "metadata": metadata, "spaces": choices},
+        {"first_prompt": prompt, "metadata": metadata, "agents": choices},
         ensure_ascii=False,
     )
     agent = ai.Agent()
@@ -59,8 +69,8 @@ async def classify(
         async for _ in result:
             pass
         selected = next(
-            (space for space in available if space.id == result.output.space_id), None
+            (agent for agent in available if agent.id == result.output.agent_id), None
         )
     if selected is None:
-        raise RuntimeError("classifier returned an unknown space")
+        raise RuntimeError("classifier returned an unknown agent")
     return selected

@@ -99,6 +99,76 @@ async def test_github_token_uses_saved_installation(monkeypatch):
     assert seen["installation_id"] == "inst_1"
 
 
+async def test_github_repositories_lists_current_connector_installation(monkeypatch):
+    seen = {}
+
+    async def identity(_user_id):
+        return {"installation_id": "inst_personal"}
+
+    async def token(connector, **kwargs):
+        seen.update(connector=connector, **kwargs)
+        return "app-token"
+
+    def responder(request):
+        assert request.headers["authorization"] == "Bearer app-token"
+        assert request.url.path == "/installation/repositories"
+        return httpx.Response(
+            200,
+            json={
+                "repositories": [
+                    {"full_name": "acme/memory", "private": True},
+                    {"full_name": "acme/public", "private": False},
+                ]
+            },
+        )
+
+    class Client(httpx.AsyncClient):
+        def __init__(self, **kwargs):
+            super().__init__(transport=httpx.MockTransport(responder), **kwargs)
+
+    monkeypatch.setenv("GITHUB_CONNECTOR", "github/hatchery")
+    monkeypatch.setattr(connections, "github_identity", identity)
+    monkeypatch.setattr(connections.connect, "get_token", token)
+    monkeypatch.setattr(connections.httpx, "AsyncClient", Client)
+
+    assert await connections.github_repositories("user_1") == [
+        {
+            "full_name": "acme/memory",
+            "installation_id": "inst_personal",
+            "private": True,
+        },
+        {
+            "full_name": "acme/public",
+            "installation_id": "inst_personal",
+            "private": False,
+        },
+    ]
+    assert seen["connector"] == "github/hatchery"
+    assert seen["subject"] == connections.connect.ConnectAppTokenSubject()
+    assert seen["installation_id"] == "inst_personal"
+
+
+async def test_github_app_token_is_scoped_to_agent_repository(monkeypatch):
+    seen = {}
+
+    async def token(connector, **kwargs):
+        seen.update(connector=connector, **kwargs)
+        return "app-token"
+
+    monkeypatch.setenv("GITHUB_CONNECTOR", "github/hatchery")
+    monkeypatch.setenv("HATCHERY_AGENTS_REPOSITORY_INSTALLATION_ID", "inst_agents")
+    monkeypatch.setattr(connections.connect, "get_token", token)
+
+    assert await connections.github_app_token("acme/hatchery-agents") == "app-token"
+    assert seen["connector"] == "github/hatchery"
+    assert seen["subject"] == connections.connect.ConnectAppTokenSubject()
+    assert seen["installation_id"] == "inst_agents"
+    detail = seen["authorization_details"][0]
+    assert detail.org == "acme"
+    assert detail.repositories == ("hatchery-agents",)
+    assert detail.permissions == ("contents:write",)
+
+
 async def test_github_repo_warning_reports_missing_organization_installation(monkeypatch):
     async def identity(_user_id):
         return {"installation_id": "inst_personal"}

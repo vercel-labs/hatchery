@@ -1,22 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { Chat } from "./api.ts";
+import type { Thread } from "./api.ts";
 import {
   chatAttentionFilterLabel,
   chatAttentionLabel,
   chatSidebarText,
   filterSidebarChats,
-  selectSidebarSpace,
+  selectSidebarAgent,
   type ChatSidebarFilters,
 } from "./chat-sidebar.ts";
 
-function chat(overrides: Partial<Chat> = {}): Chat {
+function chat(overrides: Partial<Thread> = {}): Thread {
   return {
     id: "chat_1",
     user_id: "user_1",
     author_display_name: "Ada",
-    space_id: null,
+    agent_id: null,
     title: "new chat",
     topic: null,
     trigger: "ui",
@@ -34,46 +34,46 @@ test("uses the Requires attention filter label", () => {
   assert.equal(chatAttentionFilterLabel, "Requires attention");
 });
 
-test("filters active chats by attention and one space", () => {
+test("filters active chats by attention and one agent", () => {
   const chats = [
-    chat({ id: "matching", space_id: "space_1", attention_reason: "blocked" }),
-    chat({ id: "other-space", space_id: "space_2", attention_reason: "blocked" }),
-    chat({ id: "no-attention", space_id: "space_1" }),
+    chat({ id: "matching", agent_id: "agent_1", attention_reason: "blocked" }),
+    chat({ id: "other-agent", agent_id: "agent_2", attention_reason: "blocked" }),
+    chat({ id: "no-attention", agent_id: "agent_1" }),
     chat({
       id: "archived",
-      space_id: "space_1",
+      agent_id: "agent_1",
       attention_reason: "result_available",
       archived_at: "2026-09-05T00:00:00Z",
     }),
   ];
 
   assert.deepEqual(
-    filterSidebarChats(chats, { requiresAttention: true, spaceId: "space_1" }).map(
+    filterSidebarChats(chats, { requiresAttention: true, agentId: "agent_1" }).map(
       ({ id }) => id,
     ),
     ["matching"],
   );
   assert.deepEqual(
-    filterSidebarChats(chats, { requiresAttention: false, spaceId: null }).map(
+    filterSidebarChats(chats, { requiresAttention: false, agentId: null }).map(
       ({ id }) => id,
     ),
-    ["matching", "other-space", "no-attention"],
+    ["matching", "other-agent", "no-attention"],
   );
 });
 
-test("selecting and removing a space filter keeps other filters active", () => {
+test("selecting and removing an agent filter keeps other filters active", () => {
   const filters: ChatSidebarFilters = {
     requiresAttention: true,
-    spaceId: "space_1",
+    agentId: "agent_1",
   };
 
-  assert.deepEqual(selectSidebarSpace(filters, "space_2"), {
+  assert.deepEqual(selectSidebarAgent(filters, "agent_2"), {
     requiresAttention: true,
-    spaceId: "space_2",
+    agentId: "agent_2",
   });
-  assert.deepEqual(selectSidebarSpace(filters, null), {
+  assert.deepEqual(selectSidebarAgent(filters, null), {
     requiresAttention: true,
-    spaceId: null,
+    agentId: null,
   });
 });
 
@@ -121,6 +121,6 @@ test("uses pending and legacy fallbacks", () => {
   );
   assert.equal(
     chatSidebarText(chat({ author_display_name: null })).label,
-    "New chat",
+    "New thread",
   );
 });

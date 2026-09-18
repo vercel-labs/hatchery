@@ -1,13 +1,13 @@
-"""Chats and the channel bindings that feed them.
+"""Threads and the channel bindings that feed them.
 
-A chat is one conversation in a space, visible in the UI. A binding maps a
+A thread is one conversation in an agent, visible in the UI. A binding maps a
 channel-scoped token ("slack:C1:1712.001", "github:owner/repo:issue:7") to
-its chat, so the same conversation is reachable from slack, github, and the
-UI at once. Single-owner: one chat per token, enforced by an atomic claim
+its thread, so the same conversation is reachable from Slack, GitHub, and the
+UI at once. Single-owner: one thread per token, enforced by an atomic claim
 (postgres: INSERT .. ON CONFLICT DO NOTHING; local: one lock). dedupe gives
 webhooks durable replay protection.
 
-Chat rows are the models.Chat json verbatim, plus a nullable space_id column
+Thread rows are the models.Thread json verbatim, plus a nullable agent_id column
 for filtering. Postgres when DATABASE_URL is set, otherwise json files under
 HATCHERY_DATA_DIR. Locking mirrors store.events.
 """
@@ -24,16 +24,16 @@ import models
 import store
 
 _SCHEMA = """\
-CREATE TABLE IF NOT EXISTS hatchery_chats (
+CREATE TABLE IF NOT EXISTS hatchery_threads (
     id         TEXT PRIMARY KEY,
-    space_id   TEXT,
+    agent_id   TEXT,
     data       JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-ALTER TABLE hatchery_chats ALTER COLUMN space_id DROP NOT NULL;
+ALTER TABLE hatchery_threads ALTER COLUMN agent_id DROP NOT NULL;
 
-CREATE TABLE IF NOT EXISTS hatchery_bindings (
+CREATE TABLE IF NOT EXISTS hatchery_thread_bindings (
     token      TEXT PRIMARY KEY,
     chat_id    TEXT NOT NULL,
     channel    TEXT NOT NULL,
@@ -41,9 +41,9 @@ CREATE TABLE IF NOT EXISTS hatchery_bindings (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS hatchery_bindings_chat ON hatchery_bindings (chat_id);
+CREATE INDEX IF NOT EXISTS hatchery_thread_bindings_chat ON hatchery_thread_bindings (chat_id);
 
-CREATE TABLE IF NOT EXISTS hatchery_dedupe (
+CREATE TABLE IF NOT EXISTS hatchery_thread_dedupe (
     key        TEXT PRIMARY KEY,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -69,21 +69,21 @@ async def ensure_ready() -> None:
             await (await db.pool()).execute(_SCHEMA)
             _schema_ready = True
     else:
-        (store.data_dir() / "chats").mkdir(parents=True, exist_ok=True)
+        (store.data_dir() / "threads").mkdir(parents=True, exist_ok=True)
 
 
 async def create(
-    space_id: str | None,
+    agent_id: str | None,
     title: str,
     trigger: str = "ui",
     user_id: str | None = None,
     author_display_name: str | None = None,
-) -> models.Chat:
-    chat = models.Chat(
-        id=f"chat_{uuid.uuid4().hex[:12]}",
+) -> models.Thread:
+    chat = models.Thread(
+        id=f"thread_{uuid.uuid4().hex[:12]}",
         user_id=user_id,
         author_display_name=author_display_name,
-        space_id=space_id,
+        agent_id=agent_id,
         title=title,
         trigger=trigger,
         created_at=_now(),
@@ -92,9 +92,9 @@ async def create(
         from store import db
 
         await (await db.pool()).execute(
-            "INSERT INTO hatchery_chats (id, space_id, data) VALUES ($1, $2, $3::jsonb)",
+            "INSERT INTO hatchery_threads (id, agent_id, data) VALUES ($1, $2, $3::jsonb)",
             chat.id,
-            chat.space_id,
+            chat.agent_id,
             chat.model_dump_json(),
         )
         return chat
@@ -105,17 +105,17 @@ async def create(
 
 async def create_once(
     chat_id: str,
-    space_id: str | None,
+    agent_id: str | None,
     title: str,
     user_id: str | None,
     author_display_name: str | None = None,
-) -> models.Chat:
+) -> models.Thread:
     """Create one UI chat for a caller-generated id, or return its safe retry."""
-    chat = models.Chat(
+    chat = models.Thread(
         id=chat_id,
         user_id=user_id,
         author_display_name=author_display_name,
-        space_id=space_id,
+        agent_id=agent_id,
         title=title,
         trigger="ui",
         created_at=_now(),
@@ -124,10 +124,10 @@ async def create_once(
         from store import db
 
         row = await (await db.pool()).fetchrow(
-            "INSERT INTO hatchery_chats (id, space_id, data) "
+            "INSERT INTO hatchery_threads (id, agent_id, data) "
             "VALUES ($1, $2, $3::jsonb) ON CONFLICT (id) DO NOTHING RETURNING data",
             chat.id,
-            chat.space_id,
+            chat.agent_id,
             chat.model_dump_json(),
         )
         existing = _chat(row["data"]) if row is not None else await get(chat_id)
@@ -142,19 +142,19 @@ async def create_once(
     if (
         existing.user_id != user_id
         or existing.trigger != "ui"
-        or existing.space_id != space_id
+        or existing.agent_id != agent_id
         or existing.title != title
     ):
         raise ValueError("chat id conflicts with an existing chat")
     return existing
 
 
-async def get(chat_id: str) -> models.Chat | None:
+async def get(chat_id: str) -> models.Thread | None:
     if store.use_postgres():
         from store import db
 
         row = await (await db.pool()).fetchrow(
-            "SELECT data FROM hatchery_chats WHERE id = $1", chat_id
+            "SELECT data FROM hatchery_threads WHERE id = $1", chat_id
         )
         return _chat(row["data"]) if row is not None else None
     with _lock:
@@ -163,13 +163,13 @@ async def get(chat_id: str) -> models.Chat | None:
 
 async def set_telemetry_span_if_absent(
     chat_id: str, telemetry_span: dict
-) -> models.Chat | None:
+) -> models.Thread | None:
     """Persist one immutable trace root, returning the winning chat state."""
     if store.use_postgres():
         from store import db
 
         row = await (await db.pool()).fetchrow(
-            "UPDATE hatchery_chats SET data = jsonb_set(data, '{telemetry_span}', $2::jsonb) "
+            "UPDATE hatchery_threads SET data = jsonb_set(data, '{telemetry_span}', $2::jsonb) "
             "WHERE id = $1 AND (data->'telemetry_span' IS NULL "
             "OR data->'telemetry_span' = 'null'::jsonb) "
             "RETURNING data",
@@ -189,19 +189,19 @@ async def set_telemetry_span_if_absent(
         return chat
 
 
-async def list_all() -> list[models.Chat]:
+async def list_all() -> list[models.Thread]:
     """Every chat, newest first (the sidebar list)."""
     if store.use_postgres():
         from store import db
 
         rows = await (await db.pool()).fetch(
-            "SELECT data FROM hatchery_chats ORDER BY created_at DESC"
+            "SELECT data FROM hatchery_threads ORDER BY created_at DESC"
         )
         return [_chat(row["data"]) for row in rows]
     with _lock:
         chats = [
             _read_chat(urllib.parse.unquote(p.stem))
-            for p in (store.data_dir() / "chats").glob("*.json")
+            for p in (store.data_dir() / "threads").glob("*.json")
         ]
         found = [c for c in chats if c is not None]
         found.sort(key=lambda c: c.created_at, reverse=True)
@@ -210,12 +210,12 @@ async def list_all() -> list[models.Chat]:
 
 async def claim_user(
     chat_id: str, user_id: str, author_display_name: str | None = None
-) -> models.Chat | None:
+) -> models.Thread | None:
     if store.use_postgres():
         from store import db
 
         row = await (await db.pool()).fetchrow(
-            "UPDATE hatchery_chats SET data = data || "
+            "UPDATE hatchery_threads SET data = data || "
             "jsonb_build_object('user_id', $2::text, 'author_display_name', $3::text) "
             "WHERE id = $1 AND (data->>'user_id' IS NULL) RETURNING data",
             chat_id,
@@ -238,12 +238,12 @@ async def claim_user(
 
 async def set_attention(
     chat_id: str, reason: models.AttentionReason | None
-) -> models.Chat | None:
+) -> models.Thread | None:
     if store.use_postgres():
         from store import db
 
         row = await (await db.pool()).fetchrow(
-            "UPDATE hatchery_chats SET data = data || "
+            "UPDATE hatchery_threads SET data = data || "
             "jsonb_build_object('attention_reason', $2::text) "
             "WHERE id = $1 RETURNING data",
             chat_id,
@@ -259,7 +259,7 @@ async def set_attention(
         return chat
 
 
-async def set_archived(chat_id: str, archived: bool) -> models.Chat | None:
+async def set_archived(chat_id: str, archived: bool) -> models.Thread | None:
     current = await get(chat_id)
     if current is None or (current.archived_at is not None) == archived:
         return current
@@ -268,7 +268,7 @@ async def set_archived(chat_id: str, archived: bool) -> models.Chat | None:
         from store import db
 
         row = await (await db.pool()).fetchrow(
-            "UPDATE hatchery_chats SET data = data || "
+            "UPDATE hatchery_threads SET data = data || "
             "jsonb_build_object('archived_at', $2::text) "
             "WHERE id = $1 RETURNING data",
             chat_id,
@@ -286,33 +286,33 @@ async def set_archived(chat_id: str, archived: bool) -> models.Chat | None:
         return chat
 
 
-async def assign_space(chat_id: str, space_id: str) -> models.Chat | None:
+async def assign_agent(chat_id: str, agent_id: str) -> models.Thread | None:
     if store.use_postgres():
         from store import db
 
         row = await (await db.pool()).fetchrow(
-            "UPDATE hatchery_chats SET space_id = $2, "
-            "data = jsonb_set(data, '{space_id}', to_jsonb($2::text)) "
+            "UPDATE hatchery_threads SET agent_id = $2, "
+            "data = jsonb_set(data, '{agent_id}', to_jsonb($2::text)) "
             "WHERE id = $1 RETURNING data",
             chat_id,
-            space_id,
+            agent_id,
         )
         return _chat(row["data"]) if row is not None else None
     with _lock:
         chat = _read_chat(chat_id)
         if chat is None:
             return None
-        chat.space_id = space_id
+        chat.agent_id = agent_id
         _write_chat(chat)
         return chat
 
 
-async def set_topic(chat_id: str, topic: str) -> models.Chat | None:
+async def set_topic(chat_id: str, topic: str) -> models.Thread | None:
     if store.use_postgres():
         from store import db
 
         row = await (await db.pool()).fetchrow(
-            "UPDATE hatchery_chats SET data = data || jsonb_build_object('topic', $2::text) "
+            "UPDATE hatchery_threads SET data = data || jsonb_build_object('topic', $2::text) "
             "WHERE id = $1 RETURNING data",
             chat_id,
             topic,
@@ -329,13 +329,13 @@ async def set_topic(chat_id: str, topic: str) -> models.Chat | None:
 
 async def finish(
     chat_id: str, status: str, artifact: str | None = None
-) -> models.Chat | None:
+) -> models.Thread | None:
     """Record a chat's worker status and optional terminal artifact."""
     if store.use_postgres():
         from store import db
 
         row = await (await db.pool()).fetchrow(
-            "UPDATE hatchery_chats SET data = data || "
+            "UPDATE hatchery_threads SET data = data || "
             "jsonb_build_object('status', $2::text, 'artifact', $3::text) "
             "WHERE id = $1 RETURNING data",
             chat_id,
@@ -359,7 +359,7 @@ async def binding(token: str) -> Binding | None:
         from store import db
 
         row = await (await db.pool()).fetchrow(
-            "SELECT * FROM hatchery_bindings WHERE token = $1", token
+            "SELECT * FROM hatchery_thread_bindings WHERE token = $1", token
         )
         if row is None:
             return None
@@ -383,15 +383,15 @@ async def bind(token: str, chat_id: str, channel: str, state: dict) -> Binding:
 
         async with (await db.pool()).acquire() as conn, conn.transaction():
             if not await conn.fetchval(
-                "SELECT id FROM hatchery_chats WHERE id = $1", chat_id
+                "SELECT id FROM hatchery_threads WHERE id = $1", chat_id
             ):
                 raise ValueError("chat does not exist")
             row = await conn.fetchrow(
-                "INSERT INTO hatchery_bindings (token, chat_id, channel, state) "
+                "INSERT INTO hatchery_thread_bindings (token, chat_id, channel, state) "
                 "VALUES ($1, $2, $3, $4::jsonb) ON CONFLICT (token) DO UPDATE "
-                "SET state = hatchery_bindings.state || EXCLUDED.state "
-                "WHERE hatchery_bindings.chat_id = EXCLUDED.chat_id "
-                "AND hatchery_bindings.channel = EXCLUDED.channel RETURNING *",
+                "SET state = hatchery_thread_bindings.state || EXCLUDED.state "
+                "WHERE hatchery_thread_bindings.chat_id = EXCLUDED.chat_id "
+                "AND hatchery_thread_bindings.channel = EXCLUDED.channel RETURNING *",
                 token,
                 chat_id,
                 channel,
@@ -423,13 +423,13 @@ async def bind(token: str, chat_id: str, channel: str, state: dict) -> Binding:
 async def claim(
     token: str,
     channel: str,
-    space_id: str | None,
+    agent_id: str | None,
     title: str,
     state: dict,
     user_id: str | None = None,
     author_display_name: str | None = None,
     legacy_token: str | None = None,
-) -> tuple[models.Chat, bool]:
+) -> tuple[models.Thread, bool]:
     """Atomically map a channel token to its owning chat.
 
     Creates the chat (and binding) if the token is unowned, otherwise returns
@@ -437,11 +437,11 @@ async def claim(
     two concurrent webhooks from both creating a chat for the same
     conversation. Returns (chat, created).
     """
-    candidate = models.Chat(
-        id=f"chat_{uuid.uuid4().hex[:12]}",
+    candidate = models.Thread(
+        id=f"thread_{uuid.uuid4().hex[:12]}",
         user_id=user_id,
         author_display_name=author_display_name,
-        space_id=space_id,
+        agent_id=agent_id,
         title=title,
         trigger=token,
         created_at=_now(),
@@ -452,15 +452,15 @@ async def claim(
         pool = await db.pool()
         async with pool.acquire() as conn, conn.transaction():
             owner = await conn.fetchrow(
-                "SELECT c.data, b.state FROM hatchery_chats c "
-                "JOIN hatchery_bindings b ON b.chat_id = c.id WHERE b.token = $1 FOR UPDATE",
+                "SELECT c.data, b.state FROM hatchery_threads c "
+                "JOIN hatchery_thread_bindings b ON b.chat_id = c.id WHERE b.token = $1 FOR UPDATE",
                 token,
             )
             binding_token = token
             if owner is None and legacy_token is not None:
                 owner = await conn.fetchrow(
-                    "SELECT c.data, b.state FROM hatchery_chats c "
-                    "JOIN hatchery_bindings b ON b.chat_id = c.id WHERE b.token = $1 FOR UPDATE",
+                    "SELECT c.data, b.state FROM hatchery_threads c "
+                    "JOIN hatchery_thread_bindings b ON b.chat_id = c.id WHERE b.token = $1 FOR UPDATE",
                     legacy_token,
                 )
                 binding_token = legacy_token
@@ -477,19 +477,19 @@ async def claim(
             if owner is not None:
                 chat = _chat(owner["data"])
                 await conn.execute(
-                    "UPDATE hatchery_bindings SET state = state || $2::jsonb WHERE token = $1",
+                    "UPDATE hatchery_thread_bindings SET state = state || $2::jsonb WHERE token = $1",
                     binding_token,
                     json.dumps(state),
                 )
                 if binding_token != token:
                     await conn.execute(
-                        "UPDATE hatchery_bindings SET token = $2 WHERE token = $1",
+                        "UPDATE hatchery_thread_bindings SET token = $2 WHERE token = $1",
                         binding_token,
                         token,
                     )
                 return chat, False
             inserted = await conn.fetchrow(
-                "INSERT INTO hatchery_bindings (token, chat_id, channel, state) "
+                "INSERT INTO hatchery_thread_bindings (token, chat_id, channel, state) "
                 "VALUES ($1, $2, $3, $4::jsonb) ON CONFLICT (token) DO NOTHING RETURNING chat_id",
                 token,
                 candidate.id,
@@ -498,20 +498,20 @@ async def claim(
             )
             if inserted is not None:
                 await conn.execute(
-                    "INSERT INTO hatchery_chats (id, space_id, data) VALUES ($1, $2, $3::jsonb)",
+                    "INSERT INTO hatchery_threads (id, agent_id, data) VALUES ($1, $2, $3::jsonb)",
                     candidate.id,
-                    candidate.space_id,
+                    candidate.agent_id,
                     candidate.model_dump_json(),
                 )
                 return candidate, True
             owner = await conn.fetchrow(
-                "SELECT c.data, b.state FROM hatchery_chats c "
-                "JOIN hatchery_bindings b ON b.chat_id = c.id WHERE b.token = $1 FOR UPDATE",
+                "SELECT c.data, b.state FROM hatchery_threads c "
+                "JOIN hatchery_thread_bindings b ON b.chat_id = c.id WHERE b.token = $1 FOR UPDATE",
                 token,
             )
             chat = _chat(owner["data"])
             await conn.execute(
-                "UPDATE hatchery_bindings SET state = state || $2::jsonb WHERE token = $1",
+                "UPDATE hatchery_thread_bindings SET state = state || $2::jsonb WHERE token = $1",
                 token,
                 json.dumps(state),
             )
@@ -554,7 +554,7 @@ async def bindings(chat_id: str) -> list[Binding]:
         from store import db
 
         rows = await (await db.pool()).fetch(
-            "SELECT * FROM hatchery_bindings WHERE chat_id = $1", chat_id
+            "SELECT * FROM hatchery_thread_bindings WHERE chat_id = $1", chat_id
         )
         return [
             Binding(
@@ -586,7 +586,7 @@ async def dedupe(key: str) -> bool:
         from store import db
 
         row = await (await db.pool()).fetchrow(
-            "INSERT INTO hatchery_dedupe (key) VALUES ($1) ON CONFLICT DO NOTHING RETURNING key",
+            "INSERT INTO hatchery_thread_dedupe (key) VALUES ($1) ON CONFLICT DO NOTHING RETURNING key",
             key,
         )
         return row is not None
@@ -605,25 +605,25 @@ def _now() -> str:
     return datetime.datetime.now(datetime.UTC).isoformat()
 
 
-def _chat(raw) -> models.Chat:
+def _chat(raw) -> models.Thread:
     # asyncpg returns jsonb as str unless a codec is installed
-    return models.Chat.model_validate_json(
+    return models.Thread.model_validate_json(
         raw if isinstance(raw, str) else json.dumps(raw)
     )
 
 
-def _read_chat(chat_id: str) -> models.Chat | None:
-    path = store.data_dir() / "chats" / f"{urllib.parse.quote(chat_id, safe='')}.json"
+def _read_chat(chat_id: str) -> models.Thread | None:
+    path = store.data_dir() / "threads" / f"{urllib.parse.quote(chat_id, safe='')}.json"
     if not path.exists():
         return None
     try:
-        return models.Chat.model_validate_json(path.read_text(encoding="utf-8"))
+        return models.Thread.model_validate_json(path.read_text(encoding="utf-8"))
     except pydantic.ValidationError:
         return None
 
 
-def _write_chat(chat: models.Chat) -> None:
-    path = store.data_dir() / "chats" / f"{urllib.parse.quote(chat.id, safe='')}.json"
+def _write_chat(chat: models.Thread) -> None:
+    path = store.data_dir() / "threads" / f"{urllib.parse.quote(chat.id, safe='')}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(chat.model_dump_json(), encoding="utf-8")
 

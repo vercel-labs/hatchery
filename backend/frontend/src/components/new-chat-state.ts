@@ -1,10 +1,10 @@
-import type { Chat } from "@/lib/api";
+import type { Thread } from "@/lib/api";
 
-export const AUTO_SPACE_VALUE = "__auto__";
+export const AUTO_AGENT_VALUE = "__auto__";
 
 export type NewChatRequest = {
   id: string;
-  space_id?: string;
+  agent_id?: string;
 };
 
 export type NewChatHandoff = {
@@ -19,7 +19,7 @@ export type NewChatHandoff = {
 };
 
 export function newChatId(): string {
-  return `chat_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
+  return `thread_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
 }
 
 export function newChatHandoff(
@@ -56,21 +56,21 @@ export function streamAttachmentAction(
 
 export function newChatRequest(
   id: string,
-  spaceId: string | null,
+  agentId: string | null,
 ): NewChatRequest {
-  return { id, ...(spaceId ? { space_id: spaceId } : {}) };
+  return { id, ...(agentId ? { agent_id: agentId } : {}) };
 }
 
 export function createChatPersister(
-  create: (request: NewChatRequest) => Promise<Chat>,
+  create: (request: NewChatRequest) => Promise<Thread>,
   id = newChatId(),
-): (spaceId: string | null) => Promise<Chat> {
-  let pending: Promise<Chat> | null = null;
+): (agentId: string | null) => Promise<Thread> {
+  let pending: Promise<Thread> | null = null;
   let request: NewChatRequest | null = null;
 
-  return (spaceId) => {
+  return (agentId) => {
     if (pending) return pending;
-    request ??= newChatRequest(id, spaceId);
+    request ??= newChatRequest(id, agentId);
     const attempt = create(request);
     pending = attempt;
     attempt.catch(() => {

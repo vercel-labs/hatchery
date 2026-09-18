@@ -25,7 +25,7 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
-import { apiBase, apiFetch, type Chat } from "@/lib/api";
+import { apiBase, apiFetch, type Thread } from "@/lib/api";
 
 type Launch = {
   title: string;
@@ -49,7 +49,7 @@ const emptyLaunch: Launch = {
 
 export function SandboxForm({
   chatId,
-  spaceId = null,
+  agentId = null,
   open,
   onOpenChange,
   onPersist,
@@ -57,10 +57,10 @@ export function SandboxForm({
   isCurrent = () => true,
 }: {
   chatId?: string;
-  spaceId?: string | null;
+  agentId?: string | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onPersist?: () => Promise<Chat>;
+  onPersist?: () => Promise<Thread>;
   onCreated: (sandboxId: string, chatId: string) => void;
   isCurrent?: () => boolean;
 }) {
@@ -74,8 +74,8 @@ export function SandboxForm({
     if (!open) return;
     let current = true;
     const suggestionPath = chatId
-      ? `/api/chats/${chatId}/sandboxes/suggestion`
-      : `/api/sandboxes/suggestion${spaceId ? `?space_id=${encodeURIComponent(spaceId)}` : ""}`;
+      ? `/api/threads/${chatId}/sandboxes/suggestion`
+      : `/api/sandboxes/suggestion${agentId ? `?agent_id=${encodeURIComponent(agentId)}` : ""}`;
     apiFetch(suggestionPath)
       .then(async (response) => {
         if (!response.ok) throw new Error("Could not suggest sandbox settings");
@@ -93,7 +93,7 @@ export function SandboxForm({
     return () => {
       current = false;
     };
-  }, [chatId, open, spaceId]);
+  }, [chatId, open, agentId]);
 
   const create = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -103,9 +103,9 @@ export function SandboxForm({
     setError("");
     try {
       const persistedChatId = chatId ?? (await onPersist?.())?.id;
-      if (!persistedChatId) throw new Error("Could not create chat");
+      if (!persistedChatId) throw new Error("Could not create thread");
       if (!isCurrent()) return;
-      const response = await apiFetch(`/api/chats/${persistedChatId}/sandboxes`, {
+      const response = await apiFetch(`/api/threads/${persistedChatId}/sandboxes`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(launch),
@@ -140,7 +140,7 @@ export function SandboxForm({
         <SheetHeader>
           <SheetTitle>New sandbox</SheetTitle>
           <SheetDescription>
-            GPT-5.6 Luna suggested these settings from the space description.
+            GPT-5.6 Luna suggested these settings from the agent description.
           </SheetDescription>
         </SheetHeader>
         <form className="flex min-h-0 flex-1 flex-col" onSubmit={create}>

@@ -68,6 +68,36 @@ def test_discovery_excludes_children_even_with_newer_activity(fx_session, marker
     assert runtime.discover_fx_session(runtime.workspace) == "parent"
 
 
+def test_inventory_includes_root_and_child_sessions_with_parent(fx_session):
+    runtime, directory = fx_session
+    child = directory.parent / "child"
+    child.mkdir()
+    metadata = json.loads((directory / "session.json").read_text())
+    metadata.update(id="child", updated_at_ms=200, subagent_child=True)
+    (child / "session.json").write_text(json.dumps(metadata))
+    (child / "events.jsonl").write_bytes(b"")
+    (child / "subagent").mkdir()
+    (child / "subagent" / "owner.json").write_text(json.dumps({"parent_id": "parent"}))
+
+    assert runtime.inventory_fx_sessions(runtime.workspace) == [
+        {
+            "id": "parent",
+            "parent_id": None,
+            "workspace_root": runtime.workspace,
+            "updated_at_ms": 100,
+            "subagent_child": False,
+        },
+        {
+            "id": "child",
+            "parent_id": "parent",
+            "workspace_root": runtime.workspace,
+            "updated_at_ms": 200,
+            "subagent_child": True,
+        },
+    ]
+    assert runtime.discover_fx_session(runtime.workspace) == "parent"
+
+
 def test_discovery_uses_activity_and_ignores_migrated_pointer(fx_session):
     runtime, directory = fx_session
     old = directory.parent / "old"

@@ -21,10 +21,10 @@ export type ChatUIMessage = UIMessage<
   { origin?: "slack" | "github" | "ui" | "cron"; author?: string },
   {
     reload: unknown;
-    "space-assignment": {
+    "agent-assignment": {
       state: "assigning" | "assigned";
-      space_id?: string;
-      space_name?: string;
+      agent_id?: string;
+      agent_name?: string;
     };
   },
   HatcheryTools

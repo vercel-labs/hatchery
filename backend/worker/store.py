@@ -8,7 +8,7 @@ import urllib.parse
 import pydantic
 
 import store
-from worker import models
+from worker import hierarchy, models
 
 _SCHEMA = """\
 CREATE TABLE IF NOT EXISTS hatchery_workers (
@@ -172,6 +172,28 @@ async def list_tasks(chat_id: str | None = None) -> list[models.Task]:
     return [models.Task.model_validate_json(raw) for raw in await _list("worker_tasks", chat_id)]
 
 
+async def list_task_subtree(task_id: str) -> list[models.Task]:
+    """Return one task and its projected descendants in hierarchy order."""
+    task = await get_task(task_id)
+    if task is None:
+        return []
+    projected = hierarchy.project(
+        hierarchy.ThreadSummary(id=task.chat_id, title=task.chat_id),
+        await list_tasks(task.chat_id),
+    )
+    root = hierarchy.subtree(projected, task_id)
+    if root is None:
+        return []
+    result: list[models.Task] = []
+    pending = [root]
+    while pending:
+        node = pending.pop()
+        if node.task is not None:
+            result.append(node.task)
+        pending.extend(reversed(node.children))
+    return result
+
+
 async def delete_task(task_id: str) -> bool:
     return await _delete("worker_tasks", task_id)
 
@@ -217,7 +239,7 @@ async def apply_event(event) -> tuple[models.Task | None, bool]:
             return None
         stale = event.sequence <= task.event_sequence
         task.event_ids.append(event.id)
-        if stale and event.type not in ("task.output", "task.transcript"):
+        if stale and event.type not in ("task.output", "task.transcript", "task.hierarchy"):
             return task
         changed = True
         task.event_sequence = max(task.event_sequence, event.sequence)
@@ -250,6 +272,15 @@ async def apply_event(event) -> tuple[models.Task | None, bool]:
                 task.transcript_tool_call_count += 1
             if event.payload.get("truncated"):
                 task.transcript_truncated_count += 1
+            session_id = event.payload.get("session_id")
+            if session_id:
+                task.fx_session_id = str(session_id)
+        elif event.type == "task.hierarchy":
+            sessions = event.payload.get("sessions")
+            if isinstance(sessions, list):
+                task.fx_sessions = [
+                    item for item in sessions if isinstance(item, dict)
+                ][:100]
             session_id = event.payload.get("session_id")
             if session_id:
                 task.fx_session_id = str(session_id)

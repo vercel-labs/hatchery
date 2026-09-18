@@ -1,19 +1,17 @@
 import asyncio
-import json
 
 import pytest
 
-import store
-from store import chats, spaces
+from store import agents, chats
 
 
 async def test_claim_creates_then_reuses():
-    space = await spaces.default()
+    agent = await agents.default()
     first, created_first = await chats.claim(
-        "slack:C1:100.1", "slack", space.id, "hello", {"channel_id": "C1"}
+        "slack:C1:100.1", "slack", agent.id, "hello", {"channel_id": "C1"}
     )
     second, created_second = await chats.claim(
-        "slack:C1:100.1", "slack", space.id, "other", {"user_id": "U2"}
+        "slack:C1:100.1", "slack", agent.id, "other", {"user_id": "U2"}
     )
     assert (created_first, created_second) == (True, False)
     assert first.id == second.id
@@ -183,17 +181,17 @@ async def test_other_workspace_ignores_legacy_collision_and_creates_scoped_bindi
 
 
 async def test_claim_separates_tokens():
-    space = await spaces.default()
-    a, _ = await chats.claim("slack:C1:100.1", "slack", space.id, "t", {})
-    b, _ = await chats.claim("slack:C1:200.2", "slack", space.id, "t", {})
-    c, _ = await chats.claim("github:repo:1:issue:1", "github", space.id, "t", {})
+    agent = await agents.default()
+    a, _ = await chats.claim("slack:C1:100.1", "slack", agent.id, "t", {})
+    b, _ = await chats.claim("slack:C1:200.2", "slack", agent.id, "t", {})
+    c, _ = await chats.claim("github:repo:1:issue:1", "github", agent.id, "t", {})
     assert len({a.id, b.id, c.id}) == 3
 
 
 async def test_claim_is_single_owner_under_concurrency():
-    space = await spaces.default()
+    agent = await agents.default()
     results = await asyncio.gather(
-        *(chats.claim("slack:C1:1.0", "slack", space.id, "t", {}) for _ in range(20))
+        *(chats.claim("slack:C1:1.0", "slack", agent.id, "t", {}) for _ in range(20))
     )
     assert len({chat.id for chat, _ in results}) == 1
     assert sum(1 for _, created in results if created) == 1
@@ -227,25 +225,11 @@ async def test_create_get_list():
     assert chat.trigger == "ui"
     assert chat.user_id == "user_1"
     assert chat.author_display_name == "Ada"
-    assert chat.space_id is None
+    assert chat.agent_id is None
     assert [c.id for c in await chats.list_all()] == [chat.id]
     loaded = await chats.get(chat.id)
     assert loaded is not None and loaded.title == "manual chat"
     assert await chats.get("chat_missing") is None
-
-
-async def test_legacy_chat_without_archive_field_loads_as_active():
-    chat = await chats.create(None, "legacy")
-    path = store.data_dir() / "chats" / f"{chat.id}.json"
-    data = json.loads(path.read_text())
-    data.pop("archived_at")
-    data.pop("author_display_name")
-    path.write_text(json.dumps(data))
-
-    loaded = await chats.get(chat.id)
-
-    assert loaded is not None and loaded.archived_at is None
-    assert loaded.author_display_name is None
 
 
 async def test_attention_reason_is_persisted_and_cleared():
@@ -289,16 +273,16 @@ async def test_claim_user_sets_legacy_owner_once():
     assert unchanged.author_display_name == "Ada"
 
 
-async def test_assign_space_updates_chat():
-    destination = await spaces.create("docs")
+async def test_assign_agent_updates_chat():
+    destination = await agents.create("docs")
     chat = await chats.create(None, "work")
 
-    assigned = await chats.assign_space(chat.id, destination.id)
+    assigned = await chats.assign_agent(chat.id, destination.id)
 
-    assert assigned is not None and assigned.space_id == destination.id
+    assert assigned is not None and assigned.agent_id == destination.id
     loaded = await chats.get(chat.id)
-    assert loaded is not None and loaded.space_id == destination.id
-    assert await chats.assign_space("chat_missing", destination.id) is None
+    assert loaded is not None and loaded.agent_id == destination.id
+    assert await chats.assign_agent("chat_missing", destination.id) is None
 
 
 async def test_set_topic_updates_chat():
@@ -313,8 +297,8 @@ async def test_set_topic_updates_chat():
 
 
 async def test_finish_updates_status_and_artifact():
-    space = await spaces.default()
-    chat = await chats.create(space.id, "work")
+    agent = await agents.default()
+    chat = await chats.create(agent.id, "work")
     finished = await chats.finish(chat.id, "done", "https://example.com/pr/1")
     assert finished is not None
     assert finished.status == "done"

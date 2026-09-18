@@ -204,6 +204,81 @@ async def github_token(user_id: str, installation_id: str | None = None) -> str:
         raise ConnectionRequired("connect GitHub before accessing repositories") from error
 
 
+async def github_repositories(user_id: str) -> list[dict]:
+    """List repositories available to the user's current connector installation."""
+    connection = await github_identity(user_id)
+    if connection is None:
+        raise ConnectionRequired("connect GitHub before choosing a memory repository")
+    installation_id = connection.get("installation_id")
+    if not installation_id:
+        raise ConnectionRequired("install the Hatchery connector before choosing a repository")
+    try:
+        token = await connect.get_token(
+            _github_connector(),
+            subject=connect.ConnectAppTokenSubject(),
+            installation_id=installation_id,
+        )
+    except _CONNECT_ERRORS as error:
+        raise ConnectionRequired("install the Hatchery connector before choosing a repository") from error
+    headers = {
+        "accept": "application/vnd.github+json",
+        "authorization": f"Bearer {token}",
+        "x-github-api-version": "2022-11-28",
+    }
+    found: list[dict] = []
+    page = 1
+    async with httpx.AsyncClient(
+        base_url=GITHUB_API, timeout=30, headers=headers, follow_redirects=True
+    ) as http:
+        while True:
+            response = await http.get(
+                "/installation/repositories", params={"per_page": 100, "page": page}
+            )
+            if response.status_code in {401, 403}:
+                raise ConnectionRequired("GitHub connector installation is required")
+            if response.status_code >= 300:
+                raise RuntimeError("GitHub repository lookup failed")
+            batch = response.json().get("repositories", [])
+            for repository in batch:
+                full_name = repository.get("full_name")
+                if not isinstance(full_name, str) or "/" not in full_name:
+                    continue
+                found.append(
+                    {
+                        "full_name": full_name,
+                        "installation_id": installation_id,
+                        "private": repository.get("private") is True,
+                    }
+                )
+            if len(batch) < 100:
+                break
+            page += 1
+    return sorted(found, key=lambda repository: repository["full_name"].lower())
+
+
+async def github_app_token(repo: str, installation_id: str | None = None) -> str:
+    """Mint an app token scoped only to Hatchery's private agent repository."""
+    owner, separator, name = repo.removesuffix(".git").partition("/")
+    if not separator or not owner or not name or "/" in name:
+        raise ValueError("agent repository must use owner/repo form")
+    try:
+        return await connect.get_token(
+            _github_connector(),
+            subject=connect.ConnectAppTokenSubject(),
+            installation_id=installation_id
+            or os.environ.get("HATCHERY_AGENTS_REPOSITORY_INSTALLATION_ID"),
+            authorization_details=[
+                connect.ConnectGitHubAppInstallationAuthorizationDetail(
+                    org=owner,
+                    permissions=("contents:write",),
+                    repositories=(name,),
+                )
+            ],
+        )
+    except _CONNECT_ERRORS as error:
+        raise ConnectionRequired("Hatchery cannot access the agent repository") from error
+
+
 async def github_repo_warning(user_id: str, repo: str) -> str | None:
     """Return why the connected GitHub app cannot make a PR to one repository."""
     connection = await github_identity(user_id)

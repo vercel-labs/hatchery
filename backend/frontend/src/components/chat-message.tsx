@@ -16,12 +16,12 @@ function renderParts(
   role: ChatUIMessage["role"],
 ): ReactNode {
   return parts.map((part, index) => {
-    if (part.type === "data-space-assignment") {
+    if (part.type === "data-agent-assignment") {
       return (
         <div key={index} className="px-1.5 text-sm text-muted-foreground">
           {part.data.state === "assigning"
-            ? "Assigning a space…"
-            : `Assigned ${part.data.space_name ?? "space"}`}
+            ? "Assigning an agent…"
+            : `Assigned ${part.data.agent_name ?? "agent"}`}
         </div>
       );
     }

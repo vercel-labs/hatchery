@@ -195,6 +195,8 @@ class Runtime:
     async def _stream_task(self, task_id: str, session: "TTYSession") -> None:
         seen: set[str] = set()
         last_summary = ""
+        hierarchy: list[dict] = []
+        previous_sessions = getattr(session, "fx_previous_sessions", set())
         stream = iter(
             self.stream_fx_events(
                 self.workspace,
@@ -208,6 +210,18 @@ class Runtime:
                 event = await asyncio.to_thread(next, stream, None)
                 if event is None:
                     break
+                discovered = [
+                    item
+                    for item in self.inventory_fx_sessions(self.workspace)
+                    if item["id"] not in previous_sessions and item["subagent_child"]
+                ]
+                if discovered != hierarchy:
+                    hierarchy = discovered
+                    await self._emit(
+                        task_id,
+                        "task.hierarchy",
+                        {"sessions": hierarchy, "session_id": event.get("session_id")},
+                    )
                 if event["type"] == "assistant":
                     last_summary = event["text"]
                     await self._emit(task_id, "task.output", {
@@ -392,6 +406,56 @@ class Runtime:
             except (OSError, ValueError, TypeError, AttributeError):
                 continue
         return best[1] if best else None
+
+    def inventory_fx_sessions(self, workspace: str | None = None) -> list[dict]:
+        """Read valid fx session metadata, including subagent ownership."""
+        canonical = str(pathlib.Path(workspace).resolve()) if workspace is not None else None
+        sessions = self.fx_home / "sessions"
+        found = []
+        for path in sessions.glob("*/session.json"):
+            try:
+                metadata = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(metadata, dict) or metadata.get("schema_version") != 4:
+                    continue
+                session_id = metadata.get("id")
+                workspace_root = metadata.get("workspace_root")
+                updated_at_ms = metadata.get("updated_at_ms")
+                if (
+                    not isinstance(session_id, str)
+                    or not re.fullmatch(r"[A-Za-z0-9_.-]{1,255}", session_id)
+                    or session_id in (".", "..")
+                    or path.parent != sessions / session_id
+                    or not isinstance(workspace_root, str)
+                    or not isinstance(updated_at_ms, int)
+                ):
+                    continue
+                resolved_workspace = str(pathlib.Path(workspace_root).resolve())
+                if canonical is not None and resolved_workspace != canonical:
+                    continue
+                parent_id = None
+                owner_path = path.parent / "subagent" / "owner.json"
+                if owner_path.exists():
+                    try:
+                        owner = json.loads(owner_path.read_text(encoding="utf-8"))
+                    except (OSError, ValueError, TypeError):
+                        owner = None
+                    candidate = owner.get("parent_id") if isinstance(owner, dict) else None
+                    if (
+                        isinstance(candidate, str)
+                        and re.fullmatch(r"[A-Za-z0-9_.-]{1,255}", candidate)
+                        and candidate not in (".", "..", session_id)
+                    ):
+                        parent_id = candidate
+                found.append({
+                    "id": session_id,
+                    "parent_id": parent_id,
+                    "workspace_root": resolved_workspace,
+                    "updated_at_ms": updated_at_ms,
+                    "subagent_child": bool(metadata.get("subagent_child") or parent_id),
+                })
+            except (OSError, ValueError, TypeError, AttributeError):
+                continue
+        return sorted(found, key=lambda item: (item["updated_at_ms"], item["id"]))
 
     @staticmethod
     def decode_fx_event(record: dict, state: dict | None = None) -> list[dict]:

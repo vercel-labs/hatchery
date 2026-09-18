@@ -1,8 +1,7 @@
-"""store: everything durable — spaces, chats, and their event streams.
+"""store: everything durable — agents, threads, and their event streams.
 
-Each module is one entity with one postgres and one local-files backend,
-selected by DATABASE_URL (seal's pattern). Local files live under
-HATCHERY_DATA_DIR (default backend/.data) so tests and dev need no database.
+Each entity store selects postgres or local files with DATABASE_URL. Local files
+live under HATCHERY_DATA_DIR (default backend/.data).
 """
 
 import os
@@ -21,13 +20,13 @@ def use_postgres() -> bool:
 
 
 async def ensure_ready() -> None:
-    """Prepare all stores (idempotent DDL / local dirs). Call once at startup."""
-    from store import auth, chats, events, jobs, notes, spaces
+    """Prepare all stores. Call once at startup."""
+    from store import agents, auth, chats, events, jobs, settings
     from worker import store as workers
 
     await auth.ensure_ready()
-    await spaces.ensure_ready()
-    await notes.ensure_ready()
+    await settings.ensure_ready()
+    await agents.ensure_ready()
     await chats.ensure_ready()
     await events.ensure_ready()
     await jobs.ensure_ready()

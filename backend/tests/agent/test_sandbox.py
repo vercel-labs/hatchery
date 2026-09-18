@@ -13,7 +13,7 @@ def test_launch_has_strict_gateway_schema():
     assert set(schema["required"]) == set(schema["properties"])
 
 
-async def test_suggest_uses_luna_and_space_description(monkeypatch):
+async def test_suggest_uses_luna_and_agent_description(monkeypatch):
     seen = {}
 
     class Run:
@@ -40,8 +40,9 @@ async def test_suggest_uses_luna_and_space_description(monkeypatch):
 
     monkeypatch.setattr(sandbox.ai, "Agent", Agent)
     monkeypatch.setattr(sandbox.ai, "get_model", lambda name: name)
-    space = models.Space(
-        id="spc_docs",
+    agent = models.Agent(
+        id="agt_docs",
+        slug="docs",
         name="docs",
         about="Run the docs site on port 3000.",
         repos=["acme/docs"],
@@ -50,7 +51,7 @@ async def test_suggest_uses_luna_and_space_description(monkeypatch):
         created_at="2026-08-27T00:00:00+00:00",
     )
 
-    launch = await sandbox.suggest(space)
+    launch = await sandbox.suggest(agent)
 
     assert launch == sandbox.Launch(
         title="docs", repos=["acme/docs"], ports=[3000], size="small"
@@ -79,7 +80,7 @@ async def test_sandbox_operations_delegate_with_chat_scope(monkeypatch):
     seen = {}
 
     async def get(_chat_id):
-        return type("Chat", (), {"user_id": "user_1"})()
+        return type("Thread", (), {"user_id": "user_1"})()
 
     async def create(chat_id, spec, *, user_id=None, request_id=None):
         seen.update(

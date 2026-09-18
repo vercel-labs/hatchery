@@ -44,12 +44,12 @@ export function accentColor(
   return `${family}-${shade}`;
 }
 
-export function resolveSpaceColor(color: string | undefined): string {
+export function resolveAgentColor(color: string | undefined): string {
   if (!color) return "var(--muted-foreground)";
   const normalized = normalizeAccentColor(color);
   return normalized ? `var(--geist-${normalized})` : color;
 }
 
-export function resolveSpaceForeground(family: AccentFamily): string {
+export function resolveAgentForeground(family: AccentFamily): string {
   return `var(--geist-${family}-1000)`;
 }

@@ -10,7 +10,7 @@ const terminal = readFileSync(
   "utf8",
 );
 const picker = readFileSync(
-  new URL("../components/space-color-picker.tsx", import.meta.url),
+  new URL("../components/agent-color-picker.tsx", import.meta.url),
   "utf8",
 );
 

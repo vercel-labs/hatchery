@@ -125,6 +125,11 @@ class Task(pydantic.BaseModel):
     chat_id: str
     worker_id: str
     user_id: str | None = None
+    parent_task_id: str | None = None
+    root_task_id: str | None = None
+    depth: int = 0
+    objective: str | None = None
+    delegation_order: int = 0
     title: str
     prompt: str
     model: str
@@ -146,6 +151,7 @@ class Task(pydantic.BaseModel):
     transcript_tool_call_count: int = 0
     transcript_truncated_count: int = 0
     fx_session_id: str | None = None
+    fx_sessions: list[dict[str, typing.Any]] = []
     launch_attempts: int = 0
     result: dict[str, typing.Any] | None = None
     telemetry_span: dict[str, typing.Any] | None = None

@@ -1,4 +1,4 @@
-"""Core entities: spaces and chats. (Named models.py: types.py would shadow stdlib types.)"""
+"""Core entities: agents and threads. (models.py avoids shadowing stdlib types.)"""
 
 import typing
 
@@ -41,17 +41,34 @@ AccentColor = typing.Literal[
 class Resource(pydantic.BaseModel):
     title: str
     url: str
-    kind: str = "link"  # link | reference | ...
+    kind: str = "link"
 
 
-class Space(pydantic.BaseModel):
-    id: str  # "spc_<hex>"
+class Agent(pydantic.BaseModel):
+    id: str  # "agt_<hex>"
+    slug: str
     name: str
-    about: str = ""  # markdown, the space's canvas
-    repos: list[str] = []  # "owner/repo", autocloned into the sandbox
-    resources: list[Resource] = []  # extra links; repos show up alongside these
-    color: str  # semantic accent ID; legacy aliases/custom values remain readable
-    created_at: str  # utc isoformat, same as Event.meta.at
+    about: str = ""  # migration fallback; AGENTS.md is authoritative when configured
+    repos: list[str] = []
+    resources: list[Resource] = []
+    color: str
+    created_at: str
+
+    @pydantic.field_validator("slug")
+    @classmethod
+    def valid_slug(cls, slug: str) -> str:
+        if (
+            not slug
+            or len(slug) > 63
+            or not slug.isascii()
+            or slug != slug.lower()
+            or slug[0] == "-"
+            or slug[-1] == "-"
+            or any(not (character.isalnum() or character == "-") for character in slug)
+            or "--" in slug
+        ):
+            raise ValueError("slug must be lowercase ASCII letters, numbers, and single dashes")
+        return slug
 
     @pydantic.field_validator("repos")
     @classmethod
@@ -63,40 +80,61 @@ class Space(pydantic.BaseModel):
         return repos
 
 
-class NoteSummary(pydantic.BaseModel):
-    filename: str
-    revision: int
-    updated_at: str
+class AppSettings(pydantic.BaseModel):
+    memory_repository: str | None = None
+    memory_repository_installation_id: str | None = None
+
+    @pydantic.field_validator("memory_repository")
+    @classmethod
+    def valid_memory_repository(cls, repository: str | None) -> str | None:
+        if repository is None:
+            return None
+        parts = repository.split("/")
+        if len(parts) != 2 or not all(parts) or any(part.strip() != part for part in parts):
+            raise ValueError("memory_repository must use owner/repo form")
+        return repository
 
 
-class Note(NoteSummary):
-    space_id: str
+class AgentFilesSnapshot(pydantic.BaseModel):
+    agent_slug: str
+    revision: str | None
+    files: list[str]
+
+
+class AgentFile(pydantic.BaseModel):
+    agent_slug: str
+    path: str
     content: str
+    revision: str
 
 
 class Job(pydantic.BaseModel):
     id: str
-    space_id: str
+    agent_id: str
     owner_id: str
+    name: str | None = None
     author_display_name: str | None = None
     schedule: str
+    schedule_kind: typing.Literal["cron", "every"] = "cron"
+    timezone: str | None = None
+    source_digest: str | None = None
     prompt: str
     paused: bool = False
     next_run_at: str
     created_at: str
 
 
-class Chat(pydantic.BaseModel):
-    id: str  # "chat_<hex>"
+class Thread(pydantic.BaseModel):
+    id: str
     user_id: str | None = None
     author_display_name: str | None = None
-    space_id: str | None = None
+    agent_id: str | None = None
     title: str
     topic: str | None = None
-    trigger: str  # what spawned it: "slack:<token>", "cron", "ui", ...
-    status: str = "queued"  # queued | running | done | failed
+    trigger: str
+    status: str = "queued"
     sandbox_id: str | None = None
-    artifact: str | None = None  # report text or issue/pr url
+    artifact: str | None = None
     attention_reason: AttentionReason | None = None
     archived_at: str | None = None
     telemetry_span: dict[str, typing.Any] | None = None

@@ -4,6 +4,7 @@ import contextvars
 import dataclasses
 import json
 import logging
+import re
 import typing
 import uuid
 
@@ -16,7 +17,7 @@ import store.turns
 
 
 MODEL_ID = "openai/gpt-5.6-sol"
-MAX_NOTE_CONTENT_LENGTH = 1_000_000
+MAX_MEMORY_CONTENT_LENGTH = 1_000_000
 log = logging.getLogger("agent.dispatcher")
 
 
@@ -139,6 +140,7 @@ async def create_subagent(
     sandbox_id: str,
     task: str,
     model: str = MODEL_ID,
+    parent_subagent_id: str | None = None,
 ) -> dict[str, typing.Any]:
     """Start a fresh fx subagent chat in ``sandbox_id``.
 
@@ -157,6 +159,7 @@ async def create_subagent(
         model,
         actor_user_id=execution.actor_user_id,
         request_id=execution.operation_key,
+        parent_task_id=parent_subagent_id,
     )
     return {
         "subagent_id": created.id,
@@ -273,94 +276,135 @@ async def start_thread(
     )
 
 
+def _storage_operation_id() -> str:
+    return f"tool:{uuid.uuid5(uuid.NAMESPACE_URL, _execution().operation_key).hex}"
+
+
+def _memory_path(path: str) -> str:
+    value = path.strip()
+    if not value.endswith(".md"):
+        value += ".md"
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,98}\.md", value):
+        raise ValueError("memory path must be a lowercase kebab-case .md filename")
+    return f"memories/{value}"
+
+
 @ai.tool
-async def read_notes(
-    filename: typing.Annotated[
+async def read_memory(
+    path: typing.Annotated[
         str | None,
-        pydantic.Field(
-            description="Exact .md filename to read, or omit to list note filenames"
-        ),
+        pydantic.Field(description="Memory filename to read, or omit to list memories"),
     ] = None,
-) -> list[dict[str, typing.Any]] | dict[str, typing.Any]:
-    """List this space's notes or read one complete markdown note."""
-    from app import server
-    from store import notes
-
-    space = await server._space_for_chat(_execution().chat_id)
-    if filename is None:
-        return [
-            {"filename": note.filename, "updated_at": note.updated_at}
-            for note in await notes.list_summaries(space.id)
-        ]
-    filename = notes.valid_filename(filename)
-    note = await notes.get(space.id, filename)
-    if note is None:
-        return {"status": "not_found", "filename": filename}
-    return note.model_dump(mode="json")
-
-
-@ai.tool
-async def create_note(
-    filename: typing.Annotated[str, pydantic.Field(max_length=100)],
-    content: typing.Annotated[
-        str, pydantic.Field(max_length=MAX_NOTE_CONTENT_LENGTH)
-    ] = "",
 ) -> dict[str, typing.Any]:
-    """Create a lean durable markdown note shared across this space."""
+    """List this agent's Git-backed memories or read one complete memory."""
     from app import server
-    from store import notes
+    from store import agent_files
 
-    space = await server._space_for_chat(_execution().chat_id)
-    try:
-        created = await notes.create(space.id, notes.valid_filename(filename), content)
-    except notes.NoteExists:
-        return {"status": "exists", "filename": filename}
-    except notes.NoteLimitReached:
-        return {"status": "limit_reached", "limit": notes.MAX_NOTES_PER_SPACE}
-    return {"status": "created", **created.model_dump(mode="json")}
+    agent = await server._agent_for_chat(_execution().chat_id)
+    if not await agent_files.configured():
+        return {"status": "unavailable", "message": "agent storage is not configured"}
+    snapshot = await agent_files.snapshot(agent.slug)
+    if path is None:
+        return {
+            "revision": snapshot.revision,
+            "files": [item.removeprefix("memories/") for item in snapshot.files if item.startswith("memories/") and item != "memories/README.md"],
+        }
+    selected = _memory_path(path)
+    found = await agent_files.read(agent.slug, selected, snapshot.revision)
+    if found is None:
+        return {"status": "not_found", "path": selected}
+    return {"path": selected, "content": found.content, "revision": found.revision}
 
 
 @ai.tool
-async def edit_note(
-    filename: typing.Annotated[str, pydantic.Field(max_length=100)],
+async def read_skill(
+    name: typing.Annotated[str, pydantic.Field(max_length=64)],
+    file_path: typing.Annotated[str, pydantic.Field(max_length=200)] = "SKILL.md",
+) -> dict[str, typing.Any]:
+    """Read one complete Git-backed skill guide or contained support file."""
+    from app import server
+    from store import agent_files
+
+    if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?", name):
+        raise ValueError("skill name must be a lowercase hyphenated slug")
+    if not file_path or file_path.startswith("/") or ".." in file_path.split("/"):
+        raise ValueError("skill file path must stay inside the skill directory")
+    agent = await server._agent_for_chat(_execution().chat_id)
+    if not await agent_files.configured():
+        return {"status": "unavailable", "message": "agent storage is not configured"}
+    selected = f"skills/{name}/{file_path}"
+    found = await agent_files.read(agent.slug, selected)
+    if found is None:
+        return {"status": "not_found", "path": selected}
+    return {"path": selected, "content": found.content, "revision": found.revision}
+
+
+@ai.tool
+async def create_memory(
+    path: typing.Annotated[str, pydantic.Field(max_length=100)],
+    content: typing.Annotated[
+        str, pydantic.Field(max_length=MAX_MEMORY_CONTENT_LENGTH)
+    ],
+) -> dict[str, typing.Any]:
+    """Create one durable Git-backed Markdown memory for this agent."""
+    from app import server
+    from store import agent_files
+
+    agent = await server._agent_for_chat(_execution().chat_id)
+    if not await agent_files.configured():
+        return {"status": "unavailable", "message": "agent storage is not configured"}
+    selected = _memory_path(path)
+    snapshot = await agent_files.snapshot(agent.slug)
+    if await agent_files.read(agent.slug, selected, snapshot.revision) is not None:
+        return {"status": "exists", "path": selected, "revision": snapshot.revision}
+    try:
+        saved = await agent_files.write(
+            agent.slug,
+            selected,
+            content,
+            operation_id=_storage_operation_id(),
+            expected_revision=snapshot.revision,
+        )
+    except agent_files.Conflict as error:
+        return {"status": "conflict", "revision": error.current_revision}
+    return {"status": "created", "path": selected, "revision": saved.revision}
+
+
+@ai.tool
+async def edit_memory(
+    path: typing.Annotated[str, pydantic.Field(max_length=100)],
     find: typing.Annotated[
-        str,
-        pydantic.Field(
-            min_length=1,
-            max_length=MAX_NOTE_CONTENT_LENGTH,
-            description="One unique existing snippet, preferably complete lines",
-        ),
+        str, pydantic.Field(min_length=1, max_length=MAX_MEMORY_CONTENT_LENGTH)
     ],
     replacement: typing.Annotated[
-        str,
-        pydantic.Field(
-            max_length=MAX_NOTE_CONTENT_LENGTH,
-            description="Exact text to put in place of the matched snippet",
-        ),
+        str, pydantic.Field(max_length=MAX_MEMORY_CONTENT_LENGTH)
     ],
 ) -> dict[str, typing.Any]:
-    """Replace one unique snippet in an existing durable space note."""
+    """Replace one exact unique snippet in a Git-backed agent memory."""
     from app import server
-    from store import notes
+    from store import agent_files
 
-    space = await server._space_for_chat(_execution().chat_id)
-    filename = notes.valid_filename(filename)
+    agent = await server._agent_for_chat(_execution().chat_id)
+    if not await agent_files.configured():
+        return {"status": "unavailable", "message": "agent storage is not configured"}
+    selected = _memory_path(path)
+    found = await agent_files.read(agent.slug, selected)
+    if found is None:
+        return {"status": "not_found", "path": selected}
+    count = found.content.count(find)
+    if count != 1:
+        return {"status": "not_unique", "matches": count}
     try:
-        result = await notes.find_replace(space.id, filename, find, replacement)
-    except notes.FindReplaceError as error:
-        return {
-            "status": error.reason,
-            **({"best_score": error.score} if error.score is not None else {}),
-        }
-    if result is None:
-        return {"status": "not_found", "filename": filename}
-    updated, match, score = result
-    return {
-        "status": "saved",
-        "match": match,
-        "score": score,
-        **updated.model_dump(mode="json"),
-    }
+        saved = await agent_files.write(
+            agent.slug,
+            selected,
+            found.content.replace(find, replacement, 1),
+            operation_id=_storage_operation_id(),
+            expected_revision=found.revision,
+        )
+    except agent_files.Conflict as error:
+        return {"status": "conflict", "revision": error.current_revision}
+    return {"status": "saved", "path": selected, "revision": saved.revision}
 
 
 BASE_TOOLS = [
@@ -372,9 +416,10 @@ BASE_TOOLS = [
     require_attention,
     find_channels,
     find_people,
-    read_notes,
-    create_note,
-    edit_note,
+    read_memory,
+    read_skill,
+    create_memory,
+    edit_memory,
 ]
 
 
@@ -482,9 +527,10 @@ async def project_turn(
     error: str | None = None,
 ) -> None:
     """Project a terminal Rotor turn into Hatchery's lifecycle streams."""
-    from store import events, turns
+    from store import events, jobs, turns
 
     await turns.finish(chat_id, turn_id, process_id, state, error)
+    await jobs.mark_finished(turn_id, state)
     await events.append(chat_id, "ui", {"type": "messages.changed"})
 
 
@@ -656,13 +702,22 @@ class DurableDispatcher(rotor.DurableProcess[DispatcherState]):
         ):
             return
         from app import server
-        from agent import dispatcher, telemetry
+        from agent import context, dispatcher, telemetry
+        from store import agent_files
 
-        space = await server._space_for_chat(self.state.chat_id)
+        agent = await server._agent_for_chat(self.state.chat_id)
+        stored_context = "Agent storage is not configured."
+        if await agent_files.configured():
+            _, files = await agent_files.tree(agent.slug)
+            stored_context = context.render(files)
         tools = [*BASE_TOOLS, *([] if self.state.linked else [start_thread])]
         history = [
             ai.system_message(
-                dispatcher.system_prompt(space, linked=self.state.linked)
+                dispatcher.system_prompt(
+                    agent,
+                    linked=self.state.linked,
+                    stored_context=stored_context,
+                )
             ),
             *[
                 ai.messages.Message.model_validate(message)

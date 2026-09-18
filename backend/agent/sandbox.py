@@ -1,4 +1,4 @@
-"""Chat-scoped Vercel Sandbox control-plane boundary."""
+"""Thread-scoped Vercel Sandbox control-plane boundary."""
 
 import json
 
@@ -71,8 +71,8 @@ class Launch(pydantic.BaseModel):
 
 
 _SYSTEM = """\
-Suggest launch parameters for a coding sandbox from the hatchery space below.
-Select only relevant owner/repo repositories from the space. The first repo is
+Suggest launch parameters for a coding sandbox from the hatchery agent below.
+Select only relevant owner/repo repositories from the agent. The first repo is
 primary. Copy an applicable recommended setup script verbatim; otherwise omit
 it. Expose only ports the described project is likely to use, at most four.
 Use a short plain title. Omit branch and git_sha unless the description names
@@ -83,13 +83,20 @@ monorepos, native compilation, or heavier workloads. Return only the requested
 structured output."""
 
 
-async def suggest(space: models.Space) -> Launch:
+async def suggest(agent: models.Agent) -> Launch:
+    from store import agent_files
+
+    description = agent.about
+    if await agent_files.configured():
+        instructions = await agent_files.read(agent.slug, "AGENTS.md")
+        if instructions is not None:
+            description = instructions.content
     request = json.dumps(
         {
-            "name": space.name,
-            "description": space.about,
-            "repositories": space.repos,
-            "resources": [resource.model_dump() for resource in space.resources],
+            "name": agent.name,
+            "description": description,
+            "repositories": agent.repos,
+            "resources": [resource.model_dump() for resource in agent.resources],
         },
         ensure_ascii=False,
     )
@@ -149,8 +156,14 @@ async def launch_task(
     model: str,
     actor_user_id: str | None = None,
     request_id: str | None = None,
+    parent_task_id: str | None = None,
 ) -> worker.Task:
     async with telemetry.use_chat(chat_id):
+        hierarchy = (
+            {"parent_task_id": parent_task_id}
+            if parent_task_id is not None
+            else {}
+        )
         if request_id is None:
             task = await worker.launch_task(
                 chat_id,
@@ -158,6 +171,7 @@ async def launch_task(
                 prompt,
                 model,
                 actor_user_id=actor_user_id,
+                **hierarchy,
             )
         else:
             task = await worker.launch_task_idempotent(
@@ -167,6 +181,7 @@ async def launch_task(
                 model,
                 request_id,
                 actor_user_id=actor_user_id,
+                **hierarchy,
             )
         await events.append(
             chat_id,

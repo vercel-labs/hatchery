@@ -11,8 +11,10 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as AppRouteImport } from './routes/_app'
 import { Route as AppIndexRouteImport } from './routes/_app.index'
-import { Route as AppChatsChatIdRouteImport } from './routes/_app.chats.$chatId'
-import { Route as AppSpacesSpaceIdRouteImport } from './routes/_app.spaces.$spaceId'
+import { Route as AppAgentsAgentIdRouteImport } from './routes/_app.agents.$agentId'
+import { Route as AppThreadsThreadIdRouteImport } from './routes/_app.threads.$threadId'
+import { Route as AppAgentsAgentIdFilesRouteImport } from './routes/_app.agents.$agentId.files'
+import { Route as AppAgentsAgentIdSchedulesRouteImport } from './routes/_app.agents.$agentId.schedules'
 
 const AppRoute = AppRouteImport.update({
   id: '/_app',
@@ -23,45 +25,74 @@ const AppIndexRoute = AppIndexRouteImport.update({
   path: '/',
   getParentRoute: () => AppRoute,
 } as any)
-const AppChatsChatIdRoute = AppChatsChatIdRouteImport.update({
-  id: '/chats/$chatId',
-  path: '/chats/$chatId',
+const AppAgentsAgentIdRoute = AppAgentsAgentIdRouteImport.update({
+  id: '/agents/$agentId',
+  path: '/agents/$agentId',
   getParentRoute: () => AppRoute,
 } as any)
-const AppSpacesSpaceIdRoute = AppSpacesSpaceIdRouteImport.update({
-  id: '/spaces/$spaceId',
-  path: '/spaces/$spaceId',
+const AppThreadsThreadIdRoute = AppThreadsThreadIdRouteImport.update({
+  id: '/threads/$threadId',
+  path: '/threads/$threadId',
   getParentRoute: () => AppRoute,
 } as any)
+const AppAgentsAgentIdFilesRoute = AppAgentsAgentIdFilesRouteImport.update({
+  id: '/files',
+  path: '/files',
+  getParentRoute: () => AppAgentsAgentIdRoute,
+} as any)
+const AppAgentsAgentIdSchedulesRoute =
+  AppAgentsAgentIdSchedulesRouteImport.update({
+    id: '/schedules',
+    path: '/schedules',
+    getParentRoute: () => AppAgentsAgentIdRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof AppIndexRoute
-  '/chats/$chatId': typeof AppChatsChatIdRoute
-  '/spaces/$spaceId': typeof AppSpacesSpaceIdRoute
+  '/agents/$agentId': typeof AppAgentsAgentIdRouteWithChildren
+  '/threads/$threadId': typeof AppThreadsThreadIdRoute
+  '/agents/$agentId/files': typeof AppAgentsAgentIdFilesRoute
+  '/agents/$agentId/schedules': typeof AppAgentsAgentIdSchedulesRoute
 }
 export interface FileRoutesByTo {
   '/': typeof AppIndexRoute
-  '/chats/$chatId': typeof AppChatsChatIdRoute
-  '/spaces/$spaceId': typeof AppSpacesSpaceIdRoute
+  '/agents/$agentId': typeof AppAgentsAgentIdRouteWithChildren
+  '/threads/$threadId': typeof AppThreadsThreadIdRoute
+  '/agents/$agentId/files': typeof AppAgentsAgentIdFilesRoute
+  '/agents/$agentId/schedules': typeof AppAgentsAgentIdSchedulesRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_app': typeof AppRouteWithChildren
   '/_app/': typeof AppIndexRoute
-  '/_app/chats/$chatId': typeof AppChatsChatIdRoute
-  '/_app/spaces/$spaceId': typeof AppSpacesSpaceIdRoute
+  '/_app/agents/$agentId': typeof AppAgentsAgentIdRouteWithChildren
+  '/_app/threads/$threadId': typeof AppThreadsThreadIdRoute
+  '/_app/agents/$agentId/files': typeof AppAgentsAgentIdFilesRoute
+  '/_app/agents/$agentId/schedules': typeof AppAgentsAgentIdSchedulesRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/chats/$chatId' | '/spaces/$spaceId'
+  fullPaths:
+    | '/'
+    | '/agents/$agentId'
+    | '/threads/$threadId'
+    | '/agents/$agentId/files'
+    | '/agents/$agentId/schedules'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/chats/$chatId' | '/spaces/$spaceId'
+  to:
+    | '/'
+    | '/agents/$agentId'
+    | '/threads/$threadId'
+    | '/agents/$agentId/files'
+    | '/agents/$agentId/schedules'
   id:
     | '__root__'
     | '/_app'
     | '/_app/'
-    | '/_app/chats/$chatId'
-    | '/_app/spaces/$spaceId'
+    | '/_app/agents/$agentId'
+    | '/_app/threads/$threadId'
+    | '/_app/agents/$agentId/files'
+    | '/_app/agents/$agentId/schedules'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -84,33 +115,60 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppIndexRouteImport
       parentRoute: typeof AppRoute
     }
-    '/_app/chats/$chatId': {
-      id: '/_app/chats/$chatId'
-      path: '/chats/$chatId'
-      fullPath: '/chats/$chatId'
-      preLoaderRoute: typeof AppChatsChatIdRouteImport
+    '/_app/agents/$agentId': {
+      id: '/_app/agents/$agentId'
+      path: '/agents/$agentId'
+      fullPath: '/agents/$agentId'
+      preLoaderRoute: typeof AppAgentsAgentIdRouteImport
       parentRoute: typeof AppRoute
     }
-    '/_app/spaces/$spaceId': {
-      id: '/_app/spaces/$spaceId'
-      path: '/spaces/$spaceId'
-      fullPath: '/spaces/$spaceId'
-      preLoaderRoute: typeof AppSpacesSpaceIdRouteImport
+    '/_app/threads/$threadId': {
+      id: '/_app/threads/$threadId'
+      path: '/threads/$threadId'
+      fullPath: '/threads/$threadId'
+      preLoaderRoute: typeof AppThreadsThreadIdRouteImport
       parentRoute: typeof AppRoute
+    }
+    '/_app/agents/$agentId/files': {
+      id: '/_app/agents/$agentId/files'
+      path: '/files'
+      fullPath: '/agents/$agentId/files'
+      preLoaderRoute: typeof AppAgentsAgentIdFilesRouteImport
+      parentRoute: typeof AppAgentsAgentIdRoute
+    }
+    '/_app/agents/$agentId/schedules': {
+      id: '/_app/agents/$agentId/schedules'
+      path: '/schedules'
+      fullPath: '/agents/$agentId/schedules'
+      preLoaderRoute: typeof AppAgentsAgentIdSchedulesRouteImport
+      parentRoute: typeof AppAgentsAgentIdRoute
     }
   }
 }
 
+interface AppAgentsAgentIdRouteChildren {
+  AppAgentsAgentIdFilesRoute: typeof AppAgentsAgentIdFilesRoute
+  AppAgentsAgentIdSchedulesRoute: typeof AppAgentsAgentIdSchedulesRoute
+}
+
+const AppAgentsAgentIdRouteChildren: AppAgentsAgentIdRouteChildren = {
+  AppAgentsAgentIdFilesRoute: AppAgentsAgentIdFilesRoute,
+  AppAgentsAgentIdSchedulesRoute: AppAgentsAgentIdSchedulesRoute,
+}
+
+const AppAgentsAgentIdRouteWithChildren =
+  AppAgentsAgentIdRoute._addFileChildren(AppAgentsAgentIdRouteChildren)
+
 interface AppRouteChildren {
   AppIndexRoute: typeof AppIndexRoute
-  AppChatsChatIdRoute: typeof AppChatsChatIdRoute
-  AppSpacesSpaceIdRoute: typeof AppSpacesSpaceIdRoute
+  AppAgentsAgentIdRoute: typeof AppAgentsAgentIdRouteWithChildren
+  AppThreadsThreadIdRoute: typeof AppThreadsThreadIdRoute
 }
 
 const AppRouteChildren: AppRouteChildren = {
   AppIndexRoute: AppIndexRoute,
-  AppChatsChatIdRoute: AppChatsChatIdRoute,
-  AppSpacesSpaceIdRoute: AppSpacesSpaceIdRoute,
+  AppAgentsAgentIdRoute: AppAgentsAgentIdRouteWithChildren,
+  AppThreadsThreadIdRoute: AppThreadsThreadIdRoute,
 }
 
 const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)

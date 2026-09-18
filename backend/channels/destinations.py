@@ -21,7 +21,7 @@ from vercel import connect
 import auth
 from channels import github
 from store import auth as auth_store
-from store import chats, events, spaces, turns
+from store import chats, events, agents, turns
 
 Provider = typing.Literal["slack", "github"]
 LIMIT = 10
@@ -106,8 +106,8 @@ async def _context(chat_id: str, actor_user_id: str | None):
     user = await auth_store.get_user(user_id) if user_id else None
     if chat is None or not auth.allowed_user(user):
         raise ValueError("communication requires an allowed Hatchery user")
-    space = await spaces.get(chat.space_id) if chat.space_id else None
-    return user, space
+    agent = await agents.get(chat.agent_id) if chat.agent_id else None
+    return user, agent
 
 
 @contextlib.asynccontextmanager
@@ -199,9 +199,9 @@ def _github_ref(query: str) -> tuple[str, int] | None:
 async def find_channels(
     chat_id: str, provider: Provider, query: str, actor_user_id: str | None = None
 ) -> list[dict]:
-    """Find public Slack bot-member channels or GitHub issues/PRs in this space."""
+    """Find public Slack bot-member channels or GitHub issues/PRs in this agent."""
     _rank(query, [])  # reject empty queries before making provider calls
-    user, space = await _context(chat_id, actor_user_id)
+    user, agent = await _context(chat_id, actor_user_id)
     candidates = []
     async with _client(provider) as client:
         if provider == "slack":
@@ -238,13 +238,13 @@ async def find_channels(
                 if not cursor:
                     break
         else:
-            repos = {repo.casefold(): repo for repo in space.repos} if space else {}
+            repos = {repo.casefold(): repo for repo in agent.repos} if agent else {}
             reference = _github_ref(query)
             if reference:
                 repo, number = reference
                 if repo.casefold() not in repos:
                     raise ValueError(
-                        "GitHub destination must belong to this space's repositories"
+                        "GitHub destination must belong to this agent's repositories"
                     )
                 items = [await _api(client, "GET", f"repos/{repo}/issues/{number}")]
             else:
@@ -399,7 +399,7 @@ async def start_thread(
     actor_user_id: str | None = None,
 ) -> dict:
     """Send a notification and link its provider conversation to this chat."""
-    user, space = await _context(chat_id, actor_user_id)
+    user, agent = await _context(chat_id, actor_user_id)
     if not text.strip():
         raise ValueError("message cannot be empty")
     people = sorted(set(people or []))
@@ -471,9 +471,9 @@ async def start_thread(
             lock_key = f"notification:slack:{team}:{channel_id}"
         else:
             reference = _github_ref(destination)
-            repos = {repo.casefold() for repo in space.repos} if space else set()
+            repos = {repo.casefold() for repo in agent.repos} if agent else set()
             if not reference or reference[0].casefold() not in repos:
-                raise ValueError("use owner/repo#number in this space's repositories")
+                raise ValueError("use owner/repo#number in this agent's repositories")
             repo, number = reference
             issue = await _api(client, "GET", f"repos/{repo}/issues/{number}")
             repository = await _api(client, "GET", f"repos/{repo}")

@@ -1,3 +1,3 @@
-export function submissionLabel(spaceId: string | null): string {
-  return spaceId === null ? "Assigning a space…" : "Thinking…";
+export function submissionLabel(agentId: string | null): string {
+  return agentId === null ? "Assigning an agent…" : "Thinking…";
 }

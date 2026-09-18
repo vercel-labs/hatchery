@@ -437,14 +437,14 @@ def state() -> dict:
     return {"channel_id": "C1", "thread_ts": "100.1"}
 
 
-async def test_space_assignment_updates_status():
+async def test_agent_assignment_updates_status():
     calls: list[httpx.Request] = []
     channel = api_channel(calls)
-    await channel.on_event(channels.event(channels.protocol.SPACE_ASSIGNING), state())
+    await channel.on_event(channels.event(channels.protocol.AGENT_ASSIGNING), state())
     await channel.on_event(
         channels.event(
-            channels.protocol.SPACE_ASSIGNED,
-            space={"id": "spc_docs", "name": "docs"},
+            channels.protocol.AGENT_ASSIGNED,
+            agent={"id": "agt_docs", "name": "docs"},
         ),
         state(),
     )
@@ -452,7 +452,7 @@ async def test_space_assignment_updates_status():
         dict(urllib.parse.parse_qsl(request.read().decode()))["status"]
         for request in calls
     ]
-    assert statuses == ["assigning a space...", "assigned docs"]
+    assert statuses == ["assigning an agent...", "assigned docs"]
 
 
 async def test_turn_started_sets_typing_status_with_connect_token(connect_stub):

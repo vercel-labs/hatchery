@@ -1,4 +1,4 @@
-import type { Chat } from "./api";
+import type { Thread } from "./api";
 
 export type ChatSidebarText = {
   author: string | null;
@@ -8,37 +8,37 @@ export type ChatSidebarText = {
 
 export type ChatSidebarFilters = {
   requiresAttention: boolean;
-  spaceId: string | null;
+  agentId: string | null;
 };
 
 export const chatAttentionFilterLabel = "Requires attention";
 
 export function filterSidebarChats(
-  chats: Chat[],
+  chats: Thread[],
   filters: ChatSidebarFilters,
-): Chat[] {
+): Thread[] {
   return chats.filter(
     (chat) =>
       chat.archived_at === null &&
       (!filters.requiresAttention || chat.attention_reason !== null) &&
-      (filters.spaceId === null || chat.space_id === filters.spaceId),
+      (filters.agentId === null || chat.agent_id === filters.agentId),
   );
 }
 
-export function selectSidebarSpace(
+export function selectSidebarAgent(
   filters: ChatSidebarFilters,
-  spaceId: string | null,
+  agentId: string | null,
 ): ChatSidebarFilters {
-  return { ...filters, spaceId };
+  return { ...filters, agentId };
 }
 
-export function chatAttentionLabel(chat: Chat): string | null {
+export function chatAttentionLabel(chat: Thread): string | null {
   if (chat.attention_reason === "result_available") return "Result available";
   if (chat.attention_reason === "blocked") return "Blocked";
   return null;
 }
 
-export function chatSidebarText(chat: Chat): ChatSidebarText {
+export function chatSidebarText(chat: Thread): ChatSidebarText {
   const author = chat.author_display_name?.trim() || null;
   const topic = chat.topic?.trim();
   const fragment = topic || (chat.title === "new chat" ? "…" : chat.title);
@@ -47,7 +47,7 @@ export function chatSidebarText(chat: Chat): ChatSidebarText {
     return {
       author: null,
       fragment,
-      label: fragment === "…" ? "New chat" : fragment,
+      label: fragment === "…" ? "New thread" : fragment,
     };
   }
   const separator = fragment.startsWith("'") ? "" : " ";

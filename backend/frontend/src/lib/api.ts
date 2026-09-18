@@ -30,6 +30,17 @@ export type GitHubConnection = {
   connected_at: string;
 };
 
+export type GitHubRepository = {
+  full_name: string;
+  installation_id: string;
+  private: boolean;
+};
+
+export type AppSettings = {
+  configured: boolean;
+  memory_repository: string | null;
+};
+
 export type SlackConnection = {
   team_id: string;
   team: string | null;
@@ -54,8 +65,9 @@ export type Resource = {
   kind: string;
 };
 
-export type Space = {
+export type Agent = {
   id: string;
+  slug: string;
   name: string;
   about: string;
   repos: string[];
@@ -64,37 +76,26 @@ export type Space = {
   created_at: string;
 };
 
-export type SpaceWarning = {
-  space_id: string;
+export type AgentWarning = {
+  agent_id: string;
   repo: string;
   warning: string;
 };
 
-export type NoteSummary = {
-  filename: string;
-  revision: number;
-  updated_at: string;
-};
-
-export type Note = NoteSummary & {
-  space_id: string;
-  content: string;
-};
-
 export type Job = {
   id: string;
-  space_id: string;
+  agent_id: string;
   author_display_name: string | null;
   schedule: string;
   prompt: string;
   paused: boolean;
 };
 
-export type Chat = {
+export type Thread = {
   id: string;
   user_id: string | null;
   author_display_name?: string | null;
-  space_id: string | null;
+  agent_id: string | null;
   title: string;
   topic: string | null;
   trigger: string;

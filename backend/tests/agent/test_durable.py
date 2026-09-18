@@ -7,13 +7,13 @@ import rotor.testing
 
 from agent import durable
 from app import server
-from store import chats, events, spaces
+from store import chats, events, agents
 import worker
 
 
 async def _chat(prompt: str = "help"):
-    space = await spaces.default()
-    chat = await chats.create(space.id, "dispatcher")
+    agent = await agents.default()
+    chat = await chats.create(agent.id, "dispatcher")
     message = ai.user_message(prompt)
     await events.append(chat.id, "messages", message.model_dump(mode="json"))
     return chat, message
@@ -162,7 +162,7 @@ async def test_linked_chat_hides_start_thread_from_model(monkeypatch):
         await runtime.drain()
 
     assert "start_thread" not in offered[0]
-    assert {"create_sandbox", "create_subagent", "read_notes"} <= offered[0]
+    assert {"create_sandbox", "create_subagent", "read_memory"} <= offered[0]
 
 
 async def test_duplicate_turn_delivery_runs_model_once(monkeypatch):

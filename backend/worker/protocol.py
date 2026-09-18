@@ -15,6 +15,7 @@ EventType = typing.Literal[
     "task.started",
     "task.output",
     "task.transcript",
+    "task.hierarchy",
     "task.question",
     "task.completed",
     "task.failed",

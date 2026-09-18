@@ -61,6 +61,33 @@
   --radius-4xl: calc(var(--radius) * 2.6);
 }
 
+@theme inline {
+  --animate-agent-hop: agent-hop 1.8s cubic-bezier(0.22, 0.61, 0.36, 1) infinite;
+  --animate-agent-pulse: agent-pulse 1.8s ease-in-out infinite;
+
+  @keyframes agent-hop {
+    0%,
+    15%,
+    70%,
+    100% {
+      transform: translateY(0);
+    }
+    40% {
+      transform: translateY(-2px);
+    }
+  }
+
+  @keyframes agent-pulse {
+    0%,
+    100% {
+      opacity: 0.65;
+    }
+    50% {
+      opacity: 1;
+    }
+  }
+}
+
 :root {
   --font-geist-sans: "Geist Variable";
   --font-geist-mono: "Geist Mono Variable";

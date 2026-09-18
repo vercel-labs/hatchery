@@ -50,3 +50,43 @@ def test_old_worker_spec_keeps_partial_explicit_resources():
 
     assert spec.size is None
     assert spec.resolved_resources() == (4, None)
+
+
+def _task(task_id: str, parent_task_id: str | None = None) -> models.Task:
+    return models.Task(
+        id=task_id,
+        chat_id="chat_1",
+        worker_id="wrk_1",
+        parent_task_id=parent_task_id,
+        title=task_id,
+        prompt=task_id,
+        model="openai/test",
+        created_at="2026-09-17T00:00:00+00:00",
+        updated_at="2026-09-17T00:00:00+00:00",
+    )
+
+
+def test_legacy_task_hierarchy_fields_have_safe_defaults():
+    task = _task("root")
+
+    assert task.parent_task_id is None
+    assert task.root_task_id is None
+    assert task.depth == 0
+    assert task.objective is None
+    assert task.delegation_order == 0
+
+
+async def test_task_hierarchy_round_trip_and_subtree_lookup():
+    root = _task("root")
+    child = _task("child", "root")
+    sibling = _task("sibling")
+    child.root_task_id = "root"
+    child.depth = 1
+    child.objective = "inspect tests"
+    child.delegation_order = 3
+    for task in (root, child, sibling):
+        await store.save_task(task)
+
+    assert await store.get_task("child") == child
+    assert await store.list_task_subtree("root") == [root, child]
+    assert await store.list_task_subtree("missing") == []

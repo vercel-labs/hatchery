@@ -20,49 +20,49 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { AUTO_SPACE_VALUE } from "@/components/new-chat-state";
+import { AUTO_AGENT_VALUE } from "@/components/new-chat-state";
 import { braintrustTraceUrl } from "@/lib/braintrust";
-import type { Space } from "@/lib/api";
-import { resolveSpaceColor } from "@/lib/space-colors";
+import type { Agent } from "@/lib/api";
+import { resolveAgentColor } from "@/lib/agent-colors";
 
 // Trimmed port of seal's prompt-form: text only, no attachments or model
 // select.
 export function PromptForm({
   isBusy,
   traceId,
-  spaces,
-  spaceId,
+  agents,
+  agentId,
   showMarkAsRead,
   isMarkingAsRead,
-  showAutoSpace = false,
+  showAutoAgent = false,
   autoFocus = false,
   onSubmit,
   onStop,
-  onSpaceChange,
+  onAgentChange,
   onMarkAsRead,
 }: {
   isBusy: boolean;
   traceId: string | null;
-  spaces: Space[];
-  spaceId: string | null;
+  agents: Agent[];
+  agentId: string | null;
   showMarkAsRead: boolean;
   isMarkingAsRead: boolean;
-  showAutoSpace?: boolean;
+  showAutoAgent?: boolean;
   autoFocus?: boolean;
   onSubmit: (message: { text: string }) => void | Promise<void>;
   onStop: () => void;
-  onSpaceChange: (spaceId: string) => void | Promise<void>;
+  onAgentChange: (agentId: string) => void | Promise<void>;
   onMarkAsRead: () => void;
 }) {
   const [input, setInput] = React.useState("");
   const [traceCopied, setTraceCopied] = React.useState(false);
-  const [isChangingSpace, setIsChangingSpace] = React.useState(false);
-  const selectedSpace = spaces.find((space) => space.id === spaceId);
+  const [isChangingAgent, setIsChangingAgent] = React.useState(false);
+  const selectedAgent = agents.find((agent) => agent.id === agentId);
 
   async function handleSubmit(event?: React.FormEvent) {
     event?.preventDefault();
     const text = input.trim();
-    if (!text || isBusy || isChangingSpace) return;
+    if (!text || isBusy || isChangingAgent) return;
     try {
       await onSubmit({ text });
       setInput("");
@@ -90,34 +90,34 @@ export function PromptForm({
           }}
         />
         <InputGroupAddon align="block-end">
-          {(spaceId || showAutoSpace) && (
+          {(agentId || showAutoAgent) && (
             <Select
-              disabled={isChangingSpace}
-              value={spaceId ?? AUTO_SPACE_VALUE}
-              onValueChange={(nextSpaceId) => {
-                if (nextSpaceId && nextSpaceId !== AUTO_SPACE_VALUE) {
-                  setIsChangingSpace(true);
-                  Promise.resolve(onSpaceChange(nextSpaceId)).finally(() =>
-                    setIsChangingSpace(false),
+              disabled={isChangingAgent}
+              value={agentId ?? AUTO_AGENT_VALUE}
+              onValueChange={(nextAgentId) => {
+                if (nextAgentId && nextAgentId !== AUTO_AGENT_VALUE) {
+                  setIsChangingAgent(true);
+                  Promise.resolve(onAgentChange(nextAgentId)).finally(() =>
+                    setIsChangingAgent(false),
                   );
                 }
               }}
             >
               <SelectTrigger
                 size="sm"
-                aria-label="Chat space"
+                aria-label="Thread agent"
                 className="h-6 max-w-44 rounded-xl border-transparent bg-secondary px-2 text-secondary-foreground hover:bg-secondary/80"
               >
                 <SelectValue>
-                  {selectedSpace ? (
+                  {selectedAgent ? (
                     <>
                       <span
                         className="size-2 shrink-0 rounded-full"
                         style={{
-                          backgroundColor: resolveSpaceColor(selectedSpace.color),
+                          backgroundColor: resolveAgentColor(selectedAgent.color),
                         }}
                       />
-                      <span className="truncate">{selectedSpace.name}</span>
+                      <span className="truncate">{selectedAgent.name}</span>
                     </>
                   ) : (
                     <span className="truncate">Auto</span>
@@ -126,16 +126,16 @@ export function PromptForm({
               </SelectTrigger>
               <SelectContent align="start">
                 <SelectGroup>
-                  {showAutoSpace && (
-                    <SelectItem value={AUTO_SPACE_VALUE}>Auto</SelectItem>
+                  {showAutoAgent && (
+                    <SelectItem value={AUTO_AGENT_VALUE}>Auto</SelectItem>
                   )}
-                  {spaces.map((space) => (
-                    <SelectItem key={space.id} value={space.id}>
+                  {agents.map((agent) => (
+                    <SelectItem key={agent.id} value={agent.id}>
                       <span
                         className="size-2 shrink-0 rounded-full"
-                        style={{ backgroundColor: resolveSpaceColor(space.color) }}
+                        style={{ backgroundColor: resolveAgentColor(agent.color) }}
                       />
-                      {space.name}
+                      {agent.name}
                     </SelectItem>
                   ))}
                 </SelectGroup>
@@ -207,7 +207,7 @@ export function PromptForm({
               size="icon-sm"
               variant="default"
               aria-label="Submit"
-              disabled={!input.trim() || isChangingSpace}
+              disabled={!input.trim() || isChangingAgent}
             >
               <ArrowUpIcon />
             </InputGroupButton>
