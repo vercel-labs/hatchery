@@ -258,6 +258,35 @@ async def test_reply_posts_issue_comment_with_marker():
     assert json.loads(request.read())["body"] == f"ported!\n\n{github.MARKER}"
 
 
+async def test_reply_delivery_marker_prevents_duplicate_post():
+    calls = []
+    posted = []
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if request.method == "GET":
+            return httpx.Response(200, json=[{"body": body} for body in posted])
+        posted.append(json.loads(request.read())["body"])
+        return httpx.Response(201, json={"id": 1})
+
+    channel = github.channel(
+        connector="github/e2e-bot",
+        bot_name="e2e-bot",
+        transport=httpx.MockTransport(responder),
+    )
+    event = channels.event(
+        channels.protocol.MESSAGE_COMPLETED,
+        message="ported!",
+        delivery_key="turn_1:0",
+    )
+    await channel.on_event(event, state())
+    await channel.on_event(event, state())
+
+    assert [request.method for request in calls] == ["GET", "POST", "GET"]
+    assert len(posted) == 1
+    assert "<!-- hatchery-delivery:turn_1:0:0 -->" in posted[0]
+
+
 async def test_reply_to_review_thread_uses_replies_endpoint():
     calls: list[httpx.Request] = []
     await api_channel(calls).on_event(

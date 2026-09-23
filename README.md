@@ -23,4 +23,4 @@ Point Slack and GitHub triggers at the branch when testing integrations:
 
 Use [`docs/use-agent-browser.md`](docs/use-agent-browser.md) for browser-driven testing and [`docs/use-braintrust.md`](docs/use-braintrust.md) to inspect agent runs.
 
-The frontend is built with Next.js and React. The backend uses FastAPI and the AI SDK for Python. Hatchery runs on Vercel Workflows, Queues, and Sandboxes, with Neon Postgres for storage and Vercel Connect for Slack and GitHub integrations.
+The frontend is built with Next.js and React. The backend uses FastAPI, Rotor, and the AI SDK for Python. Hatchery runs Rotor workers on Vercel Queues, uses Vercel Sandboxes for coding agents, Lakebase Postgres on Neon for storage, and Vercel Connect for Slack and GitHub integrations.

@@ -237,7 +237,11 @@ class GitHubChannel:
                 author = event.data.get("author") or "User"
                 await self._comment(state, f"{author} · via {source}\n\n{text}")
         elif event.type == channels.protocol.MESSAGE_COMPLETED:
-            await self._comment(state, str(event.data.get("message", "")))
+            await self._comment(
+                state,
+                str(event.data.get("message", "")),
+                delivery_key=event.data.get("delivery_key"),
+            )
         elif event.type == channels.protocol.TURN_FAILED:
             await self._comment(
                 state,
@@ -255,7 +259,9 @@ class GitHubChannel:
             {"content": "eyes"},
         )
 
-    async def _comment(self, state: dict, text: str) -> None:
+    async def _comment(
+        self, state: dict, text: str, delivery_key: str | None = None
+    ) -> None:
         if not text:
             return
         if state["kind"] == "review_thread":
@@ -263,12 +269,52 @@ class GitHubChannel:
                 f"/repos/{state['owner']}/{state['repo']}/pulls/{state['number']}"
                 f"/comments/{state['root_comment_id']}/replies"
             )
+            list_path = (
+                f"/repos/{state['owner']}/{state['repo']}/pulls/{state['number']}"
+                "/comments"
+            )
         else:
             path = f"/repos/{state['owner']}/{state['repo']}/issues/{state['number']}/comments"
-        size = COMMENT_LIMIT - len(MARKER) - 2
-        for start in range(0, len(text), size):
+            list_path = path
+        existing = ""
+        if delivery_key is not None:
+            page = 1
+            while True:
+                comments = await self._api(
+                    "GET", list_path, params={"per_page": 100, "page": page}
+                )
+                if not isinstance(comments, list):
+                    raise RuntimeError("github comment listing returned invalid data")
+                existing += "\n".join(
+                    str(comment.get("body", "")) for comment in comments
+                )
+                if len(comments) < 100:
+                    break
+                page += 1
+        marker_size = (
+            len(f"<!-- hatchery-delivery:{delivery_key}:999999 -->")
+            if delivery_key is not None
+            else 0
+        )
+        size = (
+            COMMENT_LIMIT
+            - len(MARKER)
+            - marker_size
+            - (3 if delivery_key is not None else 2)
+        )
+        for index, start in enumerate(range(0, len(text), size)):
+            delivery_marker = (
+                f"<!-- hatchery-delivery:{delivery_key}:{index} -->"
+                if delivery_key is not None
+                else ""
+            )
+            if delivery_marker and delivery_marker in existing:
+                continue
+            suffix = f"\n{delivery_marker}" if delivery_marker else ""
             await self._api(
-                "POST", path, {"body": f"{text[start : start + size]}\n\n{MARKER}"}
+                "POST",
+                path,
+                {"body": f"{text[start : start + size]}\n\n{MARKER}{suffix}"},
             )
 
     async def _api(

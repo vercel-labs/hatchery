@@ -1,6 +1,5 @@
 import asyncio
 import datetime
-from unittest import mock
 
 import httpx
 import pytest
@@ -1518,7 +1517,7 @@ async def test_ambiguous_repo_classifies_then_runs_original_request(monkeypatch)
     assert runs == [chat.id]
 
 
-async def test_inbound_turn_starts_durable_workflow(monkeypatch):
+async def test_inbound_turn_starts_rotor_dispatcher(monkeypatch):
     started = []
 
     async def start_turn(chat_id, origin, task_id=None, actor_user_id=None):
@@ -1531,12 +1530,12 @@ async def test_inbound_turn_starts_durable_workflow(monkeypatch):
     assert started == [("chat_x", "channel", None)]
 
 
-async def test_inbound_turn_surfaces_workflow_start_failure(monkeypatch):
+async def test_inbound_turn_surfaces_dispatcher_start_failure(monkeypatch):
     async def start_turn(chat_id, origin, task_id=None, actor_user_id=None):
-        raise RuntimeError("workflow unavailable")
+        raise RuntimeError("dispatcher unavailable")
 
     monkeypatch.setattr(server.durable, "start_turn", start_turn)
-    with pytest.raises(RuntimeError, match="workflow unavailable"):
+    with pytest.raises(RuntimeError, match="dispatcher unavailable"):
         await server._run_inbound_turn("chat_x")
 
 
@@ -1617,7 +1616,7 @@ async def test_resume_chat_stream_is_idle_without_active_turn():
     assert response.status_code == 204
 
 
-async def test_resume_chat_stream_uses_registered_run(monkeypatch):
+async def test_resume_chat_stream_uses_registered_process(monkeypatch):
     space = await server.spaces.default()
     chat = await chats.create(space.id, "active")
     await events.append(
@@ -1626,30 +1625,30 @@ async def test_resume_chat_stream_uses_registered_run(monkeypatch):
         {
             "type": "turn.started",
             "turn_id": "turn_1",
-            "run_id": "run_1",
+            "run_id": "process_1",
             "origin": "worker",
             "task_id": "task_1",
         },
     )
     seen = []
 
-    class Run:
-        async def status(self):
-            return "running"
+    async def active_turn(_chat_id):
+        return server.turns.ActiveTurn(
+            "turn_1", "process_1", "worker", "task_1", 0
+        )
 
-    monkeypatch.setattr(server.vercel.workflow, "Run", lambda _run_id: Run())
-
-    async def to_sse(run_id, turn_id):
-        seen.append((run_id, turn_id))
+    async def to_sse(process_id, turn_id):
+        seen.append((process_id, turn_id))
         yield "data: [DONE]\n\n"
 
+    monkeypatch.setattr(server.durable, "active_turn", active_turn)
     monkeypatch.setattr(server.agent_stream, "to_sse", to_sse)
     async with client() as c:
         response = await c.get(f"/api/chat/{chat.id}/stream")
 
     assert response.status_code == 200
     assert response.text == "data: [DONE]\n\n"
-    assert seen == [("run_1", "turn_1")]
+    assert seen == [("process_1", "turn_1")]
 
 
 async def test_first_ui_prompt_classifies_before_dispatcher(monkeypatch):
@@ -1663,10 +1662,12 @@ async def test_first_ui_prompt_classifies_before_dispatcher(monkeypatch):
         seen["classification"] = (prompt, metadata, [space.id for space in candidates])
         return docs
 
-    async def start_turn(chat_id, origin, task_id=None, actor_user_id=None):
-        seen["started"] = (chat_id, origin, task_id, actor_user_id)
+    async def start_turn(
+        chat_id, origin, task_id=None, turn_id=None, actor_user_id=None
+    ):
+        seen["started"] = (chat_id, origin, task_id, turn_id, actor_user_id)
         return server.turns.ActiveTurn(
-            "turn_1", "run_1", origin, task_id, 0, actor_user_id
+            turn_id, "run_1", origin, task_id, 0, actor_user_id
         )
 
     async def durable_sse(run_id, turn_id):
@@ -1693,8 +1694,10 @@ async def test_first_ui_prompt_classifies_before_dispatcher(monkeypatch):
         [docs.id],
     )
     assert (await chats.get(chat.id)).space_id == docs.id
-    assert seen["started"] == (chat.id, "ui", None, "user_test")
-    assert seen["stream"] == ("run_1", "turn_1")
+    assert seen["started"][:3] == (chat.id, "ui", None)
+    assert seen["started"][3].startswith("turn_")
+    assert seen["started"][4] == "user_test"
+    assert seen["stream"] == ("run_1", seen["started"][3])
     assert response.text == 'data: {"type":"finish"}\n\n'
 
 
@@ -1721,10 +1724,12 @@ async def test_ui_turn_is_mirrored_to_bound_channel(monkeypatch):
     previous = server.bot.channels.get("fake")
     server.bot.channels["fake"] = channel
 
-    async def start_turn(chat_id, origin, task_id=None, actor_user_id=None):
+    async def start_turn(
+        chat_id, origin, task_id=None, turn_id=None, actor_user_id=None
+    ):
         assert actor_user_id == "user_actor"
         return server.turns.ActiveTurn(
-            "turn_1", "run_1", origin, task_id, 0, actor_user_id
+            turn_id, "run_1", origin, task_id, 0, actor_user_id
         )
 
     async def durable_sse(_run_id, _turn_id):
@@ -1917,17 +1922,16 @@ async def test_worker_completion_wakes_dispatcher_with_hidden_persisted_result(
     await server.worker.store.save_task(task)
     started = []
 
-    async def start_turn(chat_id, origin, task_id=None, actor_user_id=None):
-        started.append((chat_id, origin, task_id, actor_user_id))
+    async def start_turn(
+        chat_id, origin, task_id=None, turn_id=None, actor_user_id=None
+    ):
+        item = (chat_id, origin, task_id, turn_id, actor_user_id)
+        if item not in started:
+            started.append(item)
         return server.turns.ActiveTurn(
-            "turn_1", "run_1", origin, task_id, 0, actor_user_id
+            turn_id, "process_1", origin, task_id, 0, actor_user_id
         )
 
-    class Run:
-        async def status(self):
-            return "running"
-
-    monkeypatch.setattr(server.vercel.workflow, "Run", lambda run_id: Run())
     monkeypatch.setattr(server.durable, "start_turn", start_turn)
     await server.complete_worker_task(task)
     await server.complete_worker_task(task)
@@ -1945,9 +1949,11 @@ async def test_worker_completion_wakes_dispatcher_with_hidden_persisted_result(
     assert stored[0].provider_metadata == {
         "hatchery": {"kind": "subagent_result", "subagent_id": "task_1"}
     }
-    assert started == [(chat.id, "worker", task.id, "user_actor")]
+    assert len(started) == 1
+    assert started[0][:3] == (chat.id, "worker", task.id)
+    assert started[0][3].startswith("turn_")
+    assert started[0][4] == "user_actor"
     current = await server.worker.get_task(chat.id, task.id)
-    assert current.completion_run_id == "run_1"
     assert current.completion_delivered is False
 
     async with client() as c:
@@ -1955,7 +1961,7 @@ async def test_worker_completion_wakes_dispatcher_with_hidden_persisted_result(
     assert visible == []
 
 
-async def test_worker_completion_does_not_restart_active_workflow(monkeypatch):
+async def test_worker_completion_reuses_stable_rotor_turn_id(monkeypatch):
     space = await server.spaces.default()
     chat = await chats.create(space.id, "task")
     task = server.worker.Task(
@@ -1968,7 +1974,6 @@ async def test_worker_completion_does_not_restart_active_workflow(monkeypatch):
         status="complete",
         event_sequence=2,
         completion_sequence=2,
-        completion_run_id="run_1",
         result={"summary": "done"},
         created_at="2026-08-28T00:00:00+00:00",
         updated_at="2026-08-28T00:00:00+00:00",
@@ -1976,20 +1981,18 @@ async def test_worker_completion_does_not_restart_active_workflow(monkeypatch):
     await server.worker.store.save_task(task)
     starts = []
 
-    class Run:
-        async def status(self):
-            return "running"
-
     async def start_turn(*args, **kwargs):
-        starts.append(args)
-        return "run_2"
+        starts.append((args, kwargs))
+        return "process_1"
 
-    monkeypatch.setattr(server.vercel.workflow, "Run", lambda run_id: Run())
     monkeypatch.setattr(server.durable, "start_turn", start_turn)
     await server.complete_worker_task(task)
+    await server.complete_worker_task(task)
 
-    assert starts == []
-    assert (await server.worker.get_task(chat.id, task.id)).completion_run_id == "run_1"
+    assert len(starts) == 2
+    assert starts[0] == starts[1]
+    assert starts[0][0] == (chat.id, "worker", task.id)
+    assert starts[0][1]["turn_id"].startswith("turn_")
 
 
 async def test_task_readiness_reports_queue_state(monkeypatch):
@@ -2524,3 +2527,147 @@ async def test_tty_bridge_maps_connection_failure(monkeypatch):
     await server._bridge_tty(ws, type("Worker", (), {"id": "wrk_1"})(), "task_1")
 
     assert ws.closed == (1011, "upstream connection failed")
+
+
+async def test_channel_delivery_key_skips_completed_binding_on_retry():
+    class Channel:
+        name = "receipt-test"
+
+        def __init__(self):
+            self.delivered = []
+
+        async def on_event(self, event, state):
+            self.delivered.append((event.meta.id, event.data["message"], state))
+
+    chat = await chats.create(None, "receipts")
+    await chats.bind("receipt-test:thread", chat.id, "receipt-test", {"thread": "1"})
+    channel = Channel()
+    previous = server.bot.channels.get(channel.name)
+    server.bot.channels[channel.name] = channel
+    try:
+        assert await server._deliver(
+            chat.id, "done", delivery_key="turn_1:0"
+        ) == []
+        assert await server._deliver(
+            chat.id, "done", delivery_key="turn_1:0"
+        ) == []
+    finally:
+        if previous is None:
+            del server.bot.channels[channel.name]
+        else:
+            server.bot.channels[channel.name] = previous
+
+    assert len(channel.delivered) == 1
+    assert channel.delivered[0][1:] == ("done", {"thread": "1"})
+    assert len(await events.read(chat.id, "deliveries")) == 1
+
+
+async def test_preview_http_does_not_activate_rotor(monkeypatch):
+    activated = []
+
+    async def activate(_worker):
+        activated.append(True)
+
+    monkeypatch.setenv("VERCEL_ENV", "preview")
+    monkeypatch.setenv("VERCEL_DEPLOYMENT_ID", "dpl_preview")
+    monkeypatch.setenv("HATCHERY_PUBLIC_URL", "https://preview.example")
+    monkeypatch.setattr(server.rotor_runtime.platform, "activate", activate)
+    request = server.fastapi.Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/health",
+            "headers": [(b"host", b"preview.example")],
+            "scheme": "https",
+            "server": ("preview.example", 443),
+        }
+    )
+
+    await server._ensure_rotor_deployment(request)
+
+    assert activated == []
+
+
+async def test_production_canonical_request_activates_rotor(monkeypatch):
+    activated = []
+    store = server.rotor_runtime.worker.backends.store
+
+    async def setup():
+        return None
+
+    async def active_deployment():
+        return "dpl_old"
+
+    async def activate(_worker):
+        activated.append("dpl_new")
+
+    monkeypatch.setenv("VERCEL_ENV", "production")
+    monkeypatch.setenv("VERCEL_DEPLOYMENT_ID", "dpl_new")
+    monkeypatch.setenv("HATCHERY_PUBLIC_URL", "https://hatchery.example")
+    monkeypatch.setattr(store, "setup", setup)
+    monkeypatch.setattr(store, "active_deployment", active_deployment)
+    monkeypatch.setattr(server.rotor_runtime.platform, "activate", activate)
+    request = server.fastapi.Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/health",
+            "headers": [(b"host", b"hatchery.example")],
+            "scheme": "https",
+            "server": ("hatchery.example", 443),
+        }
+    )
+
+    await server._ensure_rotor_deployment(request)
+
+    assert activated == ["dpl_new"]
+
+
+async def test_explicit_rotor_activation_requires_release_secret(monkeypatch):
+    activated = []
+
+    async def activate(_worker):
+        activated.append(True)
+
+    monkeypatch.delenv("VERCEL_DEPLOYMENT_ID", raising=False)
+    monkeypatch.setenv("ROTOR_RELEASE_SECRET", "release-secret")
+    monkeypatch.setattr(server.rotor_runtime.platform, "activate", activate)
+    async with client() as http:
+        denied = await http.post("/api/rotor/activate")
+        accepted = await http.post(
+            "/api/rotor/activate",
+            headers={"authorization": "Bearer release-secret"},
+        )
+
+    assert denied.status_code == 401
+    assert accepted.status_code == 200
+    assert activated == [True]
+
+
+async def test_ui_retry_reuses_turn_identity(monkeypatch):
+    space = await server.spaces.default()
+    chat = await chats.create(space.id, "retry")
+    ui = ai.ui.ai_sdk.to_ui_messages([ai.user_message("once")])
+    turns = []
+
+    async def start_turn(
+        chat_id, origin, task_id=None, turn_id=None, actor_user_id=None
+    ):
+        turns.append(turn_id)
+        return server.turns.ActiveTurn(turn_id, "process_1", origin, task_id, 0)
+
+    async def to_sse(_process_id, _turn_id):
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(server.durable, "start_turn", start_turn)
+    monkeypatch.setattr(server.agent_stream, "to_sse", to_sse)
+    payload = {
+        "chat_id": chat.id,
+        "messages": [message.model_dump(mode="json") for message in ui],
+    }
+    async with client() as http:
+        assert (await http.post("/api/chat", json=payload)).status_code == 200
+        assert (await http.post("/api/chat", json=payload)).status_code == 200
+
+    assert len(turns) == 2
+    assert turns[0] == turns[1]

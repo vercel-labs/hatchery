@@ -1,7 +1,6 @@
 """Scheduled jobs and their durable execution outbox."""
 
 import datetime
-import json
 import threading
 import urllib.parse
 import uuid
@@ -432,7 +431,7 @@ async def mark_started(execution: Execution, run_id: str) -> bool:
 
 
 async def claim_run(turn_id: str, run_id: str) -> bool:
-    """Atomically let one workflow run own a stable scheduled turn."""
+    """Atomically bind one stable scheduled turn to its Rotor process."""
     if store.use_postgres():
         from store import db
 
