@@ -4,7 +4,7 @@ import threading
 import urllib.error
 import urllib.request
 
-from worker.daemon import main
+from hatchery.worker.daemon import main
 
 
 def test_health_is_authenticated(monkeypatch):

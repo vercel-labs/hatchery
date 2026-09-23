@@ -1,6 +1,6 @@
 import json
 
-from worker import models, store
+from hatchery.worker import models, store
 
 
 async def test_worker_records_round_trip():

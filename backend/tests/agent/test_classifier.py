@@ -1,4 +1,4 @@
-from agent import classifier
+from hatchery.agent import classifier
 
 
 def test_classification_has_strict_gateway_schema():

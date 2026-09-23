@@ -1,6 +1,6 @@
 import asyncio
 
-from worker import models, protocol, sandbox, worker
+from hatchery.worker import models, protocol, sandbox, worker
 
 
 async def _worker(monkeypatch):

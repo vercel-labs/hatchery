@@ -1,7 +1,7 @@
 import fastapi
 import fastapi.testclient
 
-import channels
+from hatchery import channels
 
 
 class FakeHub:

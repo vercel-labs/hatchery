@@ -1,4 +1,4 @@
-from worker import protocol, queue
+from hatchery.worker import protocol, queue
 
 
 async def test_send_uses_worker_topic_and_protocol_id(monkeypatch):

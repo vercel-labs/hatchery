@@ -1,7 +1,14 @@
+[build-system]
+requires = ["uv_build>=0.12.18,<0.13"]
+build-backend = "uv_build"
+
 [project]
-name = "hatchery"
+name = "vercel-hatchery"
 version = "0.1.0"
 description = "a software factory: an agent reachable from slack, github, and its own ui."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.14,<3.15"
 dependencies = [
     "ai[otel,vercel]",
@@ -27,32 +34,23 @@ dev = [
 ]
 
 [tool.vercel]
-entrypoint = "app.server:app"
+entrypoint = "hatchery.app.server:app"
 
 [[tool.vercel.subscribers]]
-entrypoint = "app.server:worker_event"
+entrypoint = "hatchery.app.server:worker_event"
 topics = ["hatchery-worker-events-v1"]
 
 [[tool.vercel.subscribers]]
-entrypoint = "agent.runtime"
+entrypoint = "hatchery.agent.runtime"
 topics = ["hatchery-dispatcher-v1", "hatchery-dispatcher-maintenance-v1"]
 
 [tool.uv]
-package = false
 exclude-newer-package = { rotorcore = "2026-09-17T00:00:00Z" }
 
-[tool.uv.sources]
-ai = { git = "https://github.com/vercel-labs/ai-python", branch = "main" }
-vercel = { git = "https://github.com/vercel/vercel-py", branch = "main", subdirectory = "src/vercel" }
-vercel-cache = { git = "https://github.com/vercel/vercel-py", branch = "main", subdirectory = "src/vercel-cache" }
-vercel-headers = { git = "https://github.com/vercel/vercel-py", branch = "main", subdirectory = "src/vercel-headers" }
-vercel-internal-core = { git = "https://github.com/vercel/vercel-py", branch = "main", subdirectory = "src/vercel-internal-core" }
-vercel-internal-telemetry = { git = "https://github.com/vercel/vercel-py", branch = "main", subdirectory = "src/vercel-internal-telemetry" }
-vercel-oidc = { git = "https://github.com/vercel/vercel-py", branch = "main", subdirectory = "src/vercel-oidc" }
-vercel-queue = { git = "https://github.com/vercel/vercel-py", branch = "main", subdirectory = "src/vercel-queue" }
-vercel-sandbox = { git = "https://github.com/vercel/vercel-py", branch = "main", subdirectory = "src/vercel-sandbox" }
+[tool.uv.build-backend]
+module-name = "hatchery"
+module-root = ""
 
 [tool.pytest.ini_options]
-pythonpath = ["."]
 asyncio_mode = "auto"
 testpaths = ["tests"]

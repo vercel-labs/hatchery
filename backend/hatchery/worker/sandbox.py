@@ -1,0 +1,567 @@
+"""Thin Vercel Sandbox adapter. SDK handles never escape this module."""
+
+import asyncio
+import dataclasses
+import os
+import pathlib
+import urllib.parse
+
+import ai.experimental_telemetry
+import httpx
+from vercel import sandbox as vercel_sandbox
+from vercel.oidc import aio as vercel_oidc
+
+from hatchery import connections
+from hatchery.worker import git, models
+from hatchery.worker.daemon import main as daemon_main
+
+DAEMON_PORT = 8787
+SSH_PORT = 8788
+DAEMON_PATH = "/opt/hatchery/daemon.py"
+DAEMON_STATE_PATH = "/opt/hatchery/daemon-state.json"
+DAEMON_LOG_PATH = "/opt/hatchery/daemon.log"
+GIT_RUNTIME_PATH = "/opt/hatchery/git_runtime.py"
+SHIM_PATH = "/opt/hatchery/bin"
+AI_GATEWAY_HOST = "ai-gateway.vercel.sh"
+AI_GATEWAY_PLACEHOLDER = "sandbox-network-policy-placeholder"
+GITHUB_TOKEN_PLACEHOLDER = "sandbox-network-policy-placeholder"
+QUEUE_TOKEN_PLACEHOLDER = "sandbox-queue-policy-placeholder"
+EXECUTION_TIME_LIMIT = 24 * 60 * 60
+
+
+@dataclasses.dataclass(frozen=True)
+class Provisioned:
+    sandbox_name: str
+    routes: list[models.Route]
+
+
+async def _github_credential(
+    user_id: str | None, *, required: bool = True
+) -> str | None:
+    if user_id is None:
+        return await git.git_credentials()
+    try:
+        return await connections.github_token(user_id)
+    except connections.ConnectionRequired as error:
+        if not required:
+            return None
+        raise RuntimeError(
+            "connect GitHub before creating a repository sandbox"
+        ) from error
+
+
+async def _git_identity(user_id: str | None) -> tuple[str, str] | None:
+    if user_id is None:
+        return None
+    connection = await connections.github_identity(user_id)
+    if connection is None:
+        return None
+    login = str(connection.get("login") or "")
+    github_id = str(connection.get("id") or "")
+    if not login or not github_id:
+        return None
+    return str(
+        connection.get("name") or login
+    ), f"{github_id}+{login}@users.noreply.github.com"
+
+
+async def _canonicalize_repos(spec: models.WorkerSpec, credential: str | None) -> None:
+    if not spec.repos or not credential:
+        return
+    headers = {
+        "accept": "application/vnd.github+json",
+        "authorization": f"Bearer {credential}",
+        "x-github-api-version": "2022-11-28",
+    }
+    canonical = []
+    async with httpx.AsyncClient(
+        base_url="https://api.github.com",
+        headers=headers,
+        timeout=30,
+        follow_redirects=True,
+    ) as client:
+        for repo in spec.repos:
+            response = await client.get(f"/repos/{repo}")
+            response.raise_for_status()
+            canonical.append(str(response.json()["full_name"]))
+    spec.repos = canonical
+
+
+async def _credentials(
+    spec: models.WorkerSpec, user_id: str | None, *, required: bool
+) -> tuple[str | None, tuple[str, str] | None]:
+    github = await _github_credential(user_id, required=required)
+    identity = await _git_identity(user_id)
+    await _canonicalize_repos(spec, github)
+    return github, identity
+
+
+async def _configure_repo_remotes(box, spec: models.WorkerSpec) -> None:
+    for repo in spec.repos:
+        await box.run_process(
+            "git",
+            [
+                "-C",
+                f"/vercel/{repo.split('/')[-1]}",
+                "remote",
+                "set-url",
+                "origin",
+                f"https://github.com/{repo}.git",
+            ],
+            check=True,
+            capture_output=True,
+        )
+
+
+async def provision(
+    worker_id: str,
+    spec: models.WorkerSpec,
+    daemon_token: str,
+    *,
+    user_id: str | None = None,
+) -> Provisioned:
+    name = f"hatchery-{worker_id}"
+    credential, identity = await _credentials(
+        spec, user_id, required=bool(spec.repos)
+    )
+    network_policy = await _network_policy(credential, os.environ.get("VERCEL_REGION"))
+    source = None
+    if spec.repos:
+        revision = spec.git_sha or spec.branch
+        source = vercel_sandbox.GitSource(
+            url=f"https://github.com/{spec.repos[0]}.git",
+            revision=revision,
+            username="x-access-token" if credential else None,
+            password=credential,
+        )
+    vcpus, memory = spec.resolved_resources()
+    resources = vercel_sandbox.SandboxResources(vcpus=vcpus, memory=memory)
+    box, created = await vercel_sandbox.get_or_create_sandbox(
+        name=name,
+        source=source,
+        ports=list(dict.fromkeys([*spec.ports, DAEMON_PORT, SSH_PORT])),
+        resources=resources,
+        persistent=True,
+        execution_time_limit=EXECUTION_TIME_LIMIT,
+        network_policy=network_policy,
+        env={"AI_GATEWAY_API_KEY": AI_GATEWAY_PLACEHOLDER},
+        tags={
+            "hatchery-worker": worker_id,
+            "hatchery-size": spec.size or "legacy",
+        },
+    )
+    await box.update(execution_time_limit=EXECUTION_TIME_LIMIT)
+    await box.update_network_policy(await _network_policy(credential, box.region))
+    process = None
+    if created:
+        process = await _bootstrap(
+            box,
+            worker_id,
+            spec,
+            daemon_token,
+            identity=identity,
+        )
+    routes = [models.Route(port=route.port, url=route.url) for route in box.routes]
+    await repair_daemon(box, worker_id, spec, daemon_token, routes, process=process)
+    return Provisioned(name, routes)
+
+
+async def is_live(name: str) -> bool:
+    """Check sandbox liveness without resuming it."""
+    try:
+        box = await vercel_sandbox.get_sandbox(name=name)
+    except Exception:
+        return False
+    return box.status == vercel_sandbox.SandboxStatus.RUNNING
+
+
+async def stop(name: str) -> None:
+    box = await vercel_sandbox.get_sandbox(name=name)
+    await box.stop()
+
+
+async def destroy(name: str) -> None:
+    box = await vercel_sandbox.get_sandbox(name=name)
+    await box.destroy()
+
+
+async def prepare_for_command(
+    record: models.Worker, *, actor_user_id: str | None = None
+) -> None:
+    """Acquire a live session, rotate Queue auth, and verify the daemon."""
+    async with ai.experimental_telemetry.span("sandbox.prepare") as span:
+        span.set_attrs(
+            {"chat.id": record.chat_id, "worker.id": record.id},
+            sandbox_name=record.sandbox_name,
+            worker_state=record.status,
+            sandbox_size=record.spec.size or "legacy",
+            sandbox_vcpus=record.spec.resolved_resources()[0],
+            sandbox_memory_mb=record.spec.resolved_resources()[1],
+        )
+        box = await vercel_sandbox.resume_sandbox(name=record.sandbox_name)
+        span.set_attrs(region=box.region or "")
+        await box.update(execution_time_limit=EXECUTION_TIME_LIMIT)
+        user_id = actor_user_id if actor_user_id is not None else record.user_id
+        credential, identity = await _credentials(
+            record.spec, user_id, required=bool(record.spec.repos)
+        )
+        await box.update_network_policy(await _network_policy(credential, box.region))
+        await git.configure(box, identity)
+        await _configure_repo_remotes(box, record.spec)
+        routes = [models.Route(port=route.port, url=route.url) for route in box.routes]
+        async with ai.experimental_telemetry.span("sandbox.daemon.repair") as repair:
+            repair.set_attrs(
+                {"worker.id": record.id}, daemon_version=daemon_main.VERSION
+            )
+            await repair_daemon(
+                box, record.id, record.spec, record.daemon_token, routes
+            )
+
+
+async def prepare_for_tty(record: models.Worker) -> None:
+    """Resume a sandbox without replacing the daemon that owns its TTY sessions."""
+    async with ai.experimental_telemetry.span("sandbox.tty.prepare") as span:
+        span.set_attrs(
+            {"chat.id": record.chat_id, "worker.id": record.id},
+            sandbox_name=record.sandbox_name,
+        )
+        box = await vercel_sandbox.resume_sandbox(name=record.sandbox_name)
+        span.set_attrs(region=box.region or "")
+        await box.update(execution_time_limit=EXECUTION_TIME_LIMIT)
+
+
+async def recover_daemon(record: models.Worker) -> None:
+    """Repair daemon control and let its persisted active-task set resume fx."""
+    box = await vercel_sandbox.get_sandbox(name=record.sandbox_name)
+    await repair_daemon(box, record.id, record.spec, record.daemon_token, record.routes)
+
+
+async def repair_daemon(
+    box,
+    worker_id: str,
+    spec: models.WorkerSpec,
+    token: str,
+    routes: list[models.Route],
+    *,
+    process=None,
+) -> None:
+    daemon_route = next((route for route in routes if route.port == DAEMON_PORT), None)
+    if daemon_route is None:
+        raise RuntimeError("sandbox did not expose the daemon route")
+    if process is None:
+        try:
+            health = await _daemon_health(daemon_route.url, token)
+            if (
+                health.get("ok") is True
+                and health.get("version") == daemon_main.VERSION
+                and health.get("queue_connected") is True
+                and health.get("event_deployment")
+                == os.environ.get("VERCEL_DEPLOYMENT_ID")
+            ):
+                return
+        except httpx.HTTPError, ValueError:
+            pass
+        await box.fs.mkdir("/opt/hatchery")
+        await box.fs.write_text(DAEMON_PATH, daemon_main.source(), mode=0o755)
+        process = await _start_daemon(box, worker_id, spec, token)
+    health = await _wait_for_daemon(daemon_route.url, token, process)
+    if health.get("ok") is not True or health.get("version") != daemon_main.VERSION:
+        raise RuntimeError("sandbox daemon returned an incompatible health response")
+    if health.get("queue_connected") is not True:
+        raise RuntimeError(
+            f"sandbox daemon Queue connection failed: {health.get('queue_error') or 'not connected'}"
+        )
+
+
+async def _bootstrap(
+    box,
+    worker_id: str,
+    spec: models.WorkerSpec,
+    token: str,
+    *,
+    identity: tuple[str, str] | None = None,
+):
+    await box.fs.mkdir("/opt/hatchery")
+    await box.fs.mkdir(SHIM_PATH)
+    await box.fs.write_text(DAEMON_PATH, daemon_main.source(), mode=0o755)
+    await box.fs.write_text(
+        GIT_RUNTIME_PATH,
+        pathlib.Path(git.__file__).read_text(encoding="utf-8"),
+        mode=0o755,
+    )
+    shim = f'#!/bin/sh\nexec python3 {GIT_RUNTIME_PATH} $(basename "$0") "$@"\n'
+    await box.fs.write_text(f"{SHIM_PATH}/git", shim, mode=0o755)
+    await box.fs.write_text(f"{SHIM_PATH}/gh", shim, mode=0o755)
+    await box.run_process(
+        "/bin/sh",
+        [
+            "-lc",
+            "set -e; python3 -c 'from vercel import connect, queue; import asyncssh, websockets' 2>/dev/null || "
+            "python3 -m pip install --disable-pip-version-check 'vercel-queue==0.7.3' "
+            "'vercel-connect' 'asyncssh>=2.21,<3' 'websockets>=15,<17'; "
+            "command -v gh >/dev/null || true",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    await git.configure(box, identity)
+    for repo in spec.repos[1:]:
+        await box.run_process(
+            "git",
+            [
+                "clone",
+                f"https://github.com/{repo}.git",
+                f"/vercel/{repo.split('/')[-1]}",
+            ],
+            check=True,
+            capture_output=True,
+        )
+    if spec.setup_script:
+        await box.run_process(
+            "/bin/sh",
+            ["-lc", spec.setup_script],
+            env={"GH_TOKEN": GITHUB_TOKEN_PLACEHOLDER},
+            check=True,
+            capture_output=True,
+        )
+    return await _start_daemon(box, worker_id, spec, token)
+
+
+async def _start_daemon(
+    box,
+    worker_id: str,
+    spec: models.WorkerSpec,
+    token: str,
+):
+    command = " ".join(
+        [
+            "exec python3",
+            DAEMON_PATH,
+            "--port",
+            str(DAEMON_PORT),
+            "--worker-id",
+            worker_id,
+            "--workspace",
+            _workspace(spec),
+            "--state",
+            DAEMON_STATE_PATH,
+        ]
+    )
+    return await box.create_process(
+        "/bin/sh",
+        [
+            "-lc",
+            "set -e; "
+            f'if [ "$({daemon_main.FX_BINARY} --version 2>/dev/null)" != "{daemon_main.FX_VERSION}" ]; then '
+            f"curl -fsSL https://fx.sh/setup.sh | FX_INSTALL_DIR={SHIM_PATH} bash -s -- v{daemon_main.FX_VERSION}; fi; "
+            f'test "$({daemon_main.FX_BINARY} --version)" = "{daemon_main.FX_VERSION}"; '
+            f"pkill -f '^python3 {DAEMON_PATH}( |$)' 2>/dev/null || true; "
+            f"{command} >>{DAEMON_LOG_PATH} 2>&1",
+        ],
+        env=_daemon_env(worker_id, spec, token, region=box.region),
+    )
+
+
+async def probe_route(
+    record: models.Worker, port: int, path: str = "/"
+) -> httpx.Response:
+    """Probe one declared application route; internal control routes are not exposed."""
+    if port not in record.spec.ports:
+        raise ValueError("port is not declared by this worker")
+    route = next((item for item in record.routes if item.port == port), None)
+    if route is None:
+        raise RuntimeError("sandbox route is unavailable")
+    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+        response = await client.get(f"{route.url.rstrip('/')}/{path.lstrip('/')}")
+        response.raise_for_status()
+        return response
+
+
+async def snapshot(record: models.Worker, snapshot_id: str | None = None) -> str:
+    """Create a filesystem snapshot, or restore one and restart the daemon."""
+    box = await vercel_sandbox.get_sandbox(name=record.sandbox_name)
+    if snapshot_id is None:
+        created = await box.snapshot()
+        return created.id
+    await box.stop()
+    await box.update(current_snapshot_id=snapshot_id)
+    box = await vercel_sandbox.resume_sandbox(name=record.sandbox_name)
+    credential, identity = await _credentials(
+        record.spec, record.user_id, required=False
+    )
+    await box.update_network_policy(await _network_policy(credential, box.region))
+    await git.configure(box, identity)
+    routes = [models.Route(port=route.port, url=route.url) for route in box.routes]
+    await repair_daemon(box, record.id, record.spec, record.daemon_token, routes)
+    return snapshot_id
+
+
+async def _network_policy(github_token: str | None, region: str | None):
+    oidc_token = await vercel_oidc.get_vercel_oidc_token()
+    allow = dict(git.github_network_policy(github_token).allow)
+    allow[AI_GATEWAY_HOST] = (
+        vercel_sandbox.NetworkPolicyRule(
+            transform=[
+                vercel_sandbox.NetworkPolicyTransform(
+                    headers={
+                        "Authorization": f"Bearer {oidc_token}",
+                        "ai-gateway-auth-method": "oidc",
+                    }
+                )
+            ]
+        ),
+    )
+    if region:
+        allow[f"{region}.vercel-queue.com"] = (
+            vercel_sandbox.NetworkPolicyRule(
+                match=vercel_sandbox.NetworkPolicyRequestMatcher(
+                    headers=[
+                        vercel_sandbox.NetworkPolicyKeyValueMatcher(
+                            key=vercel_sandbox.NetworkPolicyMatcher.exact(
+                                "authorization"
+                            ),
+                            value=vercel_sandbox.NetworkPolicyMatcher.exact(
+                                f"Bearer {QUEUE_TOKEN_PLACEHOLDER}"
+                            ),
+                        )
+                    ]
+                ),
+                transform=[
+                    vercel_sandbox.NetworkPolicyTransform(
+                        headers={"Authorization": f"Bearer {oidc_token}"}
+                    )
+                ],
+            ),
+        )
+    return vercel_sandbox.NetworkPolicy.custom(allow)
+
+
+def daemon_url(record: models.Worker) -> str:
+    route = next((route for route in record.routes if route.port == DAEMON_PORT), None)
+    if route is None:
+        raise RuntimeError("sandbox daemon route is unavailable")
+    return route.url.rstrip("/")
+
+
+def _websocket_route(url: str) -> str:
+    url = url.rstrip("/")
+    if url.startswith("https://"):
+        return "wss://" + url.removeprefix("https://")
+    if url.startswith("http://"):
+        return "ws://" + url.removeprefix("http://")
+    return url
+
+
+def ssh(record: models.Worker) -> tuple[str, dict[str, str]]:
+    """Return the authenticated SSH WebSocket endpoint for any environment."""
+    route = next((route for route in record.routes if route.port == SSH_PORT), None)
+    if route is None:
+        raise RuntimeError("sandbox SSH route is unavailable")
+    return _websocket_route(route.url), {
+        "authorization": f"Bearer {record.daemon_token}"
+    }
+
+
+def tty(record: models.Worker) -> tuple[str, dict[str, str]]:
+    """Return the daemon's authenticated streaming TTY endpoint."""
+    url, headers = ssh(record)
+    return url + "/tty", headers
+
+
+async def daemon_health(record: models.Worker) -> dict:
+    return await _daemon_get(record, "/health")
+
+
+async def tty_sessions(record: models.Worker) -> list[dict]:
+    response = await _daemon_get(record, "/tty")
+    return list(response.get("sessions") or [])
+
+
+async def _daemon_get(record: models.Worker, path: str) -> dict:
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.get(
+            f"{daemon_url(record)}{path}",
+            headers={"authorization": f"Bearer {record.daemon_token}"},
+        )
+        response.raise_for_status()
+        return response.json()
+
+
+async def _daemon_health(url: str, token: str) -> dict:
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.get(
+            f"{url.rstrip('/')}/health",
+            headers={"authorization": f"Bearer {token}"},
+        )
+        response.raise_for_status()
+        return response.json()
+
+
+async def _wait_for_daemon(url: str, token: str, process=None) -> dict:
+    error = None
+    for attempt in range(20):
+        try:
+            health = await _daemon_health(url, token)
+            if health.get("queue_connected") is True:
+                return health
+            error = RuntimeError(
+                health.get("queue_error") or "sandbox daemon Queue is not connected"
+            )
+        except (httpx.HTTPError, ValueError) as current:
+            error = current
+        if process is not None:
+            await process.refresh()
+            if process.returncode is not None:
+                _, stderr = await process.communicate()
+                detail = (stderr or "").strip()
+                raise RuntimeError(
+                    f"sandbox daemon exited with {process.returncode}: {detail}"
+                ) from error
+        if attempt < 19:
+            await asyncio.sleep(1)
+    raise RuntimeError("sandbox daemon did not become Queue-ready") from error
+
+
+def _workspace(spec: models.WorkerSpec) -> str:
+    if spec.repos:
+        return f"/vercel/{spec.repos[0].split('/')[-1]}"
+    return "/vercel"
+
+
+def _daemon_env(
+    worker_id: str,
+    spec: models.WorkerSpec,
+    token: str,
+    *,
+    region: str | None = None,
+) -> dict[str, str]:
+    env = {
+        "HATCHERY_DAEMON_TOKEN": token,
+        "HATCHERY_WORKER_ID": worker_id,
+        "HATCHERY_WORKSPACE": _workspace(spec),
+        "FX_PERMISSION_MODE": "yolo",
+        "FX_AUTO_UPGRADE": "0",
+        "AI_GATEWAY_API_KEY": AI_GATEWAY_PLACEHOLDER,
+        "VERCEL_QUEUE_TOKEN": QUEUE_TOKEN_PLACEHOLDER,
+    }
+    for name in (
+        "GITHUB_CONNECTOR",
+        "VERCEL_QUEUE_BASE_URL",
+        "VERCEL_REGION",
+    ):
+        if value := os.environ.get(name):
+            env[name] = value
+    if deployment := os.environ.get("VERCEL_DEPLOYMENT_ID"):
+        env["HATCHERY_EVENT_DEPLOYMENT"] = deployment
+    if os.environ.get("VERCEL_QUEUE_TOKEN") == "vc-dev-token":
+        env["VERCEL_QUEUE_TOKEN"] = "vc-dev-token"
+    if region and "VERCEL_REGION" not in env:
+        env["VERCEL_REGION"] = region
+    if env.get("VERCEL_QUEUE_TOKEN") == "vc-dev-token":
+        public_url = os.environ.get("HATCHERY_PUBLIC_URL", "").rstrip("/")
+        if not public_url:
+            raise RuntimeError(
+                "HATCHERY_PUBLIC_URL is required to connect a sandbox to vercel dev"
+            )
+        env["VERCEL_QUEUE_BASE_URL"] = f"{public_url}/_svc/_queues"
+    return env

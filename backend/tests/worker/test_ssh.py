@@ -8,8 +8,8 @@ import asyncssh
 import pytest
 import websockets
 
-from worker import models, sandbox
-from worker.daemon import main
+from hatchery.worker import models, sandbox
+from hatchery.worker.daemon import main
 
 
 async def connect(service):

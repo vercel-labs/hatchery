@@ -3,8 +3,8 @@ import json
 
 import pytest
 
-import store
-from store import chats, spaces
+from hatchery import store
+from hatchery.store import chats, spaces
 
 
 async def test_claim_creates_then_reuses():

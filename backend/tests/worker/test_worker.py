@@ -1,9 +1,9 @@
 import ai.experimental_telemetry
 import pytest
 
-from worker import models, protocol, sandbox, worker
-from worker.daemon import VERSION
-from worker.daemon import main as daemon_main
+from hatchery.worker import models, protocol, sandbox, worker
+from hatchery.worker.daemon import VERSION
+from hatchery.worker.daemon import main as daemon_main
 
 
 async def test_create_provisions_and_persists(monkeypatch):

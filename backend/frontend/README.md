@@ -30,4 +30,6 @@ pnpm lint
 pnpm build
 ```
 
-The production build is written to `dist/` and served by FastAPI.
+The production build is written to `../hatchery/static/` so the Python
+package can serve and distribute it. Build it before running `uv build` in
+`backend/`.

@@ -1,7 +1,7 @@
 import pytest
 
-from worker import git, sandbox
-from worker.daemon import main
+from hatchery.worker import git, sandbox
+from hatchery.worker.daemon import main
 
 
 def _requires(owner, capability, scenario):

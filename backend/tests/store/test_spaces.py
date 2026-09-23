@@ -1,8 +1,8 @@
 import pytest
 import pydantic
 
-import models
-from store import spaces
+from hatchery import models
+from hatchery.store import spaces
 
 
 async def test_default_is_created_once():

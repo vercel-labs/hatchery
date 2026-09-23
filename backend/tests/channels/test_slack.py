@@ -5,8 +5,8 @@ import uuid
 import httpx
 import pytest
 
-import channels
-from channels import slack
+from hatchery import channels
+from hatchery.channels import slack
 
 
 @pytest.fixture(autouse=True)

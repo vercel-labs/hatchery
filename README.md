@@ -24,3 +24,7 @@ Point Slack and GitHub triggers at the branch when testing integrations:
 Use [`docs/use-agent-browser.md`](docs/use-agent-browser.md) for browser-driven testing and [`docs/use-braintrust.md`](docs/use-braintrust.md) to inspect agent runs.
 
 The frontend is a Vite React SPA using TanStack Router and is served by FastAPI. The backend uses Rotor and the AI SDK for Python. Hatchery runs Rotor workers on Vercel Queues, uses Vercel Sandboxes for coding agents, Lakebase Postgres on Neon for storage, and Vercel Connect for Slack and GitHub integrations.
+
+## Python distribution
+
+The PyPI distribution is `vercel-hatchery` (imported as `hatchery`). Run `make build` or `make ci` from the repository root. Publishing uses GitHub Actions trusted publishing; see [`backend/README.md`](backend/README.md) for the one-time setup and release steps.

@@ -7,6 +7,12 @@
       "skillPath": "skills/ai/SKILL.md",
       "computedHash": "a77a7d7af28717e2d2f00a9987f1ad66523d9cd939f90163493cfd6bedc2fc6f"
     },
+    "cdn-caching": {
+      "source": "vercel/vercel-plugin",
+      "sourceType": "github",
+      "skillPath": "skills/cdn-caching/SKILL.md",
+      "computedHash": "a60689f16a714b75d6695e5fe4c721f89e2eeb47256682ee67fa63b9884b4b2b"
+    },
     "neon": {
       "source": "neondatabase/agent-skills",
       "sourceType": "github",
@@ -20,10 +26,16 @@
       "computedHash": "9386efb7f97bd96f01d0c84f467e8e6e41be54f73cc1ece9c92f4f1dbd76f10f"
     },
     "shadcn": {
-      "source": "shadcn/ui",
+      "source": "vercel/vercel-plugin",
       "sourceType": "github",
       "skillPath": "skills/shadcn/SKILL.md",
-      "computedHash": "c1a68ee06a668aced9ab2b5fbdea5f989864123794eb2e056b339a072dbb7f10"
+      "computedHash": "540c21ccbc3f47aeab596b7d8cb26c00ab19581bd00da7d5865b1036a544cfce"
+    },
+    "vercel-services": {
+      "source": "vercel/vercel-plugin",
+      "sourceType": "github",
+      "skillPath": "skills/vercel-services/SKILL.md",
+      "computedHash": "11b2ef23bf46bd0605b6e018e2d116ffa8f70d86c2f930062a24e0fc433097e1"
     }
   }
 }

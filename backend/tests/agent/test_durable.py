@@ -5,10 +5,10 @@ import httpx
 import pytest
 import rotor.testing
 
-from agent import durable
-from app import server
-from store import chats, events, spaces
-import worker
+from hatchery.agent import durable
+from hatchery.app import server
+from hatchery.store import chats, events, spaces
+from hatchery import worker
 
 
 async def _chat(prompt: str = "help"):
@@ -254,7 +254,7 @@ async def test_tool_task_uses_trusted_chat_context(monkeypatch):
         seen.append(chat_id)
         return []
 
-    monkeypatch.setattr("agent.sandbox.list_all", list_all)
+    monkeypatch.setattr("hatchery.agent.sandbox.list_all", list_all)
     call = ai.messages.ToolCallPart(
         tool_call_id="call_1", tool_name="list_sandboxes", tool_args="{}"
     )
@@ -472,7 +472,7 @@ async def test_terminal_projection_retries_before_dispatcher_returns_idle(monkey
     async def model_step(_history, _tools, _turn_id):
         return ai.assistant_message("done")
 
-    from store import turns
+    from hatchery.store import turns
 
     original_finish = turns.finish
 
@@ -514,7 +514,7 @@ async def test_terminal_projection_retries_before_dispatcher_returns_idle(monkey
 
 
 async def test_active_turn_repairs_terminal_rotor_process(monkeypatch):
-    from agent import runtime
+    from hatchery.agent import runtime
 
     await events.append(
         "chat_1",

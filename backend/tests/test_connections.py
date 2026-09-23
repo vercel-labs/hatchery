@@ -1,7 +1,7 @@
 import httpx
 import pytest
 
-import connections
+from hatchery import connections
 
 
 def request(headers=None, cookies=None):

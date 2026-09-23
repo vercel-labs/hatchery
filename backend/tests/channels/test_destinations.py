@@ -6,8 +6,8 @@ import urllib.parse
 import httpx
 import pytest
 
-from channels import destinations
-from store import chats, spaces
+from hatchery.channels import destinations
+from hatchery.store import chats, spaces
 
 
 @pytest.fixture

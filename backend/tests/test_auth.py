@@ -6,7 +6,7 @@ import fastapi
 import httpx
 import pytest
 
-import auth
+from hatchery import auth
 
 
 def request(headers=None, cookies=None):

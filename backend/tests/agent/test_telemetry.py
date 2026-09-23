@@ -5,8 +5,8 @@ import braintrust.otel
 import opentelemetry.sdk.resources
 import opentelemetry.sdk.trace
 
-from agent import telemetry
-from store import chats
+from hatchery.agent import telemetry
+from hatchery.store import chats
 
 
 async def test_use_chat_persists_and_reuses_one_trace():

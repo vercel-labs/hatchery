@@ -5,7 +5,7 @@ import types
 import httpx
 import pytest
 
-from worker import models, sandbox
+from hatchery.worker import models, sandbox
 
 
 async def test_provision_creates_persistent_sandbox_and_checks_daemon(monkeypatch):

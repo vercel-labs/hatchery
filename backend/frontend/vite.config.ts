@@ -11,6 +11,10 @@ export default defineConfig({
     }),
     react(),
   ],
+  build: {
+    outDir: "../hatchery/static",
+    emptyOutDir: true,
+  },
   resolve: {
     alias: {
       "@": fileURLToPath(new URL("./src", import.meta.url)),
