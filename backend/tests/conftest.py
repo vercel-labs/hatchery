@@ -19,7 +19,7 @@ def local_store(monkeypatch, tmp_path):
     async def session_user(_session_id):
         return {"id": "user_test", "email": "test@vercel.com"}
 
-    from app import server
+    from hatchery.app import server
 
     monkeypatch.setattr(server.auth, "session_user", session_user)
     monkeypatch.setattr(server.auth, "current_user", lambda request: session_user("test-session"))

@@ -1,4 +1,4 @@
-"""Local dev server: runs the same app as app.server under uvicorn.
+"""Local dev server: runs the same app as hatchery.app.server under uvicorn.
 
 The slack and github channels are vercel connect-only: inbound webhooks are
 forwarded by connect to a deployment, so locally this only verifies the app
@@ -24,7 +24,7 @@ if env.exists():
 
 os.environ.setdefault("FASTAPI_ENV", "development")
 
-from app import server  # noqa: E402
+from hatchery.app import server  # noqa: E402
 
 if __name__ == "__main__":
     print(f"channels: {', '.join(server.bot.channels)}")

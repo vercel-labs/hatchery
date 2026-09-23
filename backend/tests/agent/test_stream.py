@@ -4,9 +4,9 @@ import ai
 import rotor
 import rotor.testing
 
-from agent import durable, runtime, stream
-from app import server
-from store import chats, events, spaces
+from hatchery.agent import durable, runtime, stream
+from hatchery.app import server
+from hatchery.store import chats, events, spaces
 
 
 async def _never_terminal(_process_id, _turn_id):

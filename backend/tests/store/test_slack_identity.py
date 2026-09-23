@@ -3,7 +3,7 @@ import copy
 import asyncpg
 import pytest
 
-from store import auth
+from hatchery.store import auth
 
 
 class Connection:

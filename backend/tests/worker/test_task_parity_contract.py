@@ -1,7 +1,7 @@
 import pytest
 
-from worker import worker
-from worker.daemon import main
+from hatchery.worker import worker
+from hatchery.worker.daemon import main
 
 
 def _contract(owner, capability, scenario):

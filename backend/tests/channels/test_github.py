@@ -3,8 +3,8 @@ import json
 import httpx
 import pytest
 
-import channels
-from channels import github
+from hatchery import channels
+from hatchery.channels import github
 
 
 @pytest.fixture(autouse=True)

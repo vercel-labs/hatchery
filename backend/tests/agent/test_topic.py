@@ -1,4 +1,4 @@
-from agent import topic
+from hatchery.agent import topic
 
 
 def test_topic_has_strict_gateway_schema():

@@ -1,6 +1,6 @@
 import asyncio
 
-from store import events
+from hatchery.store import events
 
 
 async def test_append_read_tail():

@@ -9,7 +9,7 @@ import os
 
 import pytest
 
-from worker.daemon import main
+from hatchery.worker.daemon import main
 
 
 def _frames(*events, start=1):

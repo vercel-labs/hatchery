@@ -1,8 +1,8 @@
 import json
 import subprocess
 
-from worker import git
-from worker.daemon import main
+from hatchery.worker import git
+from hatchery.worker.daemon import main
 
 
 def completed(code=0, stdout="", stderr=""):

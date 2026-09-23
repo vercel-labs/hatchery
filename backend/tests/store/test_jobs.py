@@ -3,8 +3,8 @@ import datetime
 import ai
 import pytest
 
-import models
-from store import chats, jobs
+from hatchery import models
+from hatchery.store import chats, jobs
 
 
 def test_validate_schedule_accepts_only_five_fields():
@@ -99,7 +99,7 @@ async def test_claim_due_coalesces_and_is_idempotent(monkeypatch):
     assert datetime.datetime.fromisoformat(advanced.next_run_at) > due
     transcript = await chats.get(first[0].chat_id)
     assert transcript is not None
-    from store import events
+    from hatchery.store import events
 
     prompt_records = await events.read(first[0].chat_id, "messages")
     assert len(prompt_records) == 1
@@ -128,7 +128,7 @@ async def test_pause_and_delete_cancel_pending_executions():
     assert await jobs.lease_pending(now) == []
     assert await jobs.claim_run(paused_execution.turn_id, "run_late") is False
     assert await chats.get(paused_execution.chat_id) is None
-    from store import events
+    from hatchery.store import events
 
     assert await events.read(paused_execution.chat_id, "messages") == []
 

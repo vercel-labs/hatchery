@@ -2,8 +2,8 @@ import contextlib
 
 import pytest
 
-import models
-from agent import sandbox
+from hatchery import models
+from hatchery.agent import sandbox
 
 
 def test_launch_has_strict_gateway_schema():

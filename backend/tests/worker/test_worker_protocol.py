@@ -1,6 +1,6 @@
 import pytest
 
-from worker import protocol
+from hatchery.worker import protocol
 
 
 def test_command_envelope_is_versioned_and_strict():

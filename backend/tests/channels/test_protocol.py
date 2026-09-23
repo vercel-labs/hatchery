@@ -1,4 +1,4 @@
-from channels import protocol
+from hatchery.channels import protocol
 
 
 def test_event_envelope():

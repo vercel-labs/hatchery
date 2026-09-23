@@ -3,7 +3,7 @@ import threading
 
 import pytest
 
-from store import notes, spaces
+from hatchery.store import notes, spaces
 
 
 async def test_notes_are_scoped_sorted_and_revision_checked():

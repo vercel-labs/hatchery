@@ -10,10 +10,10 @@ from websockets.http11 import Response
 
 import ai
 import ai.experimental_telemetry
-import channels
-import models
-from app import server
-from store import chats, events
+from hatchery import channels
+from hatchery import models
+from hatchery.app import server
+from hatchery.store import chats, events
 
 
 def client() -> httpx.AsyncClient:

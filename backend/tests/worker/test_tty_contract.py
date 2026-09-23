@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from worker.daemon import main
+from hatchery.worker.daemon import main
 
 
 def _session(tmp_path, command):

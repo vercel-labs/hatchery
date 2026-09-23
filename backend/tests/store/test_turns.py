@@ -1,4 +1,4 @@
-from store import events, turns
+from hatchery.store import events, turns
 
 
 async def test_active_folds_duplicate_and_late_lifecycle_records():

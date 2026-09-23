@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from worker.daemon import main
+from hatchery.worker.daemon import main
 
 
 def _require(subject, name):
