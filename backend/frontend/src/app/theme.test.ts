@@ -4,7 +4,7 @@ import test from "node:test";
 
 const globals = readFileSync(new URL("./globals.css", import.meta.url), "utf8");
 const typeset = readFileSync(new URL("./typeset.css", import.meta.url), "utf8");
-const shell = readFileSync(new URL("./(app)/app-shell.tsx", import.meta.url), "utf8");
+const shell = readFileSync(new URL("./app-shell.tsx", import.meta.url), "utf8");
 const terminal = readFileSync(
   new URL("../components/terminal-pane.tsx", import.meta.url),
   "utf8",

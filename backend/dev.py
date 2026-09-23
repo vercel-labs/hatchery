@@ -22,6 +22,8 @@ if env.exists():
             key, value = line.split("=", 1)
             os.environ.setdefault(key, value.strip('"'))
 
+os.environ.setdefault("FASTAPI_ENV", "development")
+
 from app import server  # noqa: E402
 
 if __name__ == "__main__":

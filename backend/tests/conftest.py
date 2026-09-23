@@ -1,4 +1,9 @@
+import os
+
 import pytest
+
+
+os.environ.setdefault("FASTAPI_ENV", "development")
 
 
 @pytest.fixture(autouse=True)

@@ -21,6 +21,7 @@ import html
 import json
 import logging
 import os
+import pathlib
 import re
 import urllib.parse
 
@@ -382,8 +383,8 @@ async def browser_session(request: fastapi.Request, call_next):
     return await call_next(request)
 
 
-# local dev: the ui talks to :8000 directly for streams — next's dev proxy
-# severs quiet/long sse responses (and can't proxy websockets at all).
+# Local development keeps streams and WebSockets direct to :8000 while Vite
+# serves the UI on :3000.
 app.add_middleware(
     fastapi.middleware.cors.CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
@@ -1851,3 +1852,6 @@ async def _run_inbound_turn(chat_id: str, actor_user_id: str | None = None) -> N
 
 
 app.include_router(bot.router)
+
+frontend_dist = pathlib.Path(__file__).resolve().parents[1] / "frontend" / "dist"
+app.frontend("/", directory=frontend_dist, fallback="index.html")

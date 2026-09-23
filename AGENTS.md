@@ -6,9 +6,9 @@ github, and its own ui.
 hatchery monitors repos, can respond to issues, pings on slack, or cron
 schedule. the output artifacts include reports, notifications, issues, and prs.
 
-1. deployed to vercel as two services (frontend + backend, see vercel.json)
-2. fastapi backend; next.js frontend (stock shadcn on base-ui primitives)
-3. dogfoods ai sdk for python, workflows, sandbox, connect
+1. deployed to vercel as one fastapi service (see vercel.json)
+2. vite + tanstack router frontend, statically served by fastapi (stock shadcn on base-ui primitives)
+3. dogfoods ai sdk for python, rotor, sandbox, connect
 
 ## answer style
 
@@ -26,7 +26,7 @@ do not overcomplicate. this is a test application, it should prioritize clarity.
 ## project setup
 
 1. use uv to manage python (run inside `backend/`)
-2. use pnpm to manage typescript (run inside `frontend/`)
+2. use pnpm to manage typescript (run inside `backend/frontend/`)
 
 slack/github webhooks only reach deployments (vercel connect); point them at
 the current branch with `scripts/triggers.sh`.
