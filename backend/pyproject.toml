@@ -49,8 +49,8 @@ exclude-newer-package = { rotorcore = "2026-09-17T00:00:00Z" }
 
 [tool.uv.build-backend]
 module-name = "hatchery"
+module-root = ""
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
 asyncio_mode = "auto"
 testpaths = ["tests"]

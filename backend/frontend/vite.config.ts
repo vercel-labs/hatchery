@@ -12,7 +12,7 @@ export default defineConfig({
     react(),
   ],
   build: {
-    outDir: "../src/hatchery/static",
+    outDir: "../hatchery/static",
     emptyOutDir: true,
   },
   resolve: {
