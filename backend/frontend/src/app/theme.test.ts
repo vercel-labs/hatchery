@@ -4,13 +4,17 @@ import test from "node:test";
 
 const globals = readFileSync(new URL("./globals.css", import.meta.url), "utf8");
 const typeset = readFileSync(new URL("./typeset.css", import.meta.url), "utf8");
-const shell = readFileSync(new URL("./app-shell.tsx", import.meta.url), "utf8");
+// Attention dots on thread rows.
+const shell = readFileSync(
+  new URL("../features/threads/thread-navigation.tsx", import.meta.url),
+  "utf8",
+);
 const terminal = readFileSync(
   new URL("../components/terminal-pane.tsx", import.meta.url),
   "utf8",
 );
 const picker = readFileSync(
-  new URL("../components/space-color-picker.tsx", import.meta.url),
+  new URL("../components/agent-color-picker.tsx", import.meta.url),
   "utf8",
 );
 

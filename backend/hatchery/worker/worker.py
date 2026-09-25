@@ -87,7 +87,7 @@ async def create(
                 {"chat.id": chat_id, "worker.id": record.id},
                 repo_count=len(spec.repos),
                 port_count=len(spec.ports),
-                sandbox_size=spec.size or "legacy",
+                sandbox_size=spec.size,
                 sandbox_vcpus=vcpus,
                 sandbox_memory_mb=memory,
             )
@@ -132,12 +132,6 @@ async def stop(worker_id: str) -> models.Worker:
 async def destroy(worker_id: str) -> None:
     record = await _required(worker_id)
     await sandbox.destroy(record.sandbox_name)
-    for task in await store.list_tasks(record.chat_id):
-        if task.worker_id == record.id:
-            await store.delete_task(task.id)
-    for terminal in await store.list_terminals(record.chat_id):
-        if terminal.worker_id == record.id:
-            await store.delete_terminal(terminal.id)
     await store.delete(record.id)
 
 

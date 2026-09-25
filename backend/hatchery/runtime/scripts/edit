@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""edit FILE OLD NEW [--all]  -  replace an exact string in a file.
+
+Refuses to guess: OLD must occur exactly once unless --all is given. Prints a
+short diff of what changed. Use this instead of sed for surgical edits.
+"""
+
+import argparse
+import difflib
+import sys
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("file")
+    parser.add_argument("old")
+    parser.add_argument("new")
+    parser.add_argument("--all", action="store_true", help="replace every occurrence")
+    args = parser.parse_args()
+
+    try:
+        with open(args.file, encoding="utf-8") as handle:
+            before = handle.read()
+    except FileNotFoundError:
+        print(f"edit: no such file: {args.file}", file=sys.stderr)
+        return 1
+    except UnicodeDecodeError:
+        print(f"edit: {args.file} is not UTF-8 text", file=sys.stderr)
+        return 1
+
+    count = before.count(args.old)
+    if count == 0:
+        print("edit: OLD not found in file (check whitespace and quoting)", file=sys.stderr)
+        return 1
+    if count > 1 and not args.all:
+        print(f"edit: OLD occurs {count} times; add surrounding context or pass --all", file=sys.stderr)
+        return 1
+
+    after = before.replace(args.old, args.new) if args.all else before.replace(args.old, args.new, 1)
+    with open(args.file, "w", encoding="utf-8") as handle:
+        handle.write(after)
+
+    diff = difflib.unified_diff(
+        before.splitlines(), after.splitlines(), f"a/{args.file}", f"b/{args.file}", lineterm="", n=2
+    )
+    print("\n".join(list(diff)[:120]))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

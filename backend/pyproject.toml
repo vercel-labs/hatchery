@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "vercel-hatchery"
-version = "0.1.0"
+version = "0.2.0.dev0"
 description = "a software factory: an agent reachable from slack, github, and its own ui."
 readme = "README.md"
 license = "Apache-2.0"
@@ -24,6 +24,9 @@ dependencies = [
     "websockets>=15,<17",
     "croniter>=6,<7",
     "rotorcore[vercel]==0.0.2",
+    "modelsdotdev>=0.20260818.0",
+    "pyyaml>=6",
+    "cryptography>=48",
 ]
 
 [dependency-groups]

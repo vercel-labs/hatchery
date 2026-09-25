@@ -1,67 +1,49 @@
-import { Link, useLocation, useNavigate } from "@tanstack/react-router";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useLocation, useNavigate } from "@tanstack/react-router";
+import { Activity, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArchiveIcon,
-  BookMarkedIcon,
+  Braces,
   CheckIcon,
-  ChevronsUpDownIcon,
-  FilterIcon,
-  FolderGitIcon,
+  FolderGit2,
+  FolderOpen,
   GitBranchIcon,
-  LinkIcon,
-  PauseIcon,
-  PlayIcon,
-  TriangleAlertIcon,
   LogOutIcon,
-  PencilIcon,
-  PlusIcon,
   MessageSquareIcon,
-  TerminalIcon,
-  Trash2Icon,
+  Settings2,
   XIcon,
 } from "lucide-react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 
 import {
   apiBase,
   apiFetch,
+  type Agent,
+  type AgentWarning,
   type Chat,
-  type Job,
-  type Resource,
-  type Space,
-  type SpaceWarning,
   type User,
 } from "@/lib/api";
-import {
-  chatAttentionFilterLabel,
-  chatAttentionLabel,
-  chatSidebarText,
-  filterSidebarChats,
-  selectSidebarSpace,
-  type ChatSidebarFilters,
-} from "@/lib/chat-sidebar";
-import type { ChatUIMessage } from "@/lib/messages";
-import {
-  type AccentColor,
-  normalizeAccentColor,
-  resolveSpaceColor,
-} from "@/lib/space-colors";
-import { cn } from "@/lib/utils";
-import { ChatView, NewChatView } from "@/components/chat";
+import type { AgentThreads } from "@/lib/api-types";
+import { chatSidebarText, sidebarThreads } from "@/lib/chat-sidebar";
+import { type AccentColor } from "@/lib/agent-colors";
+import { number } from "@/lib/format";
+import { useApi } from "@/hooks/use-api";
+import { AgentSwitcher } from "@/app/agent-switcher";
+import { ConsoleLayoutSkeleton } from "@/app/console-layout-skeleton";
 import {
   createChatPersister,
+  newChatId,
   startsFreshDraft,
-  type NewChatHandoff,
   type NewChatRequest,
 } from "@/components/new-chat-state";
-import { SandboxForm } from "@/components/sandbox-form";
-import { SpaceColorPicker } from "@/components/space-color-picker";
-import { SpaceNotes } from "@/components/space-notes";
-import { TerminalPane, type SandboxWorkspace } from "@/components/terminal-pane";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { Badge } from "@/components/ui/badge";
+import { AgentColorPicker } from "@/components/agent-color-picker";
+import { ChatOriginIcon } from "@/components/chat-origin-icon";
+import { ResizeHandle } from "@/components/resize-handle";
+import { AgentApiView } from "@/features/agents/agent-api-view";
+import { AgentPage } from "@/features/agents/agent-page";
+import { BudgetHoldNotice } from "@/features/agents/budget-hold-notice";
+import { RepositoryView } from "@/features/repository/repository-view";
+import { Conversation } from "@/features/threads/conversation";
+import { ThreadNavigation } from "@/features/threads/thread-navigation";
+import { threadsWithObjectives } from "@/features/threads/thread-tree";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -71,33 +53,12 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import {
-  DropdownMenu,
-  DropdownMenuCheckboxItem,
-  DropdownMenuContent,
-  DropdownMenuGroup,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import {
   Empty,
   EmptyDescription,
   EmptyHeader,
   EmptyTitle,
 } from "@/components/ui/empty";
-import {
-  Field,
-  FieldDescription,
-  FieldError,
-  FieldGroup,
-  FieldLabel,
-} from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import { Separator } from "@/components/ui/separator";
-import { Textarea } from "@/components/ui/textarea";
 import {
   Sidebar,
   SidebarContent,
@@ -112,149 +73,151 @@ import {
   SidebarMenuAction,
   SidebarMenuButton,
   SidebarMenuItem,
-  SidebarMenuSkeleton,
   SidebarProvider,
   SidebarTrigger,
+  useSidebar,
 } from "@/components/ui/sidebar";
 
 type Selection =
-  | { kind: "space"; id: string }
+  | { kind: "agent" | "api"; id: string }
   | { kind: "chat"; id: string }
+  | { kind: "repository" }
   | null;
 
-function ChatOriginIcon({ trigger }: { trigger: string }) {
-  const path = trigger.startsWith("slack:")
-    ? "M3.427 10.079c0 .92-.743 1.663-1.663 1.663S.1 10.998.1 10.079c0-.92.743-1.663 1.663-1.663h1.663zm.831 0c0-.92.744-1.663 1.663-1.663.92 0 1.663.743 1.663 1.663v4.157c0 .92-.743 1.663-1.663 1.663s-1.663-.743-1.663-1.663zM5.921 3.402c-.92 0-1.663-.744-1.663-1.663 0-.92.744-1.663 1.663-1.663.92 0 1.663.743 1.663 1.663v1.663zm0 .844c.92 0 1.663.743 1.663 1.663s-.743 1.663-1.663 1.663h-4.17c-.92 0-1.663-.744-1.663-1.663 0-.92.743-1.663 1.663-1.663zM12.586 5.909c0-.92.743-1.663 1.663-1.663s1.663.743 1.663 1.663-.744 1.663-1.663 1.663h-1.663zm-.832 0c0 .92-.743 1.663-1.663 1.663s-1.663-.744-1.663-1.663v-4.17c0-.92.744-1.663 1.663-1.663.92 0 1.663.743 1.663 1.663zM10.091 12.573c.92 0 1.663.743 1.663 1.663s-.743 1.663-1.663 1.663-1.663-.743-1.663-1.663v-1.663zm0-.831c-.92 0-1.663-.744-1.663-1.663 0-.92.744-1.663 1.663-1.663h4.17c.92 0 1.663.743 1.663 1.663s-.743 1.663-1.663 1.663z"
-    : trigger.startsWith("github:")
-      ? "M8 0C3.58 0 0 3.579 0 7.997a7.99 7.99 0 0 0 5.47 7.588c.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.939-.82-1.129-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.949 0-.87.31-1.589.82-2.149-.08-.2-.36-1.02.08-2.12 0 0 .67-.209 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.039 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.068-1.87 3.748-3.65 3.948.29.25.54.73.54 1.48 0 1.07-.01 1.929-.01 2.199 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 7.997 7.996 7.996 0 0 0 8 0"
-      : "M7.157 0 2.333 9.408l-.56 1.092H7a.25.25 0 0 1 .25.25V16h1.593l4.824-9.408.56-1.092H9a.25.25 0 0 1-.25-.25V0zM7 9H4.227L7.25 3.106V5.25C7.25 6.216 8.034 7 9 7h2.773L8.75 12.894V10.75A1.75 1.75 0 0 0 7 9";
-  return (
-    <svg aria-hidden="true" viewBox="0 0 16 16" className="size-4 shrink-0">
-      <path fill="currentColor" fillRule="evenodd" d={path} clipRule="evenodd" />
-    </svg>
-  );
+const AGENT_KEY = "hatchery:agent";
+
+export function parseSelection(pathname: string): Selection {
+  const agent = pathname.match(/^\/agents\/([^/]+)(\/api)?$/);
+  if (agent)
+    return { kind: agent[2] ? "api" : "agent", id: decodeURIComponent(agent[1]) };
+  const chat = pathname.match(/^\/chats\/([^/]+)$/);
+  if (chat) return { kind: "chat", id: decodeURIComponent(chat[1]) };
+  if (pathname === "/repository") return { kind: "repository" };
+  return null;
 }
 
-function ChatSidebarItem({
-  chat,
-  spaceColor,
-  selected,
-  onArchiveChange,
+// Every roster, for the Repository's proposal list across agents.
+function AllRosters({
+  agents,
+  children,
 }: {
-  chat: Chat;
-  spaceColor: string | undefined;
-  selected: boolean;
-  onArchiveChange: (chat: Chat, archived: boolean) => void;
+  agents: Agent[];
+  children: (rosters: AgentThreads[], refresh: () => Promise<unknown>) => React.ReactNode;
 }) {
-  const archived = chat.archived_at !== null;
-  const attentionLabel = chatAttentionLabel(chat);
-  const text = chatSidebarText(chat);
+  const [rosters, setRosters] = useState<AgentThreads[]>([]);
+  const load = useCallback(async () => {
+    const found = await Promise.all(
+      agents.map(async (agent) => {
+        const response = await apiFetch(
+          `/api/agents/${encodeURIComponent(agent.id)}/threads`,
+        ).catch(() => null);
+        return response?.ok ? ((await response.json()) as AgentThreads) : null;
+      }),
+    );
+    setRosters(found.filter((item): item is AgentThreads => item !== null));
+  }, [agents]);
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => void load());
+    return () => cancelAnimationFrame(frame);
+  }, [load]);
+  return <>{children(rosters, load)}</>;
+}
+
+// Keeps navigation widths on the sidebar wrapper, like agentmesh's layout.
+function SidebarResize({
+  containerRef,
+  paneRef,
+}: {
+  containerRef: React.RefObject<HTMLDivElement | null>;
+  paneRef: React.RefObject<HTMLDivElement | null>;
+}) {
+  const { state } = useSidebar();
+  if (state === "collapsed") return null;
   return (
-    <SidebarMenuItem>
-      <SidebarMenuButton
-        className="relative pl-3"
-        isActive={selected}
-        aria-current={selected ? "page" : undefined}
-        render={<Link to="/chats/$chatId" params={{ chatId: chat.id }} />}
-        tooltip={text.label}
-        aria-label={text.label}
-      >
-        <span
-          className="absolute inset-y-1 left-0 w-0.5 rounded-full"
-          style={{ backgroundColor: resolveSpaceColor(spaceColor) }}
-        />
-        {attentionLabel && (
-          <div
-            className={cn(
-              "size-2 shrink-0 rounded-full",
-              chat.attention_reason === "result_available"
-                ? "bg-status-green-700"
-                : "bg-status-amber-700",
-            )}
-            title={attentionLabel}
-            aria-label={attentionLabel}
-          />
-        )}
-        <ChatOriginIcon trigger={chat.trigger} />
-        <span className="truncate">
-          {text.author ? <span className="font-medium">{text.author}</span> : null}
-          {text.author && !text.fragment.startsWith("'") ? " " : null}
-          {text.fragment}
-        </span>
-      </SidebarMenuButton>
-      <SidebarMenuAction
-        showOnHover
-        aria-label={`${archived ? "Unarchive" : "Archive"} ${text.label}`}
-        title={archived ? "Unarchive chat" : "Archive chat"}
-        onClick={() => onArchiveChange(chat, !archived)}
-      >
-        <ArchiveIcon />
-      </SidebarMenuAction>
-    </SidebarMenuItem>
+    <ResizeHandle
+      containerRef={containerRef}
+      paneRef={paneRef}
+      variable="--sidebar-width"
+      direction={1}
+      label="Resize navigation"
+      minimum={208}
+      maximum={416}
+      minimumContent={480}
+      defaultValue={256}
+      className="-ml-px hidden md:block"
+    />
   );
 }
 
 export function AppShell() {
   const pathname = useLocation({ select: (location) => location.pathname });
   const navigate = useNavigate();
-  const spaceMatch = pathname.match(/^\/spaces\/([^/]+)$/);
-  const chatMatch = pathname.match(/^\/chats\/([^/]+)$/);
-  const selection: Selection = spaceMatch
-    ? { kind: "space", id: decodeURIComponent(spaceMatch[1]) }
-    : chatMatch
-      ? { kind: "chat", id: decodeURIComponent(chatMatch[1]) }
-      : null;
+  const selection = parseSelection(pathname);
   const [user, setUser] = useState<User | null | undefined>(undefined);
-  const [spaces, setSpaces] = useState<Space[] | null>(null);
+  const [agents, setAgents] = useState<Agent[] | null>(null);
   const [chats, setChats] = useState<Chat[] | null>(null);
-  const [spaceWarnings, setSpaceWarnings] = useState<SpaceWarning[]>([]);
+  const [childChats, setChildChats] = useState<Chat[]>([]);
+  const [agentWarnings, setAgentWarnings] = useState<AgentWarning[]>([]);
   const [failed, setFailed] = useState(false);
-  const [addingSpace, setAddingSpace] = useState(false);
-  const [spaceName, setSpaceName] = useState("");
-  const [spaceColor, setSpaceColor] = useState<AccentColor | null>(null);
+  const [agentName, setAgentName] = useState("");
+  const [agentColor, setAgentColor] = useState<AccentColor | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
-  const [chatFilters, setChatFilters] = useState<ChatSidebarFilters>({
-    requiresAttention: false,
-    spaceId: null,
-  });
-  const [newChatGeneration, setNewChatGeneration] = useState(0);
-  const newChatGenerationRef = useRef(0);
+  const [preferredAgent, setPreferredAgent] = useState<string | null>(() =>
+    typeof localStorage === "undefined" ? null : localStorage.getItem(AGENT_KEY),
+  );
+  // A draft keeps one conversation mounted from the first keystroke through
+  // chat creation, so its message and any follow-up draft survive.
+  const [draft, setDraft] = useState(() => ({ key: 0, chatId: newChatId() }));
+  const [draftAgent, setDraftAgent] = useState<string | null>(null);
+  const [composeRequest, setComposeRequest] = useState(0);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
   const previousPath = useRef<string | null>(null);
-  const draftPersister = useRef<
-    ((spaceId: string | null) => Promise<Chat>) | null
-  >(null);
-  const [chatHandoff, setChatHandoff] = useState<{
-    chat: Chat;
-    startup: NewChatHandoff;
-  } | null>(null);
+  const draftPersister = useRef<((agentId: string | null) => Promise<Chat>) | null>(
+    null,
+  );
+  const layoutRef = useRef<HTMLDivElement>(null);
+  // The last conversation stays mounted (hidden) under other views, so its
+  // draft and stream survive switching to Workspace, API, or Repository.
+  const [kept, setKept] = useState<{ draft: boolean; chatId: string } | null>(null);
+  const navigationRef = useRef<HTMLDivElement>(null);
 
+  const allChats = useMemo(() => [...(chats ?? []), ...childChats], [chats, childChats]);
+  const routedChat =
+    selection?.kind === "chat"
+      ? (allChats.find((chat) => chat.id === selection.id) ?? null)
+      : null;
+  const agentId =
+    selection?.kind === "agent" || selection?.kind === "api"
+      ? selection.id
+      : (routedChat?.agent_id ??
+        (agents?.some((agent) => agent.id === preferredAgent)
+          ? preferredAgent
+          : (agents?.[0]?.id ?? null)));
+  const agent = agents?.find((item) => item.id === agentId);
+
+  // Remember the agent of the last visited page for the next new thread.
+  if (agentId && agentId !== preferredAgent) setPreferredAgent(agentId);
   useEffect(() => {
-    if (startsFreshDraft(previousPath.current, pathname)) {
+    if (agentId) localStorage.setItem(AGENT_KEY, agentId);
+  }, [agentId]);
+
+  const draftPersisted = allChats.some((chat) => chat.id === draft.chatId);
+  useEffect(() => {
+    // Coming back to "/" keeps an unsent draft; a sent one starts over.
+    if (startsFreshDraft(previousPath.current, pathname) && draftPersisted) {
       draftPersister.current = null;
-      setChatHandoff(null);
-      newChatGenerationRef.current += 1;
-      setNewChatGeneration(newChatGenerationRef.current);
+      setDraft((current) => ({ key: current.key + 1, chatId: newChatId() }));
+      setDraftAgent(agentId);
     }
     previousPath.current = pathname;
+    // agentId is read once, when a fresh draft starts.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pathname]);
 
-  const disconnectGitHub = async () => {
-    if (!window.confirm("Disconnect GitHub? Active sandboxes will lose repository access.")) {
-      return;
-    }
-    const response = await apiFetch("/api/connections/github", { method: "DELETE" });
-    if (response.ok) {
-      setUser((current) => current ? { ...current, github: undefined } : current);
-    }
-  };
-
-  const disconnectSlack = async () => {
-    if (!window.confirm("Disconnect Slack? New Slack messages will be ignored.")) return;
-    const response = await apiFetch("/api/connections/slack", { method: "DELETE" });
-    if (response.ok) {
-      setUser((current) => current ? { ...current, slack: undefined } : current);
-    }
-  };
+  useEffect(() => {
+    if (composeRequest) composerRef.current?.focus();
+  }, [composeRequest]);
 
   useEffect(() => {
     const load = async () => {
@@ -266,11 +229,11 @@ export function AppShell() {
         return;
       }
       const [s, c, github, slack, warnings] = await Promise.all([
-        apiFetch("/api/spaces"),
+        apiFetch("/api/agents"),
         apiFetch("/api/chats"),
         apiFetch("/api/connections/github"),
         apiFetch("/api/connections/slack"),
-        apiFetch("/api/spaces/warnings"),
+        apiFetch("/api/agents/warnings"),
       ]);
       if (!s.ok || !c.ok || !github.ok || !slack.ok || !warnings.ok) {
         throw new Error("backend unreachable");
@@ -282,96 +245,133 @@ export function AppShell() {
         github: connection.connection ?? undefined,
         slack: slackConnection.connection ?? undefined,
       });
-      setSpaces(await s.json());
+      setAgents(await s.json());
       setChats(await c.json());
-      setSpaceWarnings(await warnings.json());
+      setAgentWarnings(await warnings.json());
     };
-    load().catch(() => setFailed(true));
+    load().catch(() => {
+      setFailed(true);
+      setUser((current) => current ?? null);
+    });
   }, []);
 
-  const colorOf = (spaceId: string | null) =>
-    spaces?.find((s) => s.id === spaceId)?.color;
-
-  const selectedSpace =
-    selection?.kind === "space"
-      ? (spaces?.find((s) => s.id === selection.id) ?? null)
-      : null;
-  const routedChat =
-    selection?.kind === "chat"
-      ? (chats?.find((c) => c.id === selection.id) ?? null)
-      : null;
-  const activeChatHandoff =
-    chatHandoff &&
-    (selection === null ||
-      (selection.kind === "chat" && selection.id === chatHandoff.chat.id))
-      ? chatHandoff
-      : null;
-  const selectedChat = activeChatHandoff?.chat ?? routedChat;
-
-  useEffect(() => {
-    if (
-      !chatHandoff ||
-      pathname !== `/chats/${encodeURIComponent(chatHandoff.chat.id)}`
-    ) {
-      return;
-    }
-    const timeout = window.setTimeout(() => {
-      setChatHandoff((current) =>
-        current?.chat.id === chatHandoff.chat.id ? null : current,
-      );
-    });
-    return () => window.clearTimeout(timeout);
-  }, [chatHandoff, pathname]);
-
-  const selectedWarning = spaceWarnings.find(
-    (warning) =>
-      warning.space_id === (selectedSpace?.id ?? selectedChat?.space_id),
+  // Other threads' activity has no stream in Hatchery; the roster polls.
+  const { data: roster, mutate: mutateRoster } = useApi<AgentThreads>(
+    user && agentId ? `/api/agents/${encodeURIComponent(agentId)}/threads` : null,
+    5_000,
+    { keepPreviousData: true },
+  );
+  const refreshRoster = useCallback(() => mutateRoster(), [mutateRoster]);
+  const rosterThreads = useMemo(
+    () => (roster?.agent_id === agentId ? threadsWithObjectives(roster) : []),
+    [agentId, roster],
+  );
+  const threads = useMemo(
+    () => sidebarThreads(chats ?? [], rosterThreads, agentId),
+    [agentId, chats, rosterThreads],
   );
 
-  const filteredChats = chats ? filterSidebarChats(chats, chatFilters) : null;
-  const filteredSpace = spaces?.find((space) => space.id === chatFilters.spaceId);
-  const activeFilterCount =
-    Number(chatFilters.requiresAttention) + Number(chatFilters.spaceId !== null);
-  const archivedChats = chats
-    ?.filter((chat) => chat.archived_at !== null)
-    .sort((a, b) => (b.archived_at ?? "").localeCompare(a.archived_at ?? "")) ?? [];
+  // A delegated thread's chat is listed under its parent chat.
+  useEffect(() => {
+    if (selection?.kind !== "chat" || routedChat || !chats) return;
+    const child = rosterThreads.find((thread) => thread.chat_id === selection.id);
+    const parent = rosterThreads.find(
+      (thread) => thread.thread_id === child?.parent_thread_id,
+    );
+    if (!parent?.chat_id) return;
+    apiFetch(`/api/chats?parent_chat_id=${encodeURIComponent(parent.chat_id)}`)
+      .then((response) => (response.ok ? response.json() : []))
+      .then((found: Chat[]) =>
+        setChildChats((current) => [
+          ...current.filter((chat) => !found.some((item) => item.id === chat.id)),
+          ...found,
+        ]),
+      )
+      .catch(() => {});
+  }, [chats, rosterThreads, routedChat, selection]);
 
-  const createSpace = async (event: React.FormEvent) => {
+  // A sent message wakes its sleeping card until the roster reports the sandbox.
+  const [wakes, setWakes] = useState<string[]>([]);
+  const activeChats = new Set(
+    rosterThreads
+      .filter((thread) => thread.activity?.sandbox_active)
+      .map((thread) => thread.chat_id),
+  );
+  if (wakes.some((chatId) => activeChats.has(chatId)))
+    setWakes(wakes.filter((chatId) => !activeChats.has(chatId)));
+  const optimisticallyAwake = new Set(
+    threads
+      .filter((thread) => thread.chat_id && wakes.includes(thread.chat_id))
+      .map((thread) => thread.thread_id),
+  );
+
+  const threadCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const chat of chats ?? [])
+      if (chat.agent_id && chat.archived_at === null)
+        counts[chat.agent_id] = (counts[chat.agent_id] ?? 0) + 1;
+    return counts;
+  }, [chats]);
+  const archivedChats =
+    chats
+      ?.filter((chat) => chat.archived_at !== null)
+      .sort((a, b) => (b.archived_at ?? "").localeCompare(a.archived_at ?? "")) ?? [];
+  const selectedWarning = agentWarnings.find(
+    (warning) => warning.agent_id === (routedChat?.agent_id ?? agentId),
+  )?.warning;
+
+  const disconnectGitHub = async () => {
+    if (!window.confirm("Disconnect GitHub? Active sandboxes will lose repository access.")) {
+      return;
+    }
+    const response = await apiFetch("/api/connections/github", { method: "DELETE" });
+    if (response.ok) setUser((current) => (current ? { ...current, github: undefined } : current));
+  };
+
+  const disconnectSlack = async () => {
+    if (!window.confirm("Disconnect Slack? New Slack messages will be ignored.")) return;
+    const response = await apiFetch("/api/connections/slack", { method: "DELETE" });
+    if (response.ok) setUser((current) => (current ? { ...current, slack: undefined } : current));
+  };
+
+  const createAgent = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!spaceName.trim()) return;
-    const res = await apiFetch("/api/spaces", {
+    if (!agentName.trim()) return;
+    const res = await apiFetch("/api/agents", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        name: spaceName,
-        ...(spaceColor ? { color: spaceColor } : {}),
+        name: agentName,
+        ...(agentColor ? { color: agentColor } : {}),
       }),
     });
-    if (!res.ok) return;
-    const space: Space = await res.json();
-    setSpaces((current) => [...(current ?? []), space]);
-    await navigate({ to: "/spaces/$spaceId", params: { spaceId: space.id } });
-    setChatFilters((current) => selectSidebarSpace(current, space.id));
-    setSpaceName("");
-    setSpaceColor(null);
-    setAddingSpace(false);
-  };
-
-  const deleteSpace = async (space: Space) => {
-    if (!window.confirm(`Remove ${space.name}?`)) return;
-    const res = await apiFetch(`/api/spaces/${space.id}`, { method: "DELETE" });
     if (res.status === 409) {
-      window.alert("Remove this space's chats first.");
+      window.alert("An agent with this ID already exists. Pick another name.");
+      return;
+    }
+    if (res.status === 422) {
+      window.alert("Agent names need at least one letter or digit.");
       return;
     }
     if (!res.ok) return;
-    setSpaces((current) => current?.filter((item) => item.id !== space.id) ?? null);
-    if (selection?.kind === "space" && selection.id === space.id) {
-      void navigate({ to: "/" });
+    const created: Agent = await res.json();
+    setAgents((current) => [...(current ?? []), created]);
+    setAgentName("");
+    setAgentColor(null);
+    setSettingsOpen(false);
+    openNewChat(created.id);
+  };
+
+  const deleteAgent = async (target: Agent) => {
+    if (!window.confirm(`Remove ${target.name}?`)) return;
+    const res = await apiFetch(`/api/agents/${target.id}`, { method: "DELETE" });
+    if (res.status === 409) {
+      window.alert("Remove this agent's chats first.");
+      return;
     }
-    setChatFilters((current) =>
-      current.spaceId === space.id ? selectSidebarSpace(current, null) : current,
-    );
+    if (!res.ok) return;
+    setAgents((current) => current?.filter((item) => item.id !== target.id) ?? null);
+    void navigate({ to: "/" });
   };
 
   const refreshingChats = useRef(false);
@@ -393,10 +393,10 @@ export function AppShell() {
     refreshingChats.current = false;
   }, []);
 
-  const persistDraftChat = useCallback((spaceId: string | null) => {
-    if (!draftPersister.current) {
-      draftPersister.current = createChatPersister(
-        async (request: NewChatRequest) => {
+  const persistDraftChat = useCallback(
+    async (nextAgentId: string | null) => {
+      if (!draftPersister.current) {
+        draftPersister.current = createChatPersister(async (request: NewChatRequest) => {
           const response = await apiFetch("/api/chats", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -407,47 +407,34 @@ export function AppShell() {
             throw new Error(body.detail ?? "Could not create chat");
           }
           const chat: Chat = await response.json();
-          setChats((current) => [
-            chat,
-            ...(current ?? []).filter((item) => item.id !== chat.id),
-          ]);
+          setChats((current) => [chat, ...(current ?? []).filter((item) => item.id !== chat.id)]);
           return chat;
-        },
-      );
+        }, draft.chatId);
+      }
+      const chat = await draftPersister.current(nextAgentId);
+      if (window.location.pathname === "/") {
+        void navigate({ to: "/chats/$chatId", params: { chatId: chat.id }, replace: true });
+      }
+      return chat;
+    },
+    [draft.chatId, navigate],
+  );
+
+  // New thread: an untouched draft is kept and focused rather than replaced.
+  function openNewChat(nextAgentId: string | null = agentId) {
+    if (draftPersisted) {
+      draftPersister.current = null;
+      setDraft((current) => ({ key: current.key + 1, chatId: newChatId() }));
     }
-    return draftPersister.current(spaceId);
-  }, []);
-
-  const openNewChat = () => {
-    draftPersister.current = null;
-    setChatHandoff(null);
-    newChatGenerationRef.current += 1;
-    setNewChatGeneration(newChatGenerationRef.current);
+    setDraftAgent(nextAgentId);
+    setComposeRequest((value) => value + 1);
     if (pathname !== "/") void navigate({ to: "/" });
+  }
+
+  const openThread = (threadId: string) => {
+    const thread = [...threads, ...rosterThreads].find((item) => item.thread_id === threadId);
+    if (thread?.chat_id) void navigate({ to: "/chats/$chatId", params: { chatId: thread.chat_id } });
   };
-
-  const openPersistedChat = useCallback(
-    (chatId: string) => {
-      void navigate({
-        to: "/chats/$chatId",
-        params: { chatId },
-        replace: true,
-      });
-    },
-    [navigate],
-  );
-
-  const handoffPersistedChat = useCallback(
-    (chat: Chat, startup: NewChatHandoff) => {
-      setChatHandoff({ chat, startup });
-      void navigate({
-        to: "/chats/$chatId",
-        params: { chatId: chat.id },
-        replace: true,
-      });
-    },
-    [navigate],
-  );
 
   const setChatArchived = async (chat: Chat, archived: boolean) => {
     const res = await apiFetch(`/api/chats/${chat.id}/archive`, {
@@ -461,33 +448,38 @@ export function AppShell() {
       return;
     }
     const updated: Chat = await res.json();
-    setChats((current) =>
-      current?.map((item) => (item.id === updated.id ? updated : item)) ?? null,
-    );
+    updateChat(updated);
+    void refreshRoster();
   };
 
   const updateChat = useCallback((updated: Chat) => {
-    setChats((current) =>
-      current?.map((item) => (item.id === updated.id ? updated : item)) ?? null,
-    );
+    setChats((current) => current?.map((item) => (item.id === updated.id ? updated : item)) ?? null);
+    setChildChats((current) => current.map((item) => (item.id === updated.id ? updated : item)));
   }, []);
 
-  const assignChatSpace = async (chat: Chat, spaceId: string) => {
-    const res = await apiFetch(`/api/chats/${chat.id}/space`, {
+  const assignChatAgent = async (chat: Chat, nextAgentId: string) => {
+    const res = await apiFetch(`/api/chats/${chat.id}/agent`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ space_id: spaceId }),
+      body: JSON.stringify({ agent_id: nextAgentId }),
     });
     if (!res.ok) return;
-    const updated: Chat = await res.json();
-    setChats((current) =>
-      current?.map((item) => (item.id === updated.id ? updated : item)) ?? null,
-    );
+    updateChat(await res.json());
   };
 
-  if (user === undefined && !failed) return <div className="h-svh" />;
+  const onAgentAssigned = useCallback(
+    (assigned: string) =>
+      setChats((current) => {
+        const target = current?.find((chat) => chat.id === routedChat?.id);
+        if (!target || target.agent_id === assigned) return current;
+        return current?.map((chat) => (chat.id === target.id ? { ...chat, agent_id: assigned } : chat)) ?? null;
+      }),
+    [routedChat?.id],
+  );
 
-  if (user == null) {
+  if (user === undefined) return <ConsoleLayoutSkeleton />;
+
+  if (user === null && !failed) {
     return (
       <main className="flex h-svh items-center justify-center p-6">
         <Card className="w-full max-w-sm">
@@ -496,11 +488,7 @@ export function AppShell() {
             <CardDescription>Use your Vercel account to continue.</CardDescription>
           </CardHeader>
           <CardContent>
-            <Button
-              className="w-full"
-              nativeButton={false}
-              render={<a href="/api/auth/login" />}
-            >
+            <Button className="w-full" nativeButton={false} render={<a href="/api/auth/login" />}>
               Sign in with Vercel
             </Button>
           </CardContent>
@@ -509,77 +497,328 @@ export function AppShell() {
     );
   }
 
+  const leading = <SidebarTrigger />;
+  const draftSelected =
+    selection === null || (selection.kind === "chat" && selection.id === draft.chatId);
+  const onConversation = !failed && (draftSelected || routedChat !== null);
+  const current = onConversation
+    ? { draft: draftSelected, chatId: draftSelected ? draft.chatId : routedChat!.id }
+    : null;
+  if (current && (kept?.draft !== current.draft || kept.chatId !== current.chatId))
+    setKept(current);
+  const shown = current ?? kept;
+  const shownId = shown?.draft ? draft.chatId : shown?.chatId;
+  const shownChat = allChats.find((chat) => chat.id === shownId) ?? null;
+
+  let content: React.ReactNode;
+  if (failed) {
+    content = (
+      <div className="flex flex-1 items-center justify-center p-6">
+        <Empty>
+          <EmptyHeader>
+            <EmptyTitle>Backend unreachable</EmptyTitle>
+            <EmptyDescription>
+              Could not load agents and chats. Locally: run `uv run dev.py` in backend/ and reload.
+            </EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+      </div>
+    );
+  } else if (selection?.kind === "repository") {
+    content = agents ? (
+      <AllRosters agents={agents}>
+        {(rosters, refresh) => (
+          <RepositoryView
+            rosters={rosters}
+            refresh={refresh}
+            title={undefined}
+          />
+        )}
+      </AllRosters>
+    ) : null;
+  } else if (selection?.kind === "agent" && agent) {
+    content = (
+      <AgentPage
+        key={agent.id}
+        agent={agent}
+        roster={roster?.agent_id === agent.id ? roster : undefined}
+        warning={selectedWarning}
+        leading={leading}
+        refreshRoster={refreshRoster}
+        onChange={(updated) =>
+          setAgents((current) => current?.map((item) => (item.id === updated.id ? updated : item)) ?? null)
+        }
+        onRemove={() => void deleteAgent(agent)}
+      />
+    );
+  } else if (selection?.kind === "api" && agent) {
+    content = (
+      <AgentApiView key={agent.id} agentId={agent.id} agentName={agent.name} leading={leading} />
+    );
+  } else if (onConversation) {
+    content = null;
+  } else if (agents !== null && chats !== null) {
+    content = (
+      <div className="flex flex-1 items-center justify-center p-6">
+        <Empty>
+          <EmptyHeader>
+            <EmptyTitle>Not found</EmptyTitle>
+            <EmptyDescription>This page does not exist or you cannot access it.</EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+      </div>
+    );
+  }
+
+  const conversation =
+    shown && shownId && (shown.draft || shownChat) ? (
+      <Activity mode={onConversation ? "visible" : "hidden"}>
+        <Conversation
+          key={shown.draft ? `draft:${draft.key}` : shownId}
+          chatId={shownId}
+          chat={shownChat}
+          agents={agents ?? []}
+          agentId={shownChat ? shownChat.agent_id : draftAgent}
+          roster={roster?.agent_id === (shownChat?.agent_id ?? draftAgent) ? roster : undefined}
+          warning={selectedWarning}
+          leading={leading}
+          composerRef={composerRef}
+          onPersist={persistDraftChat}
+          refreshRoster={refreshRoster}
+          onChatChanged={refreshChats}
+          onChatUpdated={updateChat}
+          onAgentChange={(next) =>
+            shownChat ? assignChatAgent(shownChat, next) : setDraftAgent(next)
+          }
+          onArchiveChange={(archived) => shownChat && void setChatArchived(shownChat, archived)}
+          onAgentAssigned={onAgentAssigned}
+          onThread={openThread}
+          onNewThread={() => openNewChat()}
+          onSent={() => setWakes((items) => [...items, shownId])}
+        />
+      </Activity>
+    ) : null;
+
+  const selectedThread = routedChat
+    ? threads.find((thread) => thread.chat_id === routedChat.id)?.thread_id ??
+      rosterThreads.find((thread) => thread.chat_id === routedChat.id)?.thread_id ??
+      null
+    : null;
+
   return (
-    <SidebarProvider className="h-svh overflow-hidden">
-      <Sidebar>
-        <SidebarHeader className="h-14 border-b border-sidebar-border p-2">
-          <DropdownMenu>
-            <DropdownMenuTrigger
-              render={
-                <SidebarMenuButton size="lg" className="h-full py-0">
-                  <Avatar size="sm">
-                    <AvatarImage src={user.picture ?? undefined} alt="" />
-                    <AvatarFallback>
-                      {(user.name ?? user.username ?? user.email ?? "U").slice(0, 1).toUpperCase()}
-                    </AvatarFallback>
-                  </Avatar>
-                  <span className="min-w-0 flex-1">
-                    <span className="block font-semibold">hatchery</span>
-                    <span className="block truncate text-xs text-muted-foreground">
-                      {user.name ?? user.username ?? user.email}
-                    </span>
-                  </span>
-                  <ChevronsUpDownIcon />
-                </SidebarMenuButton>
-              }
+    <SidebarProvider ref={layoutRef} className="h-svh overflow-hidden">
+      <Sidebar ref={navigationRef} aria-label="Console navigation">
+        <SidebarHeader className="gap-1 p-2">
+          {agent && agents ? (
+            <AgentSwitcher
+              agents={agents}
+              agent={agent}
+              threadCounts={threadCounts}
+              onSelect={(id) => {
+                const latest = (chats ?? [])
+                  .filter((chat) => chat.agent_id === id && chat.archived_at === null)
+                  .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+                setPreferredAgent(id);
+                localStorage.setItem(AGENT_KEY, id);
+                if (latest) void navigate({ to: "/chats/$chatId", params: { chatId: latest.id } });
+                else openNewChat(id);
+              }}
             />
-            <DropdownMenuContent side="bottom" align="start" className="min-w-60">
-              <DropdownMenuGroup>
-                <DropdownMenuLabel>Account</DropdownMenuLabel>
-                {user.github ? (
-                  <DropdownMenuItem disabled>
+          ) : null}
+          <nav aria-label="Views" className="flex flex-col gap-0.5">
+            {agent ? (
+              <>
+                <Button
+                  className="h-9 justify-start px-3 text-muted-foreground"
+                  variant={selection?.kind === "agent" ? "secondary" : "ghost"}
+                  aria-current={selection?.kind === "agent" ? "page" : undefined}
+                  onClick={() => void navigate({ to: "/agents/$agentId", params: { agentId: agent.id } })}
+                >
+                  <FolderOpen />
+                  Workspace
+                </Button>
+                <Button
+                  className="h-9 justify-start px-3 text-muted-foreground"
+                  variant={selection?.kind === "api" ? "secondary" : "ghost"}
+                  aria-current={selection?.kind === "api" ? "page" : undefined}
+                  onClick={() => void navigate({ to: "/agents/$agentId/api", params: { agentId: agent.id } })}
+                >
+                  <Braces />
+                  API
+                </Button>
+              </>
+            ) : null}
+            <Button
+              className="h-9 justify-start px-3 text-muted-foreground"
+              variant={selection?.kind === "repository" ? "secondary" : "ghost"}
+              aria-current={selection?.kind === "repository" ? "page" : undefined}
+              onClick={() => void navigate({ to: "/repository" })}
+            >
+              <FolderGit2 />
+              Repository
+            </Button>
+          </nav>
+        </SidebarHeader>
+
+        <SidebarContent className="gap-0">
+          {archiveOpen ? (
+            <SidebarGroup aria-label="Archived chats">
+              <SidebarGroupLabel>Archive</SidebarGroupLabel>
+              <SidebarGroupAction title="Close archive" aria-label="Close archive" onClick={() => setArchiveOpen(false)}>
+                <XIcon />
+              </SidebarGroupAction>
+              <SidebarGroupContent>
+                <SidebarMenu>
+                  {archivedChats.length ? (
+                    archivedChats.map((chat) => {
+                      const text = chatSidebarText(chat);
+                      return (
+                        <SidebarMenuItem key={chat.id}>
+                          <SidebarMenuButton
+                            isActive={routedChat?.id === chat.id}
+                            onClick={() => void navigate({ to: "/chats/$chatId", params: { chatId: chat.id } })}
+                            tooltip={text.label}
+                          >
+                            <ChatOriginIcon trigger={chat.trigger} />
+                            <span className="truncate">{text.label}</span>
+                          </SidebarMenuButton>
+                          <SidebarMenuAction
+                            showOnHover
+                            aria-label={`Unarchive ${text.label}`}
+                            title="Unarchive chat"
+                            onClick={() => void setChatArchived(chat, false)}
+                          >
+                            <ArchiveIcon />
+                          </SidebarMenuAction>
+                        </SidebarMenuItem>
+                      );
+                    })
+                  ) : (
+                    <li className="px-2 py-4 text-sm text-muted-foreground">No archived chats</li>
+                  )}
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </SidebarGroup>
+          ) : (
+            <>
+              {agent && roster?.budget?.exhausted ? (
+                <div className="shrink-0 px-3 pb-3">
+                  <BudgetHoldNotice
+                    compact
+                    agentId={agent.id}
+                    budget={roster.budget}
+                    heldCount={roster.waiting.length}
+                    onGranted={refreshRoster}
+                  />
+                </div>
+              ) : null}
+              {agents === null || chats === null ? null : (
+                <ThreadNavigation
+                  key={agentId ?? ""}
+                  threads={threads}
+                  selected={selectedThread}
+                  optimisticallyAwake={optimisticallyAwake}
+                  onSelect={(id) => (id ? openThread(id) : openNewChat())}
+                />
+              )}
+            </>
+          )}
+        </SidebarContent>
+
+        <SidebarFooter className="border-t border-sidebar-border">
+          <SidebarMenu>
+            <SidebarMenuItem>
+              <SidebarMenuButton
+                aria-label={`Open archive, ${archivedChats.length} chats`}
+                onClick={() => setArchiveOpen(!archiveOpen)}
+                tooltip="Archive"
+              >
+                <ArchiveIcon />
+                <span>Archive</span>
+                {archivedChats.length > 0 && <span className="ml-auto tabular-nums">{archivedChats.length}</span>}
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          </SidebarMenu>
+          <details
+            className="group px-1"
+            open={settingsOpen || (agents !== null && !agents.length)}
+            onToggle={(event) => setSettingsOpen(event.currentTarget.open)}
+          >
+            <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-1 py-2 text-xs text-muted-foreground hover:text-foreground">
+              <Settings2 className="size-3.5" />
+              <span className="min-w-0 flex-1 truncate">
+                {user?.name ?? user?.username ?? user?.email ?? "hatchery"}
+              </span>
+            </summary>
+            <div className="flex flex-col gap-3 pt-2 pb-1">
+              <form className="flex flex-col gap-2" onSubmit={createAgent}>
+                <div className="flex gap-1">
+                  <Input
+                    value={agentName}
+                    onChange={(event) => setAgentName(event.target.value)}
+                    placeholder="New agent name"
+                    aria-label="Agent name"
+                    className="h-7"
+                  />
+                  <Button type="submit" size="icon-xs" disabled={!agentName.trim()}>
+                    <CheckIcon />
+                    <span className="sr-only">Add agent</span>
+                  </Button>
+                </div>
+                <AgentColorPicker value={agentColor} onValueChange={setAgentColor} allowUnselected />
+              </form>
+              {roster?.budget ? (
+                <p
+                  className={
+                    roster.budget.exhausted
+                      ? "text-xs font-medium text-amber-700 dark:text-amber-300"
+                      : "text-xs text-muted-foreground"
+                  }
+                >
+                  {roster.budget.exhausted
+                    ? "No tokens left today"
+                    : `${number(roster.budget.remaining)} tokens left today`}
+                </p>
+              ) : null}
+              <div className="flex flex-col gap-0.5">
+                {user?.github ? (
+                  <Button variant="ghost" size="sm" className="justify-start text-muted-foreground" onClick={disconnectGitHub}>
                     <GitBranchIcon />
-                    Connected as @{user.github.login}
-                  </DropdownMenuItem>
+                    Disconnect GitHub (@{user.github.login})
+                  </Button>
                 ) : (
-                  <DropdownMenuItem
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="justify-start text-muted-foreground"
+                    nativeButton={false}
                     render={<a href={`${apiBase()}/api/connections/github/authorize`} />}
                   >
                     <GitBranchIcon />
                     Connect GitHub
-                  </DropdownMenuItem>
+                  </Button>
                 )}
-                {user.slack ? (
-                  <DropdownMenuItem disabled>
+                {user?.slack ? (
+                  <Button variant="ghost" size="sm" className="justify-start text-muted-foreground" onClick={disconnectSlack}>
                     <MessageSquareIcon />
-                    {user.slack.user
-                      ? `${user.slack.user} in ${user.slack.team ?? user.slack.team_id}`
-                      : `Slack connected in ${user.slack.team ?? user.slack.team_id}`}
-                  </DropdownMenuItem>
+                    Disconnect Slack ({user.slack.team ?? user.slack.team_id})
+                  </Button>
                 ) : (
-                  <DropdownMenuItem
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="justify-start text-muted-foreground"
+                    nativeButton={false}
                     render={<a href={`${apiBase()}/api/connections/slack/authorize`} />}
                   >
                     <MessageSquareIcon />
                     Connect Slack
-                  </DropdownMenuItem>
+                  </Button>
                 )}
-              </DropdownMenuGroup>
-              <DropdownMenuSeparator />
-              <DropdownMenuGroup>
-                {user.github && (
-                  <DropdownMenuItem variant="destructive" onClick={disconnectGitHub}>
-                    <GitBranchIcon />
-                    Disconnect GitHub
-                  </DropdownMenuItem>
-                )}
-                {user.slack && (
-                  <DropdownMenuItem variant="destructive" onClick={disconnectSlack}>
-                    <MessageSquareIcon />
-                    Disconnect Slack
-                  </DropdownMenuItem>
-                )}
-                <DropdownMenuItem
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="justify-start text-muted-foreground"
                   onClick={async () => {
                     await apiFetch("/api/auth/logout", { method: "POST" });
                     window.location.reload();
@@ -587,1226 +826,17 @@ export function AppShell() {
                 >
                   <LogOutIcon />
                   Sign out
-                </DropdownMenuItem>
-              </DropdownMenuGroup>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </SidebarHeader>
-
-        <SidebarContent>
-          {archiveOpen ? (
-            <SidebarGroup aria-label="Archived chats">
-              <SidebarGroupLabel>Archive</SidebarGroupLabel>
-              <SidebarGroupAction
-                title="Close archive"
-                aria-label="Close archive"
-                onClick={() => setArchiveOpen(false)}
-              >
-                <XIcon />
-              </SidebarGroupAction>
-              <SidebarGroupContent>
-                <SidebarMenu>
-                  {archivedChats.length > 0 ? (
-                    archivedChats.map((chat) => (
-                      <ChatSidebarItem
-                        key={chat.id}
-                        chat={chat}
-                        spaceColor={colorOf(chat.space_id)}
-                        selected={selectedChat?.id === chat.id}
-                        onArchiveChange={(item, archived) =>
-                          void setChatArchived(item, archived)
-                        }
-                      />
-                    ))
-                  ) : (
-                    <li className="px-2 py-4 text-sm text-muted-foreground">
-                      No archived chats
-                    </li>
-                  )}
-                </SidebarMenu>
-              </SidebarGroupContent>
-            </SidebarGroup>
-          ) : (
-            <>
-              <SidebarGroup>
-                <SidebarGroupLabel>Spaces</SidebarGroupLabel>
-                <SidebarGroupAction
-                  title="New space"
-                  aria-label="New space"
-                  onClick={() => setAddingSpace(true)}
-                >
-                  <PlusIcon />
-                </SidebarGroupAction>
-                <SidebarGroupContent>
-                  {addingSpace && (
-                    <form className="flex flex-col gap-2 px-2 pb-2" onSubmit={createSpace}>
-                      <div className="flex gap-1">
-                        <Input
-                          autoFocus
-                          value={spaceName}
-                          onChange={(event) => setSpaceName(event.target.value)}
-                          placeholder="Space name"
-                          aria-label="Space name"
-                          className="h-7"
-                        />
-                        <Button type="submit" size="icon-xs" disabled={!spaceName.trim()}>
-                          <CheckIcon />
-                          <span className="sr-only">Add space</span>
-                        </Button>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon-xs"
-                          onClick={() => {
-                            setAddingSpace(false);
-                            setSpaceName("");
-                            setSpaceColor(null);
-                          }}
-                        >
-                          <XIcon />
-                          <span className="sr-only">Cancel</span>
-                        </Button>
-                      </div>
-                      <SpaceColorPicker
-                        value={spaceColor}
-                        onValueChange={setSpaceColor}
-                        allowUnselected
-                      />
-                    </form>
-                  )}
-                  <SidebarMenu>
-                    {spaces === null
-                      ? Array.from({ length: failed ? 0 : 2 }).map((_, i) => (
-                          <SidebarMenuItem key={i}>
-                            <SidebarMenuSkeleton />
-                          </SidebarMenuItem>
-                        ))
-                      : spaces.map((space) => (
-                          <SidebarMenuItem key={space.id}>
-                            <SidebarMenuButton
-                              className="relative pl-3"
-                              isActive={selectedSpace?.id === space.id}
-                              onClick={() =>
-                                setChatFilters((current) =>
-                                  selectSidebarSpace(current, space.id),
-                                )
-                              }
-                              render={
-                                <Link
-                                  to="/spaces/$spaceId"
-                                  params={{ spaceId: space.id }}
-                                />
-                              }
-                              tooltip={space.name}
-                            >
-                              <span
-                                className="absolute inset-y-1 left-0 w-1 rounded-full"
-                                style={{ backgroundColor: resolveSpaceColor(space.color) }}
-                              />
-                              <span className="truncate">{space.name}</span>
-                            </SidebarMenuButton>
-                            <SidebarMenuAction
-                              showOnHover
-                              aria-label={`Remove ${space.name}`}
-                              title={`Remove ${space.name}`}
-                              onClick={() => deleteSpace(space)}
-                            >
-                              <Trash2Icon />
-                            </SidebarMenuAction>
-                          </SidebarMenuItem>
-                        ))}
-                  </SidebarMenu>
-                </SidebarGroupContent>
-              </SidebarGroup>
-
-              <SidebarGroup>
-                <SidebarGroupLabel>Chats</SidebarGroupLabel>
-                <DropdownMenu>
-                  <DropdownMenuTrigger
-                    render={
-                      <SidebarGroupAction
-                        className="right-9 [&>svg]:size-3"
-                        title="Filter chats"
-                        aria-label={`Filter chats${activeFilterCount ? `, ${activeFilterCount} active` : ""}`}
-                      >
-                        <FilterIcon />
-                      </SidebarGroupAction>
-                    }
-                  />
-                  <DropdownMenuContent side="right" align="start" className="w-56">
-                    <DropdownMenuGroup>
-                      <DropdownMenuLabel>Filter chats</DropdownMenuLabel>
-                      <DropdownMenuCheckboxItem
-                        checked={chatFilters.requiresAttention}
-                        onCheckedChange={(checked) =>
-                          setChatFilters((current) => ({
-                            ...current,
-                            requiresAttention: checked,
-                          }))
-                        }
-                      >
-                        {chatAttentionFilterLabel}
-                      </DropdownMenuCheckboxItem>
-                    </DropdownMenuGroup>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuGroup>
-                      <DropdownMenuLabel>Space</DropdownMenuLabel>
-                      <DropdownMenuRadioGroup
-                        value={chatFilters.spaceId ?? "__all__"}
-                        onValueChange={(value) =>
-                          setChatFilters((current) =>
-                            selectSidebarSpace(
-                              current,
-                              value === "__all__" ? null : value,
-                            ),
-                          )
-                        }
-                      >
-                        <DropdownMenuRadioItem value="__all__">
-                          All spaces
-                        </DropdownMenuRadioItem>
-                        {spaces?.map((space) => (
-                          <DropdownMenuRadioItem key={space.id} value={space.id}>
-                            {space.name}
-                          </DropdownMenuRadioItem>
-                        ))}
-                      </DropdownMenuRadioGroup>
-                    </DropdownMenuGroup>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-                <SidebarGroupAction
-                  title="New chat"
-                  aria-label="New chat"
-                  onClick={openNewChat}
-                >
-                  <PlusIcon />
-                </SidebarGroupAction>
-                <SidebarGroupContent>
-                  {activeFilterCount > 0 && (
-                    <div className="my-3 flex flex-wrap gap-1">
-                      {chatFilters.requiresAttention && (
-                        <Badge
-                          variant="secondary"
-                          render={
-                            <button
-                              type="button"
-                              aria-label={`Remove ${chatAttentionFilterLabel} filter`}
-                              onClick={() =>
-                                setChatFilters((current) => ({
-                                  ...current,
-                                  requiresAttention: false,
-                                }))
-                              }
-                            />
-                          }
-                        >
-                          {chatAttentionFilterLabel}
-                          <XIcon data-icon="inline-end" />
-                        </Badge>
-                      )}
-                      {chatFilters.spaceId && (
-                        <Badge
-                          variant="secondary"
-                          render={
-                            <button
-                              type="button"
-                              aria-label={`Remove ${filteredSpace?.name ?? "space"} filter`}
-                              onClick={() =>
-                                setChatFilters((current) =>
-                                  selectSidebarSpace(current, null),
-                                )
-                              }
-                            />
-                          }
-                        >
-                          <span
-                            aria-hidden="true"
-                            className="size-1.5 shrink-0 rounded-full"
-                            style={{
-                              backgroundColor: resolveSpaceColor(filteredSpace?.color),
-                            }}
-                          />
-                          {filteredSpace?.name ?? "Unknown space"}
-                          <XIcon data-icon="inline-end" />
-                        </Badge>
-                      )}
-                    </div>
-                  )}
-                  <SidebarMenu>
-                    {filteredChats === null
-                      ? Array.from({ length: failed ? 0 : 4 }).map((_, i) => (
-                          <SidebarMenuItem key={i}>
-                            <SidebarMenuSkeleton />
-                          </SidebarMenuItem>
-                        ))
-                      : filteredChats.map((chat) => (
-                          <ChatSidebarItem
-                            key={chat.id}
-                            chat={chat}
-                            spaceColor={colorOf(chat.space_id)}
-                            selected={selectedChat?.id === chat.id}
-                            onArchiveChange={(item, archived) =>
-                              void setChatArchived(item, archived)
-                            }
-                          />
-                        ))}
-                    {filteredChats?.length === 0 && activeFilterCount > 0 && (
-                      <li className="px-2 py-4 text-sm text-muted-foreground">
-                        No chats match these filters
-                      </li>
-                    )}
-                  </SidebarMenu>
-                </SidebarGroupContent>
-              </SidebarGroup>
-            </>
-          )}
-        </SidebarContent>
-        {!archiveOpen && (
-          <SidebarFooter className="border-t border-sidebar-border">
-            <SidebarMenu>
-              <SidebarMenuItem>
-                <SidebarMenuButton
-                  aria-label={`Open archive, ${archivedChats.length} chats`}
-                  onClick={() => setArchiveOpen(true)}
-                  tooltip="Archive"
-                >
-                  <ArchiveIcon />
-                  <span>Archive</span>
-                  {archivedChats.length > 0 && (
-                    <span className="ml-auto tabular-nums">{archivedChats.length}</span>
-                  )}
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-            </SidebarMenu>
-          </SidebarFooter>
-        )}
+                </Button>
+              </div>
+            </div>
+          </details>
+        </SidebarFooter>
       </Sidebar>
-
-      <SidebarInset>
-        <header className="flex h-14 items-center gap-2 border-b px-4">
-          <SidebarTrigger />
-          <Separator orientation="vertical" className="h-4" />
-          <span className="min-w-0 flex-1 truncate text-sm font-medium">
-            {selectedSpace?.name ??
-              (selectedChat
-                ? chatSidebarText(selectedChat).label
-                : selection
-                  ? "hatchery"
-                  : "New chat")}
-          </span>
-        </header>
-        {selectedChat && !failed ? (
-          <LiveChat
-            key={selectedChat.id}
-            chat={selectedChat}
-            spaces={spaces ?? []}
-            warning={selectedWarning?.warning}
-            handoff={
-              activeChatHandoff?.chat.id === selectedChat.id
-                ? activeChatHandoff.startup
-                : undefined
-            }
-            onChatChanged={refreshChats}
-            onChatUpdated={updateChat}
-            onSpaceChange={(spaceId) =>
-              assignChatSpace(selectedChat, spaceId)
-            }
-            onUnarchive={() => void setChatArchived(selectedChat, false)}
-            onCreateSpace={() => setAddingSpace(true)}
-            onSpaceAssigned={(spaceId) =>
-              setChats((current) => {
-                if (
-                  current?.find((chat) => chat.id === selectedChat.id)
-                    ?.space_id === spaceId
-                ) {
-                  return current;
-                }
-                return (
-                  current?.map((chat) =>
-                    chat.id === selectedChat.id
-                      ? { ...chat, space_id: spaceId }
-                      : chat,
-                  ) ?? null
-                );
-              })
-            }
-          />
-        ) : (
-          <div className="flex flex-1 overflow-y-auto p-6 md:p-10">
-            {failed ? (
-              <Empty>
-                <EmptyHeader>
-                  <EmptyTitle>Backend unreachable</EmptyTitle>
-                  <EmptyDescription>
-                    Could not load spaces and chats. Locally: run `uv run
-                    dev.py` in backend/ and reload.
-                  </EmptyDescription>
-                </EmptyHeader>
-              </Empty>
-            ) : selectedSpace ? (
-              <SpacePane
-                key={selectedSpace.id}
-                space={selectedSpace}
-                warning={selectedWarning?.warning}
-                onChange={(updated) =>
-                  setSpaces((current) =>
-                    current?.map((space) =>
-                      space.id === updated.id ? updated : space,
-                    ) ?? null,
-                  )
-                }
-              />
-            ) : selection && spaces !== null && chats !== null ? (
-              <Empty>
-                <EmptyHeader>
-                  <EmptyTitle>Not found</EmptyTitle>
-                  <EmptyDescription>
-                    This {selection.kind} does not exist or you cannot access it.
-                  </EmptyDescription>
-                </EmptyHeader>
-              </Empty>
-            ) : (
-              <NewChatView
-                key={newChatGeneration}
-                spaces={spaces ?? []}
-                onPersist={persistDraftChat}
-                onHandoff={handoffPersistedChat}
-                onOpenChat={openPersistedChat}
-                onCreateSpace={() => setAddingSpace(true)}
-                isCurrent={() =>
-                  window.location.pathname === "/" &&
-                  newChatGenerationRef.current === newChatGeneration
-                }
-              />
-            )}
-          </div>
-        )}
+      <SidebarResize containerRef={layoutRef} paneRef={navigationRef} />
+      <SidebarInset className="min-w-0">
+        {conversation}
+        {content}
       </SidebarInset>
     </SidebarProvider>
-  );
-}
-
-const resourceIcon = {
-  repo: FolderGitIcon,
-  reference: BookMarkedIcon,
-  link: LinkIcon,
-} as const;
-
-function ResourceCard({ resource }: { resource: Resource }) {
-  const Icon =
-    resourceIcon[resource.kind as keyof typeof resourceIcon] ?? LinkIcon;
-  return (
-    <a href={resource.url} target="_blank" rel="noreferrer">
-      <Card className="flex-row items-center gap-3 p-3 transition-colors hover:bg-accent/50">
-        <Icon className="size-4 shrink-0 text-muted-foreground" />
-        <div className="flex min-w-0 flex-col">
-          <span className="truncate text-sm font-medium">
-            {resource.title}
-          </span>
-          <span className="truncate text-xs text-muted-foreground">
-            {new URL(resource.url).hostname}
-          </span>
-        </div>
-      </Card>
-    </a>
-  );
-}
-
-function RepositoryWarning({ warning }: { warning: string }) {
-  return (
-    <Alert>
-      <TriangleAlertIcon />
-      <AlertTitle>GitHub access needed</AlertTitle>
-      <AlertDescription>{warning}</AlertDescription>
-    </Alert>
-  );
-}
-
-function SpacePane({
-  space,
-  warning,
-  onChange,
-}: {
-  space: Space;
-  warning?: string;
-  onChange: (space: Space) => void;
-}) {
-  const [editingDocument, setEditingDocument] = useState(false);
-  const [documentName, setDocumentName] = useState(space.name);
-  const [documentAbout, setDocumentAbout] = useState(space.about);
-  const [documentColor, setDocumentColor] = useState<AccentColor | null>(() =>
-    normalizeAccentColor(space.color),
-  );
-  const [savingDocument, setSavingDocument] = useState(false);
-  const [documentError, setDocumentError] = useState("");
-  const [editingResources, setEditingResources] = useState(false);
-  const [repos, setRepos] = useState(space.repos);
-  const [links, setLinks] = useState(space.resources);
-  const [kind, setKind] = useState<"repo" | "link">("repo");
-  const [resourceTitle, setResourceTitle] = useState("");
-  const [url, setUrl] = useState("");
-  const [savingResources, setSavingResources] = useState(false);
-  const [resourceError, setResourceError] = useState("");
-  const [jobs, setJobs] = useState<Job[] | null>(null);
-  const [jobsLoadError, setJobsLoadError] = useState(false);
-  const [jobEditorOpen, setJobEditorOpen] = useState(false);
-  const [editingJob, setEditingJob] = useState<Job | null>(null);
-  const [jobSchedule, setJobSchedule] = useState("");
-  const [jobPrompt, setJobPrompt] = useState("");
-  const [jobErrors, setJobErrors] = useState<{
-    schedule?: string;
-    prompt?: string;
-    form?: string;
-  }>({});
-  const [jobBusy, setJobBusy] = useState<string | null>(null);
-
-  useEffect(() => {
-    let current = true;
-    apiFetch(`/api/spaces/${space.id}/jobs`)
-      .then(async (response) => {
-        if (!response.ok) throw new Error();
-        return (await response.json()) as Job[];
-      })
-      .then((found) => {
-        if (current) setJobs(found);
-      })
-      .catch(() => {
-        if (current) setJobsLoadError(true);
-      });
-    return () => {
-      current = false;
-    };
-  }, [space.id]);
-
-  const resources = [
-    ...space.repos.map((repo) => ({
-      title: repo,
-      url: `https://github.com/${repo}`,
-      kind: "repo",
-    })),
-    ...space.resources,
-  ];
-
-  const startEditingDocument = () => {
-    setDocumentName(space.name);
-    setDocumentAbout(space.about);
-    setDocumentColor(normalizeAccentColor(space.color));
-    setDocumentError("");
-    setEditingDocument(true);
-  };
-
-  const saveDocument = async () => {
-    if (!documentName.trim()) {
-      setDocumentError("Title is required.");
-      return;
-    }
-    setSavingDocument(true);
-    setDocumentError("");
-    try {
-      const response = await apiFetch(`/api/spaces/${space.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: documentName,
-          about: documentAbout,
-          ...(documentColor ? { color: documentColor } : {}),
-        }),
-      });
-      if (!response.ok) throw new Error();
-      onChange(await response.json());
-      setEditingDocument(false);
-    } catch {
-      setDocumentError("Could not save space.");
-    } finally {
-      setSavingDocument(false);
-    }
-  };
-
-  const startEditingResources = () => {
-    setRepos(space.repos);
-    setLinks(space.resources);
-    setResourceError("");
-    setEditingResources(true);
-  };
-
-  const addResource = (event: React.FormEvent) => {
-    event.preventDefault();
-    setResourceError("");
-    if (kind === "repo") {
-      const repo = url.trim();
-      if (!/^[^/\s]+\/[^/\s]+$/.test(repo)) {
-        setResourceError("Use owner/repo form.");
-        return;
-      }
-      if (!repos.includes(repo)) setRepos([...repos, repo]);
-    } else {
-      const nextTitle = resourceTitle.trim();
-      const nextUrl = url.trim();
-      try {
-        const parsed = new URL(nextUrl);
-        if (!nextTitle || !["http:", "https:"].includes(parsed.protocol)) {
-          throw new Error();
-        }
-      } catch {
-        setResourceError("Add a title and a valid http(s) URL.");
-        return;
-      }
-      if (!links.some((resource) => resource.url === nextUrl)) {
-        setLinks([...links, { title: nextTitle, url: nextUrl, kind: "link" }]);
-      }
-    }
-    setResourceTitle("");
-    setUrl("");
-  };
-
-  const saveResources = async () => {
-    setSavingResources(true);
-    setResourceError("");
-    try {
-      const response = await apiFetch(`/api/spaces/${space.id}/resources`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repos, resources: links }),
-      });
-      if (!response.ok) throw new Error();
-      onChange(await response.json());
-      setEditingResources(false);
-    } catch {
-      setResourceError("Could not save resources.");
-    } finally {
-      setSavingResources(false);
-    }
-  };
-
-  const closeJobEditor = () => {
-    setJobEditorOpen(false);
-    setEditingJob(null);
-    setJobSchedule("");
-    setJobPrompt("");
-    setJobErrors({});
-  };
-
-  const openJob = (job: Job | null) => {
-    setJobEditorOpen(true);
-    setEditingJob(job);
-    setJobSchedule(job?.schedule ?? "0 9 * * 1-5");
-    setJobPrompt(job?.prompt ?? "");
-    setJobErrors({});
-  };
-
-  const saveJob = async (event: React.FormEvent) => {
-    event.preventDefault();
-    setJobBusy("save");
-    setJobErrors({});
-    try {
-      const path = editingJob
-        ? `/api/jobs/${editingJob.id}`
-        : `/api/spaces/${space.id}/jobs`;
-      const response = await apiFetch(path, {
-        method: editingJob ? "PUT" : "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ schedule: jobSchedule, prompt: jobPrompt }),
-      });
-      if (!response.ok) {
-        const body = await response.json().catch(() => ({}));
-        const details = Array.isArray(body.detail) ? body.detail : [];
-        setJobErrors({
-          schedule: details.find((item: { loc?: string[] }) => item.loc?.at(-1) === "schedule")?.msg,
-          prompt: details.find((item: { loc?: string[] }) => item.loc?.at(-1) === "prompt")?.msg,
-          form: details.length ? undefined : body.detail ?? "Could not save job.",
-        });
-        return;
-      }
-      const saved: Job = await response.json();
-      setJobs((current) =>
-        editingJob
-          ? (current ?? []).map((job) => (job.id === saved.id ? saved : job))
-          : [...(current ?? []), saved],
-      );
-      closeJobEditor();
-    } catch {
-      setJobErrors({ form: "Could not save job." });
-    } finally {
-      setJobBusy(null);
-    }
-  };
-
-  const setJobPaused = async (job: Job) => {
-    setJobBusy(job.id);
-    setJobErrors({});
-    try {
-      const response = await apiFetch(`/api/jobs/${job.id}/pause`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ paused: !job.paused }),
-      });
-      if (!response.ok) throw new Error();
-      const updated: Job = await response.json();
-      setJobs((current) =>
-        current?.map((item) => (item.id === updated.id ? updated : item)) ?? null,
-      );
-    } catch {
-      setJobErrors({ form: `Could not ${job.paused ? "resume" : "pause"} job.` });
-    } finally {
-      setJobBusy(null);
-    }
-  };
-
-  const deleteJob = async (job: Job) => {
-    if (!window.confirm("Delete this scheduled job?")) return;
-    setJobBusy(job.id);
-    setJobErrors({});
-    try {
-      const response = await apiFetch(`/api/jobs/${job.id}`, { method: "DELETE" });
-      if (!response.ok) throw new Error();
-      setJobs((current) => current?.filter((item) => item.id !== job.id) ?? null);
-    } catch {
-      setJobErrors({ form: "Could not delete job." });
-    } finally {
-      setJobBusy(null);
-    }
-  };
-
-  return (
-    <div className="mx-auto grid w-full max-w-6xl gap-10 lg:grid-cols-[minmax(0,1fr)_18rem]">
-      <section className="mx-auto flex w-full max-w-2xl min-w-0 flex-col gap-6">
-        {warning && <RepositoryWarning warning={warning} />}
-        {editingDocument ? (
-          <FieldGroup>
-            <Field data-invalid={Boolean(documentError)}>
-              <FieldLabel htmlFor={`space-name-${space.id}`}>Title</FieldLabel>
-              <Input
-                id={`space-name-${space.id}`}
-                value={documentName}
-                onChange={(event) => setDocumentName(event.target.value)}
-                aria-invalid={Boolean(documentError)}
-              />
-            </Field>
-            <Field>
-              <FieldLabel>Accent color</FieldLabel>
-              <SpaceColorPicker
-                value={documentColor}
-                onValueChange={setDocumentColor}
-                label={`Accent color for ${space.name}`}
-              />
-              {!normalizeAccentColor(space.color) && (
-                <FieldDescription className="flex items-center gap-2">
-                  <span
-                    className="size-3 shrink-0 rounded-full"
-                    style={{ backgroundColor: resolveSpaceColor(space.color) }}
-                  />
-                  The current custom color is kept unless you choose a new accent.
-                </FieldDescription>
-              )}
-            </Field>
-            <Field data-invalid={Boolean(documentError)}>
-              <FieldLabel htmlFor={`space-about-${space.id}`}>Markdown</FieldLabel>
-              <Textarea
-                id={`space-about-${space.id}`}
-                value={documentAbout}
-                onChange={(event) => setDocumentAbout(event.target.value)}
-                className="min-h-96 resize-y font-mono"
-                aria-invalid={Boolean(documentError)}
-              />
-              <FieldError>{documentError}</FieldError>
-            </Field>
-            <div className="flex justify-end gap-2">
-              <Button
-                variant="ghost"
-                disabled={savingDocument}
-                onClick={() => setEditingDocument(false)}
-              >
-                <XIcon />
-                Cancel
-              </Button>
-              <Button disabled={savingDocument} onClick={saveDocument}>
-                <CheckIcon />
-                {savingDocument ? "Saving" : "Save"}
-              </Button>
-            </div>
-          </FieldGroup>
-        ) : (
-          <>
-            <div className="flex items-center justify-between gap-4">
-              <h1 className="text-3xl font-semibold tracking-tight">{space.name}</h1>
-              <Button
-                variant="ghost"
-                size="icon-xs"
-                aria-label="Edit space"
-                onClick={startEditingDocument}
-              >
-                <PencilIcon />
-              </Button>
-            </div>
-            <article className="typeset typeset-docs min-w-0">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{space.about}</ReactMarkdown>
-            </article>
-          </>
-        )}
-        <SpaceNotes spaceId={space.id} />
-      </section>
-      <aside className="mx-auto flex w-full max-w-2xl flex-col gap-2 lg:mx-0 lg:max-w-none">
-        <div className="flex h-7 items-center justify-between px-1">
-          <span className="text-xs font-medium text-muted-foreground">
-            Resources
-          </span>
-          {!editingResources && (
-            <Button
-              variant="ghost"
-              size="icon-xs"
-              aria-label="Edit resources"
-              onClick={startEditingResources}
-            >
-              <PencilIcon />
-            </Button>
-          )}
-        </div>
-        {editingResources ? (
-          <div className="flex flex-col gap-4">
-            <div className="flex flex-col gap-2">
-              {repos.map((repo) => (
-                <EditableResource
-                  key={`repo:${repo}`}
-                  resource={{
-                    title: repo,
-                    url: `https://github.com/${repo}`,
-                    kind: "repo",
-                  }}
-                  onDelete={() => setRepos(repos.filter((item) => item !== repo))}
-                />
-              ))}
-              {links.map((resource, index) => (
-                <EditableResource
-                  key={`${resource.url}:${index}`}
-                  resource={resource}
-                  onDelete={() => setLinks(links.filter((_, item) => item !== index))}
-                />
-              ))}
-            </div>
-            <form onSubmit={addResource}>
-              <FieldGroup>
-                <Field>
-                  <FieldLabel htmlFor={`resource-kind-${space.id}`}>Add resource</FieldLabel>
-                  <select
-                    id={`resource-kind-${space.id}`}
-                    value={kind}
-                    onChange={(event) => {
-                      setKind(event.target.value as "repo" | "link");
-                      setResourceTitle("");
-                      setUrl("");
-                      setResourceError("");
-                    }}
-                    className="h-8 rounded-lg border border-input bg-transparent px-2.5 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
-                  >
-                    <option value="repo">GitHub repository</option>
-                    <option value="link">Link</option>
-                  </select>
-                </Field>
-                {kind === "link" && (
-                  <Field>
-                    <FieldLabel htmlFor={`resource-title-${space.id}`}>Title</FieldLabel>
-                    <Input
-                      id={`resource-title-${space.id}`}
-                      value={resourceTitle}
-                      onChange={(event) => setResourceTitle(event.target.value)}
-                      placeholder="Documentation"
-                    />
-                  </Field>
-                )}
-                <Field data-invalid={Boolean(resourceError)}>
-                  <FieldLabel htmlFor={`resource-url-${space.id}`}>
-                    {kind === "repo" ? "Repository" : "URL"}
-                  </FieldLabel>
-                  <Input
-                    id={`resource-url-${space.id}`}
-                    value={url}
-                    onChange={(event) => setUrl(event.target.value)}
-                    placeholder={kind === "repo" ? "owner/repo" : "https://example.com"}
-                    aria-invalid={Boolean(resourceError)}
-                  />
-                  {kind === "repo" && (
-                    <FieldDescription>Enter a GitHub repository as owner/repo.</FieldDescription>
-                  )}
-                  <FieldError>{resourceError}</FieldError>
-                </Field>
-                <Button type="submit" variant="outline">
-                  <PlusIcon />
-                  Add
-                </Button>
-              </FieldGroup>
-            </form>
-            <div className="flex justify-end gap-2">
-              <Button
-                variant="ghost"
-                disabled={savingResources}
-                onClick={() => setEditingResources(false)}
-              >
-                <XIcon />
-                Cancel
-              </Button>
-              <Button disabled={savingResources} onClick={saveResources}>
-                <CheckIcon />
-                {savingResources ? "Saving" : "Save"}
-              </Button>
-            </div>
-          </div>
-        ) : resources.length ? (
-          resources.map((resource, index) => (
-            <ResourceCard key={`${resource.url}:${index}`} resource={resource} />
-          ))
-        ) : (
-          <span className="px-1 text-sm text-muted-foreground">No resources yet.</span>
-        )}
-        <Separator className="my-3" />
-        <div className="flex h-7 items-center justify-between px-1">
-          <span className="text-xs font-medium text-muted-foreground">Jobs</span>
-          <Button
-            variant="ghost"
-            size="icon-xs"
-            aria-label="Add job"
-            onClick={() => openJob(null)}
-          >
-            <PlusIcon />
-          </Button>
-        </div>
-        {jobEditorOpen && (
-          <form onSubmit={saveJob}>
-            <Card size="sm">
-              <CardHeader>
-                <CardTitle>{editingJob ? "Edit job" : "New job"}</CardTitle>
-                <CardDescription>Schedules use UTC.</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <FieldGroup>
-                  <Field data-invalid={Boolean(jobErrors.schedule)}>
-                    <FieldLabel htmlFor={`job-schedule-${space.id}`}>Schedule</FieldLabel>
-                    <Input
-                      id={`job-schedule-${space.id}`}
-                      value={jobSchedule}
-                      onChange={(event) => setJobSchedule(event.target.value)}
-                      placeholder="0 9 * * 1-5"
-                      className="font-mono"
-                      aria-invalid={Boolean(jobErrors.schedule)}
-                      aria-describedby={
-                        jobErrors.schedule
-                          ? `job-schedule-help-${space.id} job-schedule-error-${space.id}`
-                          : `job-schedule-help-${space.id}`
-                      }
-                    />
-                    <FieldDescription id={`job-schedule-help-${space.id}`}>
-                      Five-field cron expression in UTC.
-                    </FieldDescription>
-                    <FieldError id={`job-schedule-error-${space.id}`}>
-                      {jobErrors.schedule}
-                    </FieldError>
-                  </Field>
-                  <Field data-invalid={Boolean(jobErrors.prompt)}>
-                    <FieldLabel htmlFor={`job-prompt-${space.id}`}>Prompt</FieldLabel>
-                    <Textarea
-                      id={`job-prompt-${space.id}`}
-                      value={jobPrompt}
-                      onChange={(event) => setJobPrompt(event.target.value)}
-                      aria-invalid={Boolean(jobErrors.prompt)}
-                      aria-describedby={
-                        jobErrors.prompt ? `job-prompt-error-${space.id}` : undefined
-                      }
-                    />
-                    <FieldError id={`job-prompt-error-${space.id}`}>
-                      {jobErrors.prompt}
-                    </FieldError>
-                  </Field>
-                  <FieldError>{jobErrors.form}</FieldError>
-                  <div className="flex justify-end gap-2">
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      disabled={jobBusy === "save"}
-                      onClick={closeJobEditor}
-                    >
-                      Cancel
-                    </Button>
-                    <Button type="submit" disabled={jobBusy === "save"}>
-                      {jobBusy === "save" ? "Saving" : "Save"}
-                    </Button>
-                  </div>
-                </FieldGroup>
-              </CardContent>
-            </Card>
-          </form>
-        )}
-        {!jobEditorOpen && jobErrors.form && <FieldError>{jobErrors.form}</FieldError>}
-        {jobs === null && !jobsLoadError && (
-          <span className="px-1 text-sm text-muted-foreground">Loading jobs…</span>
-        )}
-        {jobsLoadError && (
-          <span className="px-1 text-sm text-destructive">Could not load jobs.</span>
-        )}
-        {jobs?.map((job) => (
-          <Card key={job.id} size="sm">
-            <CardHeader>
-              <CardTitle className="truncate">{job.prompt}</CardTitle>
-              <CardDescription>
-                <span className="font-mono">
-                  {job.schedule} UTC{job.paused ? " · paused" : ""}
-                </span>
-                {job.author_display_name ? ` · by ${job.author_display_name}` : ""}
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="flex justify-end gap-1">
-              <Button
-                variant="ghost"
-                size="icon-xs"
-                aria-label={job.paused ? "Resume job" : "Pause job"}
-                disabled={jobBusy === job.id}
-                onClick={() => setJobPaused(job)}
-              >
-                {job.paused ? <PlayIcon /> : <PauseIcon />}
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon-xs"
-                aria-label="Edit job"
-                disabled={jobBusy === job.id}
-                onClick={() => openJob(job)}
-              >
-                <PencilIcon />
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon-xs"
-                aria-label="Delete job"
-                disabled={jobBusy === job.id}
-                onClick={() => deleteJob(job)}
-              >
-                <Trash2Icon />
-              </Button>
-            </CardContent>
-          </Card>
-        ))}
-        {jobs?.length === 0 && !jobEditorOpen && (
-          <span className="px-1 text-sm text-muted-foreground">No jobs yet.</span>
-        )}
-      </aside>
-    </div>
-  );
-}
-
-function EditableResource({
-  resource,
-  onDelete,
-}: {
-  resource: Resource;
-  onDelete: () => void;
-}) {
-  const Icon =
-    resourceIcon[resource.kind as keyof typeof resourceIcon] ?? LinkIcon;
-  return (
-    <Card className="flex-row items-center gap-3 p-3">
-      <Icon className="size-4 shrink-0 text-muted-foreground" />
-      <span className="min-w-0 flex-1 truncate text-sm font-medium">
-        {resource.title}
-      </span>
-      <Button
-        variant="ghost"
-        size="icon-xs"
-        aria-label={`Delete ${resource.title}`}
-        onClick={onDelete}
-      >
-        <Trash2Icon />
-      </Button>
-    </Card>
-  );
-}
-
-// Keyed by chat.id at the call site so useChat remounts per chat.
-function LiveChat({
-  chat,
-  spaces,
-  warning,
-  handoff,
-  onChatChanged,
-  onChatUpdated,
-  onSpaceChange,
-  onUnarchive,
-  onCreateSpace,
-  onSpaceAssigned,
-}: {
-  chat: Chat;
-  spaces: Space[];
-  warning?: string;
-  handoff?: NewChatHandoff;
-  onChatChanged: () => void;
-  onChatUpdated: (chat: Chat) => void;
-  onSpaceChange: (spaceId: string) => void | Promise<void>;
-  onUnarchive: () => void;
-  onCreateSpace: () => void;
-  onSpaceAssigned: (spaceId: string) => void;
-}) {
-  const [startup] = useState(handoff);
-  const [initialMessages, setInitialMessages] = useState<
-    ChatUIMessage[] | null
-  >(startup?.loadMessages === false ? [] : null);
-  const [sandboxes, setSandboxes] = useState<SandboxWorkspace[]>([]);
-  const [messageRevision, setMessageRevision] = useState(0);
-  const [streamGeneration, setStreamGeneration] = useState(0);
-  const [showTerminal, setShowTerminal] = useState(false);
-  const [showSandboxForm, setShowSandboxForm] = useState(false);
-  const [preferredSandboxId, setPreferredSandboxId] = useState<string>();
-  const loadingSandboxes = useRef(false);
-  const reloadSandboxes = useRef(false);
-
-  const loadSandboxes = useCallback(async () => {
-    if (loadingSandboxes.current) {
-      reloadSandboxes.current = true;
-      return;
-    }
-    loadingSandboxes.current = true;
-    do {
-      reloadSandboxes.current = false;
-      try {
-        const response = await apiFetch(`/api/chats/${chat.id}/sandboxes`);
-        const found: SandboxWorkspace[] = response.ok ? await response.json() : [];
-        setSandboxes(found);
-        if (found.length) setShowTerminal(true);
-      } catch {
-        setSandboxes([]);
-      }
-    } while (reloadSandboxes.current);
-    loadingSandboxes.current = false;
-  }, [chat.id]);
-
-  useEffect(() => {
-    if (startup?.loadMessages !== false) {
-      apiFetch(`/api/chats/${chat.id}/messages`)
-        .then((res) => (res.ok ? res.json() : []))
-        .then(setInitialMessages)
-        .catch(() => setInitialMessages([]));
-    }
-    const frame = requestAnimationFrame(loadSandboxes);
-    return () => cancelAnimationFrame(frame);
-  }, [chat.id, loadSandboxes, startup]);
-
-  useEffect(() => {
-    const source = new EventSource(
-      `${apiBase()}/api/chats/${chat.id}/events`,
-      { withCredentials: true },
-    );
-    source.onmessage = (message) => {
-      const event = JSON.parse(message.data) as {
-        type?: string;
-        generation?: number;
-        state?: string;
-      };
-      if (event.type === "chat.changed") {
-        onChatChanged();
-      }
-      if (
-        event.type === "sandbox.changed" ||
-        (event.type === "task.changed" &&
-          ["pending", "attention", "complete", "errored", "cancelled"].includes(
-            event.state ?? "",
-          ))
-      ) {
-        loadSandboxes();
-      }
-      if (event.type === "messages.changed") {
-        setMessageRevision((revision) => revision + 1);
-      }
-      if (
-        event.type === "stream.available" &&
-        typeof event.generation === "number"
-      ) {
-        const announcedGeneration = event.generation + 1;
-        setStreamGeneration((generation) =>
-          Math.max(generation, announcedGeneration),
-        );
-      }
-    };
-    return () => source.close();
-  }, [chat.id, loadSandboxes, onChatChanged]);
-
-  const onMessagesChange = useCallback(
-    (messages: ChatUIMessage[]) => {
-      const assignment = messages
-        .flatMap((message) => message.parts)
-        .findLast(
-          (part) =>
-            part.type === "data-space-assignment" &&
-            part.data.state === "assigned",
-        );
-      if (
-        assignment?.type === "data-space-assignment" &&
-        assignment.data.space_id
-      ) {
-        onSpaceAssigned(assignment.data.space_id);
-      }
-    },
-    [onSpaceAssigned],
-  );
-
-  if (initialMessages === null) return <div className="flex-1" />;
-
-  return (
-    <div className="@container flex min-h-0 flex-1">
-      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col @4xl:flex-row">
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col @4xl:min-w-[28rem]">
-          {warning && (
-            <div className="p-3 pb-0">
-              <RepositoryWarning warning={warning} />
-            </div>
-          )}
-          <ChatView
-            chatId={chat.id}
-            initialMessages={initialMessages}
-            spaceId={chat.space_id}
-            spaces={spaces}
-            messageRevision={messageRevision}
-            streamGeneration={streamGeneration}
-            traceId={chat.telemetry_span?.trace_id ?? null}
-            archived={chat.archived_at !== null}
-            attentionReason={chat.attention_reason}
-            handoff={startup}
-            onMessagesChange={onMessagesChange}
-            onSeen={onChatUpdated}
-            onSpaceChange={onSpaceChange}
-            onUnarchive={onUnarchive}
-            onCreateSandbox={() => setShowSandboxForm(true)}
-            onCreateSpace={onCreateSpace}
-          />
-        </div>
-        {sandboxes.length > 0 && !showTerminal && (
-          <Button
-            variant="outline"
-            size="sm"
-            className="absolute top-2 right-2"
-            onClick={() => setShowTerminal(true)}
-          >
-            <TerminalIcon />
-            terminal
-          </Button>
-        )}
-        {showTerminal && sandboxes.length > 0 && (
-          <TerminalPane
-            key={`${chat.id}:${preferredSandboxId ?? ""}`}
-            chatId={chat.id}
-            sandboxes={sandboxes}
-            preferredSandboxId={preferredSandboxId}
-            onClose={() => setShowTerminal(false)}
-            onCreateSandbox={() => setShowSandboxForm(true)}
-            onChanged={loadSandboxes}
-          />
-        )}
-        <SandboxForm
-          chatId={chat.id}
-          open={showSandboxForm}
-          onOpenChange={setShowSandboxForm}
-          onCreated={(sandboxId) => {
-            setPreferredSandboxId(sandboxId);
-            setShowTerminal(true);
-            loadSandboxes();
-          }}
-        />
-      </div>
-    </div>
   );
 }

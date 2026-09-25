@@ -2,12 +2,94 @@
   "format": 1,
   "processes": [
     {
-      "module": "agent.durable",
-      "name": "DurableDispatcher",
+      "module": "hatchery.agent.supervisor",
+      "name": "Supervisor",
       "state": {
         "fields": [
           {
+            "name": "agent_id",
+            "required": false
+          },
+          {
+            "name": "retiring",
+            "required": false
+          },
+          {
+            "name": "budget",
+            "required": false
+          },
+          {
+            "name": "threads",
+            "required": false
+          },
+          {
+            "name": "requests",
+            "required": false
+          },
+          {
+            "name": "waiting",
+            "required": false
+          },
+          {
+            "name": "secret_requests",
+            "required": false
+          }
+        ],
+        "module": "hatchery.agent.supervisor",
+        "name": "SupervisorState"
+      }
+    },
+    {
+      "module": "hatchery.agent.thread",
+      "name": "AgentThread",
+      "state": {
+        "fields": [
+          {
+            "name": "owner",
+            "required": false
+          },
+          {
             "name": "chat_id",
+            "required": false
+          },
+          {
+            "name": "actor_user_id",
+            "required": false
+          },
+          {
+            "name": "repos",
+            "required": false
+          },
+          {
+            "name": "branch",
+            "required": false
+          },
+          {
+            "name": "sandbox",
+            "required": false
+          },
+          {
+            "name": "base_sha",
+            "required": false
+          },
+          {
+            "name": "upstream",
+            "required": false
+          },
+          {
+            "name": "upstream_sha",
+            "required": false
+          },
+          {
+            "name": "parent_thread_id",
+            "required": false
+          },
+          {
+            "name": "depth",
+            "required": false
+          },
+          {
+            "name": "objective",
             "required": false
           },
           {
@@ -15,15 +97,151 @@
             "required": false
           },
           {
-            "name": "phase",
+            "name": "pending",
             "required": false
           },
           {
-            "name": "active_turn",
+            "name": "calls",
             "required": false
           },
           {
-            "name": "pending_turns",
+            "name": "running",
+            "required": false
+          },
+          {
+            "name": "results",
+            "required": false
+          },
+          {
+            "name": "control",
+            "required": false
+          },
+          {
+            "name": "completion",
+            "required": false
+          },
+          {
+            "name": "admission",
+            "required": false
+          },
+          {
+            "name": "held_epoch",
+            "required": false
+          },
+          {
+            "name": "compaction",
+            "required": false
+          },
+          {
+            "name": "last_compaction",
+            "required": false
+          },
+          {
+            "name": "consolidating",
+            "required": false
+          },
+          {
+            "name": "handoffs",
+            "required": false
+          },
+          {
+            "name": "proposals",
+            "required": false
+          },
+          {
+            "name": "updated",
+            "required": false
+          },
+          {
+            "name": "conflicts",
+            "required": false
+          },
+          {
+            "name": "core_context_revisions",
+            "required": false
+          },
+          {
+            "name": "core_updated",
+            "required": false
+          },
+          {
+            "name": "archived",
+            "required": false
+          },
+          {
+            "name": "task_id",
+            "required": false
+          },
+          {
+            "name": "task_handle",
+            "required": false
+          },
+          {
+            "name": "task_status",
+            "required": false
+          },
+          {
+            "name": "task_cancelled",
+            "required": false
+          },
+          {
+            "name": "completion_summary",
+            "required": false
+          },
+          {
+            "name": "completion_result",
+            "required": false
+          },
+          {
+            "name": "deliverables",
+            "required": false
+          },
+          {
+            "name": "delegations",
+            "required": false
+          },
+          {
+            "name": "tasks",
+            "required": false
+          },
+          {
+            "name": "task_sequence",
+            "required": false
+          },
+          {
+            "name": "interrupt_after_tool",
+            "required": false
+          },
+          {
+            "name": "signals",
+            "required": false
+          },
+          {
+            "name": "dirty",
+            "required": false
+          },
+          {
+            "name": "sandbox_live",
+            "required": false
+          },
+          {
+            "name": "sandbox_needs_sync",
+            "required": false
+          },
+          {
+            "name": "turns",
+            "required": false
+          },
+          {
+            "name": "ceiling",
+            "required": false
+          },
+          {
+            "name": "epoch",
+            "required": false
+          },
+          {
+            "name": "quiet_until",
             "required": false
           },
           {
@@ -31,15 +249,15 @@
             "required": false
           },
           {
-            "name": "tool_calls",
+            "name": "turn",
             "required": false
           },
           {
-            "name": "tool_results",
+            "name": "turn_queue",
             "required": false
           },
           {
-            "name": "tools",
+            "name": "turn_sequence",
             "required": false
           },
           {
@@ -51,16 +269,142 @@
             "required": false
           },
           {
-            "name": "turns",
+            "name": "unstreamed",
+            "required": false
+          },
+          {
+            "name": "finishing",
+            "required": false
+          },
+          {
+            "name": "seen_inputs",
+            "required": false
+          },
+          {
+            "name": "input_tokens",
+            "required": false
+          },
+          {
+            "name": "output_tokens",
+            "required": false
+          },
+          {
+            "name": "last_input_tokens",
+            "required": false
+          },
+          {
+            "name": "compactions",
+            "required": false
+          },
+          {
+            "name": "summary",
+            "required": false
+          },
+          {
+            "name": "result",
             "required": false
           },
           {
             "name": "error",
             "required": false
+          },
+          {
+            "name": "checkpoint_sha",
+            "required": false
+          },
+          {
+            "name": "context_cache_sha",
+            "required": false
           }
         ],
-        "module": "agent.durable",
-        "name": "DispatcherState"
+        "module": "hatchery.agent.thread",
+        "name": "ThreadState"
+      }
+    },
+    {
+      "module": "hatchery.serve.scheduling",
+      "name": "ScheduleRegistry",
+      "state": {
+        "fields": [
+          {
+            "name": "revision",
+            "required": false
+          },
+          {
+            "name": "agents",
+            "required": false
+          }
+        ],
+        "module": "hatchery.serve.scheduling",
+        "name": "ScheduleRegistryState"
+      }
+    },
+    {
+      "module": "hatchery.serve.scheduling",
+      "name": "Scheduler",
+      "state": {
+        "fields": [
+          {
+            "name": "agent_id",
+            "required": false
+          },
+          {
+            "name": "revision",
+            "required": false
+          },
+          {
+            "name": "generation",
+            "required": false
+          },
+          {
+            "name": "jobs",
+            "required": false
+          },
+          {
+            "name": "running",
+            "required": false
+          },
+          {
+            "name": "history",
+            "required": false
+          },
+          {
+            "name": "last_failure_prompt",
+            "required": false
+          },
+          {
+            "name": "paused",
+            "required": false
+          }
+        ],
+        "module": "hatchery.serve.scheduling",
+        "name": "SchedulerState"
+      }
+    },
+    {
+      "module": "hatchery.vault",
+      "name": "SecretVault",
+      "state": {
+        "fields": [
+          {
+            "name": "agent_id",
+            "required": false
+          },
+          {
+            "name": "secrets",
+            "required": false
+          },
+          {
+            "name": "updated_at",
+            "required": false
+          },
+          {
+            "name": "retired",
+            "required": false
+          }
+        ],
+        "module": "hatchery.vault",
+        "name": "SecretVaultState"
       }
     },
     {
@@ -79,7 +423,7 @@
     },
     {
       "module": "rotor.patterns.task",
-      "name": "announce_turn",
+      "name": "announce_thread_turn",
       "state": {
         "fields": [],
         "module": "rotor.messages",
@@ -88,7 +432,7 @@
     },
     {
       "module": "rotor.patterns.task",
-      "name": "deliver_turn",
+      "name": "cleanup_sandbox",
       "state": {
         "fields": [],
         "module": "rotor.messages",
@@ -97,7 +441,7 @@
     },
     {
       "module": "rotor.patterns.task",
-      "name": "project_turn",
+      "name": "consolidate",
       "state": {
         "fields": [],
         "module": "rotor.messages",
@@ -106,7 +450,70 @@
     },
     {
       "module": "rotor.patterns.task",
-      "name": "run_tool",
+      "name": "execute_scheduled_job",
+      "state": {
+        "fields": [],
+        "module": "rotor.messages",
+        "name": "EmptyState"
+      }
+    },
+    {
+      "module": "rotor.patterns.task",
+      "name": "finish_turn",
+      "state": {
+        "fields": [],
+        "module": "rotor.messages",
+        "name": "EmptyState"
+      }
+    },
+    {
+      "module": "rotor.patterns.task",
+      "name": "prompt_agent",
+      "state": {
+        "fields": [],
+        "module": "rotor.messages",
+        "name": "EmptyState"
+      }
+    },
+    {
+      "module": "rotor.patterns.task",
+      "name": "register_thread_turn",
+      "state": {
+        "fields": [],
+        "module": "rotor.messages",
+        "name": "EmptyState"
+      }
+    },
+    {
+      "module": "rotor.patterns.task",
+      "name": "run_bash",
+      "state": {
+        "fields": [],
+        "module": "rotor.messages",
+        "name": "EmptyState"
+      }
+    },
+    {
+      "module": "rotor.patterns.task",
+      "name": "run_hatchery_tool",
+      "state": {
+        "fields": [],
+        "module": "rotor.messages",
+        "name": "EmptyState"
+      }
+    },
+    {
+      "module": "rotor.patterns.task",
+      "name": "run_review",
+      "state": {
+        "fields": [],
+        "module": "rotor.messages",
+        "name": "EmptyState"
+      }
+    },
+    {
+      "module": "rotor.patterns.task",
+      "name": "run_skill_view",
       "state": {
         "fields": [],
         "module": "rotor.messages",
@@ -145,7 +552,382 @@
       "aliases": [],
       "fields": [
         {
+          "name": "ceiling",
+          "required": false
+        },
+        {
+          "name": "day",
+          "required": false
+        },
+        {
+          "name": "spent",
+          "required": false
+        },
+        {
+          "name": "granted",
+          "required": false
+        },
+        {
+          "name": "grants",
+          "required": false
+        }
+      ],
+      "module": "hatchery.agent.budget",
+      "name": "Budget",
+      "role": "state",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "agent_id",
+          "required": false
+        },
+        {
+          "name": "retiring",
+          "required": false
+        },
+        {
+          "name": "budget",
+          "required": false
+        },
+        {
+          "name": "threads",
+          "required": false
+        },
+        {
+          "name": "requests",
+          "required": false
+        },
+        {
+          "name": "waiting",
+          "required": false
+        },
+        {
+          "name": "secret_requests",
+          "required": false
+        }
+      ],
+      "module": "hatchery.agent.supervisor",
+      "name": "SupervisorState",
+      "role": "state",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "thread_id",
+          "required": false
+        },
+        {
           "name": "chat_id",
+          "required": false
+        },
+        {
+          "name": "task_id",
+          "required": false
+        },
+        {
+          "name": "task_handle",
+          "required": false
+        },
+        {
+          "name": "parent_thread_id",
+          "required": false
+        },
+        {
+          "name": "children",
+          "required": false
+        },
+        {
+          "name": "depth",
+          "required": false
+        },
+        {
+          "name": "branch",
+          "required": false
+        },
+        {
+          "name": "upstream",
+          "required": false
+        },
+        {
+          "name": "sandbox",
+          "required": false
+        },
+        {
+          "name": "objective",
+          "required": false
+        },
+        {
+          "name": "repository",
+          "required": false
+        },
+        {
+          "name": "repository_branch",
+          "required": false
+        },
+        {
+          "name": "status",
+          "required": false
+        },
+        {
+          "name": "live",
+          "required": false
+        },
+        {
+          "name": "archived",
+          "required": false
+        },
+        {
+          "name": "error",
+          "required": false
+        },
+        {
+          "name": "cleanup",
+          "required": false
+        },
+        {
+          "name": "summary",
+          "required": false
+        },
+        {
+          "name": "result",
+          "required": false
+        },
+        {
+          "name": "signals",
+          "required": false
+        },
+        {
+          "name": "input_tokens",
+          "required": false
+        },
+        {
+          "name": "output_tokens",
+          "required": false
+        },
+        {
+          "name": "turns",
+          "required": false
+        },
+        {
+          "name": "ceiling",
+          "required": false
+        },
+        {
+          "name": "compactions",
+          "required": false
+        },
+        {
+          "name": "checkpoint_sha",
+          "required": false
+        },
+        {
+          "name": "base_sha",
+          "required": false
+        },
+        {
+          "name": "handoffs",
+          "required": false
+        },
+        {
+          "name": "proposals",
+          "required": false
+        },
+        {
+          "name": "task_status",
+          "required": false
+        },
+        {
+          "name": "completion_summary",
+          "required": false
+        },
+        {
+          "name": "completion_result",
+          "required": false
+        },
+        {
+          "name": "deliverables",
+          "required": false
+        },
+        {
+          "name": "cancel_reason",
+          "required": false
+        }
+      ],
+      "module": "hatchery.agent.supervisor",
+      "name": "ThreadRecord",
+      "role": "state",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "task_id",
+          "required": false
+        },
+        {
+          "name": "handle",
+          "required": false
+        },
+        {
+          "name": "thread_id",
+          "required": false
+        },
+        {
+          "name": "chat_id",
+          "required": false
+        },
+        {
+          "name": "objective",
+          "required": false
+        },
+        {
+          "name": "status",
+          "required": false
+        },
+        {
+          "name": "summary",
+          "required": false
+        },
+        {
+          "name": "result",
+          "required": false
+        },
+        {
+          "name": "deliverables",
+          "required": false
+        },
+        {
+          "name": "archived",
+          "required": false
+        },
+        {
+          "name": "proposals",
+          "required": false
+        }
+      ],
+      "module": "hatchery.agent.thread",
+      "name": "ChildTask",
+      "role": "state",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "reason",
+          "required": false
+        },
+        {
+          "name": "keep",
+          "required": false
+        },
+        {
+          "name": "estimate",
+          "required": false
+        }
+      ],
+      "module": "hatchery.agent.thread",
+      "name": "Compaction",
+      "role": "state",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "summary",
+          "required": false
+        },
+        {
+          "name": "result",
+          "required": false
+        },
+        {
+          "name": "deliverables",
+          "required": false
+        },
+        {
+          "name": "call",
+          "required": false
+        }
+      ],
+      "module": "hatchery.agent.thread",
+      "name": "Completion",
+      "role": "state",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "note",
+          "required": false
+        },
+        {
+          "name": "call",
+          "required": false
+        }
+      ],
+      "module": "hatchery.agent.thread",
+      "name": "Idle",
+      "role": "state",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "owner",
+          "required": false
+        },
+        {
+          "name": "chat_id",
+          "required": false
+        },
+        {
+          "name": "actor_user_id",
+          "required": false
+        },
+        {
+          "name": "repos",
+          "required": false
+        },
+        {
+          "name": "branch",
+          "required": false
+        },
+        {
+          "name": "sandbox",
+          "required": false
+        },
+        {
+          "name": "base_sha",
+          "required": false
+        },
+        {
+          "name": "upstream",
+          "required": false
+        },
+        {
+          "name": "upstream_sha",
+          "required": false
+        },
+        {
+          "name": "parent_thread_id",
+          "required": false
+        },
+        {
+          "name": "depth",
+          "required": false
+        },
+        {
+          "name": "objective",
           "required": false
         },
         {
@@ -153,15 +935,151 @@
           "required": false
         },
         {
-          "name": "phase",
+          "name": "pending",
           "required": false
         },
         {
-          "name": "active_turn",
+          "name": "calls",
           "required": false
         },
         {
-          "name": "pending_turns",
+          "name": "running",
+          "required": false
+        },
+        {
+          "name": "results",
+          "required": false
+        },
+        {
+          "name": "control",
+          "required": false
+        },
+        {
+          "name": "completion",
+          "required": false
+        },
+        {
+          "name": "admission",
+          "required": false
+        },
+        {
+          "name": "held_epoch",
+          "required": false
+        },
+        {
+          "name": "compaction",
+          "required": false
+        },
+        {
+          "name": "last_compaction",
+          "required": false
+        },
+        {
+          "name": "consolidating",
+          "required": false
+        },
+        {
+          "name": "handoffs",
+          "required": false
+        },
+        {
+          "name": "proposals",
+          "required": false
+        },
+        {
+          "name": "updated",
+          "required": false
+        },
+        {
+          "name": "conflicts",
+          "required": false
+        },
+        {
+          "name": "core_context_revisions",
+          "required": false
+        },
+        {
+          "name": "core_updated",
+          "required": false
+        },
+        {
+          "name": "archived",
+          "required": false
+        },
+        {
+          "name": "task_id",
+          "required": false
+        },
+        {
+          "name": "task_handle",
+          "required": false
+        },
+        {
+          "name": "task_status",
+          "required": false
+        },
+        {
+          "name": "task_cancelled",
+          "required": false
+        },
+        {
+          "name": "completion_summary",
+          "required": false
+        },
+        {
+          "name": "completion_result",
+          "required": false
+        },
+        {
+          "name": "deliverables",
+          "required": false
+        },
+        {
+          "name": "delegations",
+          "required": false
+        },
+        {
+          "name": "tasks",
+          "required": false
+        },
+        {
+          "name": "task_sequence",
+          "required": false
+        },
+        {
+          "name": "interrupt_after_tool",
+          "required": false
+        },
+        {
+          "name": "signals",
+          "required": false
+        },
+        {
+          "name": "dirty",
+          "required": false
+        },
+        {
+          "name": "sandbox_live",
+          "required": false
+        },
+        {
+          "name": "sandbox_needs_sync",
+          "required": false
+        },
+        {
+          "name": "turns",
+          "required": false
+        },
+        {
+          "name": "ceiling",
+          "required": false
+        },
+        {
+          "name": "epoch",
+          "required": false
+        },
+        {
+          "name": "quiet_until",
           "required": false
         },
         {
@@ -169,15 +1087,15 @@
           "required": false
         },
         {
-          "name": "tool_calls",
+          "name": "turn",
           "required": false
         },
         {
-          "name": "tool_results",
+          "name": "turn_queue",
           "required": false
         },
         {
-          "name": "tools",
+          "name": "turn_sequence",
           "required": false
         },
         {
@@ -189,16 +1107,56 @@
           "required": false
         },
         {
-          "name": "turns",
+          "name": "unstreamed",
+          "required": false
+        },
+        {
+          "name": "finishing",
+          "required": false
+        },
+        {
+          "name": "seen_inputs",
+          "required": false
+        },
+        {
+          "name": "input_tokens",
+          "required": false
+        },
+        {
+          "name": "output_tokens",
+          "required": false
+        },
+        {
+          "name": "last_input_tokens",
+          "required": false
+        },
+        {
+          "name": "compactions",
+          "required": false
+        },
+        {
+          "name": "summary",
+          "required": false
+        },
+        {
+          "name": "result",
           "required": false
         },
         {
           "name": "error",
           "required": false
+        },
+        {
+          "name": "checkpoint_sha",
+          "required": false
+        },
+        {
+          "name": "context_cache_sha",
+          "required": false
         }
       ],
-      "module": "agent.durable",
-      "name": "DispatcherState",
+      "module": "hatchery.agent.thread",
+      "name": "ThreadState",
       "role": "state",
       "version": 1
     },
@@ -206,7 +1164,24 @@
       "aliases": [],
       "fields": [
         {
-          "name": "turn_id",
+          "name": "thread_id",
+          "required": true
+        },
+        {
+          "name": "epoch",
+          "required": true
+        }
+      ],
+      "module": "hatchery.messages",
+      "name": "Admit",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "epoch",
           "required": true
         },
         {
@@ -214,8 +1189,726 @@
           "required": false
         }
       ],
-      "module": "agent.durable",
-      "name": "Generate",
+      "module": "hatchery.messages",
+      "name": "Admitted",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "task_id",
+          "required": true
+        },
+        {
+          "name": "source_thread_id",
+          "required": true
+        }
+      ],
+      "module": "hatchery.messages",
+      "name": "ArchiveTask",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "thread_id",
+          "required": true
+        },
+        {
+          "name": "archived",
+          "required": false
+        }
+      ],
+      "module": "hatchery.messages",
+      "name": "ArchiveThread",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "reason",
+          "required": true
+        }
+      ],
+      "module": "hatchery.messages",
+      "name": "CancelAssignedTask",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "task_id",
+          "required": true
+        },
+        {
+          "name": "source_thread_id",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "required": true
+        }
+      ],
+      "module": "hatchery.messages",
+      "name": "CancelTask",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "thread_id",
+          "required": true
+        }
+      ],
+      "module": "hatchery.messages",
+      "name": "Cleanup",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "task_id",
+          "required": true
+        },
+        {
+          "name": "source_thread_id",
+          "required": true
+        },
+        {
+          "name": "objective",
+          "required": true
+        },
+        {
+          "name": "repository",
+          "required": false
+        },
+        {
+          "name": "branch",
+          "required": false
+        },
+        {
+          "name": "upstream_sha",
+          "required": false
+        },
+        {
+          "name": "task_handle",
+          "required": false
+        }
+      ],
+      "module": "hatchery.messages",
+      "name": "DelegateTask",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "task_id",
+          "required": true
+        },
+        {
+          "name": "objective",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "required": true
+        }
+      ],
+      "module": "hatchery.messages",
+      "name": "DelegationRejected",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "id",
+          "required": true
+        },
+        {
+          "name": "amount",
+          "required": true
+        }
+      ],
+      "module": "hatchery.messages",
+      "name": "Grant",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "epoch",
+          "required": true
+        }
+      ],
+      "module": "hatchery.messages",
+      "name": "Held",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "task_id",
+          "required": true
+        },
+        {
+          "name": "thread_id",
+          "required": true
+        },
+        {
+          "name": "text",
+          "required": true
+        }
+      ],
+      "module": "hatchery.messages",
+      "name": "MessageParent",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "task_id",
+          "required": true
+        },
+        {
+          "name": "source_thread_id",
+          "required": true
+        },
+        {
+          "name": "text",
+          "required": true
+        }
+      ],
+      "module": "hatchery.messages",
+      "name": "MessageTask",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [],
+      "module": "hatchery.messages",
+      "name": "NewDay",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "text",
+          "required": true
+        },
+        {
+          "name": "request_id",
+          "required": true
+        },
+        {
+          "name": "thread_id",
+          "required": false
+        },
+        {
+          "name": "source",
+          "required": false
+        },
+        {
+          "name": "actor_user_id",
+          "required": false
+        }
+      ],
+      "module": "hatchery.messages",
+      "name": "Prompt",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "branch",
+          "required": true
+        },
+        {
+          "name": "proposal_sha",
+          "required": true
+        },
+        {
+          "name": "merge_sha",
+          "required": true
+        }
+      ],
+      "module": "hatchery.messages",
+      "name": "ProposalAccepted",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "task_id",
+          "required": true
+        },
+        {
+          "name": "source_thread_id",
+          "required": true
+        },
+        {
+          "name": "branch",
+          "required": true
+        },
+        {
+          "name": "proposal_sha",
+          "required": true
+        },
+        {
+          "name": "merge_sha",
+          "required": true
+        }
+      ],
+      "module": "hatchery.messages",
+      "name": "ProposalMerged",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "epoch",
+          "required": true
+        }
+      ],
+      "module": "hatchery.messages",
+      "name": "ReleaseSandbox",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "reason",
+          "required": false
+        }
+      ],
+      "module": "hatchery.messages",
+      "name": "Resume",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "reason",
+          "required": false
+        }
+      ],
+      "module": "hatchery.messages",
+      "name": "Retire",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "task_id",
+          "required": true
+        },
+        {
+          "name": "source_thread_id",
+          "required": true
+        },
+        {
+          "name": "section",
+          "required": true
+        },
+        {
+          "name": "decision",
+          "required": true
+        },
+        {
+          "name": "comment",
+          "required": false
+        }
+      ],
+      "module": "hatchery.messages",
+      "name": "ReviewTaskProposal",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "name",
+          "required": true
+        }
+      ],
+      "module": "hatchery.messages",
+      "name": "SecretProvided",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "name",
+          "required": true
+        },
+        {
+          "name": "note",
+          "required": true
+        }
+      ],
+      "module": "hatchery.messages",
+      "name": "SecretRequested",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "archived",
+          "required": true
+        }
+      ],
+      "module": "hatchery.messages",
+      "name": "SetArchived",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "id",
+          "required": true
+        },
+        {
+          "name": "note",
+          "required": false
+        }
+      ],
+      "module": "hatchery.messages",
+      "name": "Signal",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "tokens",
+          "required": true
+        }
+      ],
+      "module": "hatchery.messages",
+      "name": "Spent",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [],
+      "module": "hatchery.messages",
+      "name": "Step",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "reason",
+          "required": false
+        }
+      ],
+      "module": "hatchery.messages",
+      "name": "Stop",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "task_id",
+          "required": true
+        },
+        {
+          "name": "action",
+          "required": true
+        },
+        {
+          "name": "status",
+          "required": true
+        },
+        {
+          "name": "thread_ids",
+          "required": false
+        }
+      ],
+      "module": "hatchery.messages",
+      "name": "TaskActionAccepted",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "task_id",
+          "required": true
+        },
+        {
+          "name": "action",
+          "required": true
+        },
+        {
+          "name": "code",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "required": true
+        }
+      ],
+      "module": "hatchery.messages",
+      "name": "TaskActionRejected",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "task_id",
+          "required": true
+        },
+        {
+          "name": "thread_id",
+          "required": true
+        },
+        {
+          "name": "status",
+          "required": true
+        },
+        {
+          "name": "summary",
+          "required": true
+        },
+        {
+          "name": "result",
+          "required": true
+        },
+        {
+          "name": "deliverables",
+          "required": false
+        },
+        {
+          "name": "proposals",
+          "required": false
+        }
+      ],
+      "module": "hatchery.messages",
+      "name": "TaskCompleted",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "task_id",
+          "required": true
+        },
+        {
+          "name": "reporting_thread_id",
+          "required": true
+        },
+        {
+          "name": "objective",
+          "required": true
+        },
+        {
+          "name": "status",
+          "required": true
+        },
+        {
+          "name": "summary",
+          "required": true
+        },
+        {
+          "name": "result",
+          "required": true
+        },
+        {
+          "name": "deliverables",
+          "required": false
+        },
+        {
+          "name": "proposals",
+          "required": false
+        },
+        {
+          "name": "roster",
+          "required": false
+        },
+        {
+          "name": "task_handle",
+          "required": false
+        }
+      ],
+      "module": "hatchery.messages",
+      "name": "TaskCompletionInput",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "task_id",
+          "required": true
+        },
+        {
+          "name": "reporting_thread_id",
+          "required": true
+        },
+        {
+          "name": "objective",
+          "required": true
+        },
+        {
+          "name": "status",
+          "required": true
+        },
+        {
+          "name": "text",
+          "required": true
+        },
+        {
+          "name": "task_handle",
+          "required": false
+        }
+      ],
+      "module": "hatchery.messages",
+      "name": "TaskMessageInput",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "thread_id",
+          "required": true
+        },
+        {
+          "name": "status",
+          "required": true
+        },
+        {
+          "name": "summary",
+          "required": false
+        },
+        {
+          "name": "result",
+          "required": false
+        },
+        {
+          "name": "signals",
+          "required": false
+        },
+        {
+          "name": "input_tokens",
+          "required": false
+        },
+        {
+          "name": "output_tokens",
+          "required": false
+        },
+        {
+          "name": "turns",
+          "required": false
+        },
+        {
+          "name": "ceiling",
+          "required": false
+        },
+        {
+          "name": "compactions",
+          "required": false
+        },
+        {
+          "name": "checkpoint_sha",
+          "required": false
+        },
+        {
+          "name": "base_sha",
+          "required": false
+        },
+        {
+          "name": "handoffs",
+          "required": false
+        },
+        {
+          "name": "archived",
+          "required": false
+        },
+        {
+          "name": "task_status",
+          "required": false
+        },
+        {
+          "name": "completion_summary",
+          "required": false
+        },
+        {
+          "name": "completion_result",
+          "required": false
+        },
+        {
+          "name": "deliverables",
+          "required": false
+        },
+        {
+          "name": "proposals",
+          "required": false
+        },
+        {
+          "name": "error",
+          "required": false
+        }
+      ],
+      "module": "hatchery.messages",
+      "name": "ThreadReport",
       "role": "message",
       "version": 1
     },
@@ -235,7 +1928,7 @@
           "required": true
         },
         {
-          "name": "history",
+          "name": "messages",
           "required": false
         },
         {
@@ -251,9 +1944,278 @@
           "required": false
         }
       ],
-      "module": "agent.durable",
+      "module": "hatchery.messages",
       "name": "TurnInput",
       "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "name",
+          "required": true
+        }
+      ],
+      "module": "hatchery.serve.scheduling",
+      "name": "PauseSchedule",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "revision",
+          "required": true
+        },
+        {
+          "name": "schedules",
+          "required": true
+        }
+      ],
+      "module": "hatchery.serve.scheduling",
+      "name": "ReconcileSchedules",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "revision",
+          "required": true
+        },
+        {
+          "name": "agents",
+          "required": true
+        }
+      ],
+      "module": "hatchery.serve.scheduling",
+      "name": "RecordScheduleAgents",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "name",
+          "required": true
+        }
+      ],
+      "module": "hatchery.serve.scheduling",
+      "name": "ResumeSchedule",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "revision",
+          "required": false
+        },
+        {
+          "name": "agents",
+          "required": false
+        }
+      ],
+      "module": "hatchery.serve.scheduling",
+      "name": "ScheduleRegistryState",
+      "role": "state",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "name",
+          "required": true
+        },
+        {
+          "name": "handler_path",
+          "required": true
+        },
+        {
+          "name": "kind",
+          "required": true
+        },
+        {
+          "name": "value",
+          "required": true
+        },
+        {
+          "name": "timezone",
+          "required": true
+        },
+        {
+          "name": "digest",
+          "required": true
+        }
+      ],
+      "module": "hatchery.serve.scheduling",
+      "name": "ScheduleSpec",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "name",
+          "required": true
+        },
+        {
+          "name": "generation",
+          "required": true
+        },
+        {
+          "name": "scheduled_for",
+          "required": false
+        }
+      ],
+      "module": "hatchery.serve.scheduling",
+      "name": "ScheduledJobDue",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "spec",
+          "required": false
+        },
+        {
+          "name": "generation",
+          "required": false
+        },
+        {
+          "name": "ticker",
+          "required": false
+        }
+      ],
+      "module": "hatchery.serve.scheduling",
+      "name": "ScheduledJobState",
+      "role": "state",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "agent_id",
+          "required": false
+        },
+        {
+          "name": "revision",
+          "required": false
+        },
+        {
+          "name": "generation",
+          "required": false
+        },
+        {
+          "name": "jobs",
+          "required": false
+        },
+        {
+          "name": "running",
+          "required": false
+        },
+        {
+          "name": "history",
+          "required": false
+        },
+        {
+          "name": "last_failure_prompt",
+          "required": false
+        },
+        {
+          "name": "paused",
+          "required": false
+        }
+      ],
+      "module": "hatchery.serve.scheduling",
+      "name": "SchedulerState",
+      "role": "state",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "name",
+          "required": true
+        },
+        {
+          "name": "request_id",
+          "required": true
+        }
+      ],
+      "module": "hatchery.vault",
+      "name": "DeleteSecret",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "name",
+          "required": true
+        },
+        {
+          "name": "envelope",
+          "required": true
+        },
+        {
+          "name": "request_id",
+          "required": true
+        }
+      ],
+      "module": "hatchery.vault",
+      "name": "PutEncryptedSecret",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "request_id",
+          "required": true
+        }
+      ],
+      "module": "hatchery.vault",
+      "name": "RetireSecrets",
+      "role": "message",
+      "version": 1
+    },
+    {
+      "aliases": [],
+      "fields": [
+        {
+          "name": "agent_id",
+          "required": false
+        },
+        {
+          "name": "secrets",
+          "required": false
+        },
+        {
+          "name": "updated_at",
+          "required": false
+        },
+        {
+          "name": "retired",
+          "required": false
+        }
+      ],
+      "module": "hatchery.vault",
+      "name": "SecretVaultState",
+      "role": "state",
       "version": 1
     },
     {

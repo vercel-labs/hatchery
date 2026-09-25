@@ -1,472 +1,339 @@
 # Agentmesh → Hatchery migration plan
 
-Status: planned; no implementation or deployment performed.
+Status: phases 1-7 and the code side of 8 implemented in the working tree (see Progress), as version 0.2.0.dev0. The CLI was dropped by user decision. No deployments changed.
 
-Source baseline: local agentmesh checkout at `27242e9acdd7a080542c37cbb1d490cda631bb03`, inspected on 2026-09-25. This plan follows the user's clarified scope, which supersedes the narrower and partly conflicting wording in [direction.md](../direction.md).
+Source baseline: local agentmesh checkout at `27242e9acdd7a080542c37cbb1d490cda631bb03`, inspected on 2026-09-25.
 
-## 1. Decisions already made
+## 1. Scope rule
 
-- Rename spaces to **agents**, throughout the product, API, models, and stores. Do not retain spaces as a second grouping concept.
-- Agents remain **shared and named**, not owned by one human. Keep stable agent identity separate from display name, URL slug, and acting human.
-- Keep application and execution data in the database. Store the agent's files and their version history in Git.
-- Use `vercel-internal-playground/hatchery-storage` as the configured storage repository, through the existing Connect GitHub App. Make repository and canonical branch configuration explicit.
-- Each agent has a directory containing `AGENTS.md`. Port all implemented agentmesh workspace capabilities now, not just this one file.
-- Keep Hatchery's FastAPI service, Python AI SDK, Rotor, Vercel Sandbox, queues, fx workers, Vite, TanStack Router, and Base UI components.
-- Merge agentmesh capabilities into those systems. Do not host a second agentmesh application or model runtime alongside Hatchery.
-- Port both trees: the agent/task hierarchy and live sandbox filesystem tree. Port repository browsing, diffs, review, and the rest of the operator experience.
-- Copy agentmesh's Git lifecycle and publication policies rather than designing a replacement.
-- Start a sandbox before the first model turn, not when someone merely opens an empty composer. Use agentmesh's idle/recovery behavior.
-- Start fresh. No legacy data import, backfill, ID translation, or compatibility layer is required.
-- Port all implemented agentmesh features, including APIs, schedules, skills, scripts, secrets, budgets, compaction, templates, CLI, and setup. Preserve existing Hatchery capabilities.
+Port what agentmesh implements. Keep what Hatchery already has. Build nothing else.
 
-No further product decision blocks this plan. Technical uncertainties are explicit implementation gates below; they are not permission to quietly drop features.
+- A feature is in scope only if agentmesh or current Hatchery already has it.
+- Adapt only where the two must fit together: spaces become agents, agents are shared, and there is one app. When the two systems disagree, pick one side. Do not design a third option.
+- Agentmesh's own deferred work stays out: peer-agent messaging, private memory, other sandbox providers, specialized templates.
+- Hardening agentmesh never had is out too: new audit trails, staging-branch publishing, preview-isolation machinery, new fx integration contracts. Add it later as separate work if it's needed.
 
-## 2. Evidence and scope boundaries
+## 2. Decisions
 
-Agentmesh's implemented foundation includes the workspace engine, hierarchy, context, budgets, serving, schedules, CLI, and console. Its own roadmap still marks production certification incomplete. Port behavior and tests; do not assume a copied component is production-proven. See [roadmap](../.reference/agentmesh/lat.md/roadmap.md).
+- Rename spaces to **agents** throughout the product, API, models, and stores. There is no second grouping concept.
+- Agents stay **shared and named**, like spaces today. Agent ID stays separate from display name.
+- App and execution data stay in the DB. Agent files and their history live in Git.
+- Storage repo: `vercel-internal-playground/hatchery-storage`, reached through the existing Connect GitHub App. The canonical branch is `main`, same as agentmesh.
+- Each agent's directory has `AGENTS.md`, which takes the role of agentmesh's `SOUL.md`. All other agentmesh workspace features come too.
+- Keep Hatchery's FastAPI service, Python AI SDK, Rotor, Vercel Sandbox, queues, fx workers, Vite, TanStack Router, and Base UI.
+- An agentmesh thread becomes a Hatchery durable AI SDK loop. Both are already AI SDK loops on Rotor, so this adds no second runtime.
+- Existing fx subagents stay as they are today. They are a Hatchery capability. They are not agentmesh threads and are not in the agent task tree, budget, or compaction.
+- Copy agentmesh's Git lifecycle and review policies as they are.
+- The thread sandbox starts before the first model turn, as in agentmesh. Idle and recovery behavior follow agentmesh.
+- Start fresh. No legacy data import, ID translation, or compatibility layer.
 
-Key differences requiring adaptation:
+## 3. Removed from the earlier plan
 
-- Hatchery's dispatcher currently cannot inspect sandbox files and coordinates separate fx conversations. Agentmesh threads directly operate their own workspace. See [dispatcher](../backend/hatchery/agent/dispatcher.py) and [agentmesh thread](../.reference/agentmesh/src/agentmesh/agent/thread.py).
-- Hatchery's worker protocol exposes launch/input/cancel and output/transcript/completion events, not the full lifecycle needed for shared budgets and nested task control. See [protocol](../backend/hatchery/worker/protocol.py).
-- The current daemon treats an fx turn ending as task completion. Agentmesh distinguishes an idle conversation from an explicitly completed assignment. See [daemon](../backend/hatchery/worker/daemon/main.py) and [runtime contract](../.reference/agentmesh/docs/runtime.md).
-- Agentmesh's owner is a human identity. Here the corresponding scope is a shared agent ID; human identities remain attribution and credential subjects.
-- Agentmesh's source contains features absent from, or newer than, some prose guides. Resolve disagreements using implementation and behavioral tests. Do not copy stale lifecycle text literally.
+These were neither agentmesh features nor existing Hatchery features:
 
-Out of scope: agentmesh's own deferred features, such as arbitrary peer-agent messaging, private Git memory, and additional production sandbox providers. Existing Hatchery Slack/GitHub support and shared agents remain in scope even where agentmesh calls those future work.
+- **The fx lifecycle gate and everything built on it.** That covered pre-call admission hooks, fx compaction, per-call context refresh, full fx usage accounting, exact fx session binding, and fx child/grandchild trees with their own branches. Agentmesh has no fx. Its budgets, compaction, and delegation apply to its own AI SDK loops, and they will apply to Hatchery's durable loop. This was the only blocker.
+- **Configurable canonical and staging branches** (`HATCHERY_STORAGE_BRANCH`, staging publication tests). Agentmesh hardcodes `main`.
+- **Separate staging serve domain and preview-host acceptance.** Agentmesh's preview owner header is kept instead.
+- **Tool and terminal quiescence checks.** Agentmesh serializes sandbox operations inside a thread. That is kept.
+- **Carrying a credential subject through descendants, and audit attribution** for grants, secrets, and retirement. Hatchery's existing coding credentials and message authors are kept.
+- **Agent creation state machine** (creating/failed states with operation IDs). Creating an agent commits the template, like agentmesh `join`, and can simply be retried.
+- **Templates in the storage repo.** Agentmesh ships templates with the software, so Hatchery will too.
+- **Workspace marker files as the agent registry.** The DB is the registry.
+- **`init` and scaffolding a new deployable repo.** Agentmesh uses these to create a new mesh deployment. Hatchery is already that deployment. `setup` is kept only to check and reconcile the existing project.
+- **Cutover engineering.** That covered versioned worker protocol, preview namespace isolation, quiescing old ingress, a rollback plan, outage drills, and key-rotation docs.
 
-## 3. Target architecture
+## 4. Target architecture
 
-### 3.1 One execution system
+### 4.1 Execution roles
 
-Use Hatchery's existing execution roles:
+1. **Agent supervisor:** one Rotor process per agent, ported from agentmesh `Agent`. It routes prompts and task messages, owns the thread tree, and owns the daily budget. It does not call models, Git, or sandboxes.
+2. **Thread:** Hatchery's durable dispatcher loop, extended to match agentmesh `AgentThread`. A thread gets its own branch, sandbox, and shell/file/skill tools. It also gets context refresh, compaction, and idle/complete handoff. A root thread is a chat, so the chat ID, channel bindings, and transcript stay. Delegated threads are child threads of the same kind.
+3. **fx subagents:** unchanged. The launch, message, and check tools stay. They run in the chat's sandbox and do coding work under `/workspace/repos`.
+4. **Serving:** one sandbox per agent for published Python routes and Git schedules. It has no model loop.
 
-1. **Named-agent supervision:** deterministic routing, shared budget, task relationships, and lifecycle coordination on the existing Rotor worker. Port agentmesh's supervisory responsibilities; this layer does not run another model loop.
-2. **Root chat:** the current durable Hatchery dispatcher, extended with its own workspace, sandbox tools, context preparation, signals, compaction, and publication.
-3. **Delegated task:** an fx session managed by Hatchery, extended with the same workspace and task lifecycle contracts.
-4. **Serving:** a separate sandbox per agent for published Python routes and scheduled jobs. It is not a coding worker and has no model loop.
+Sources: [agentmesh architecture](../.reference/agentmesh/lat.md/architecture.md), [agent supervisor](../.reference/agentmesh/src/agentmesh/agent/agent.py), [agentmesh thread](../.reference/agentmesh/src/agentmesh/agent/thread.py), [Hatchery thread](../backend/hatchery/agent/thread.py).
 
-A root chat and its descendants form one canonical task tree. Keep the existing chat ID for channel bindings and transcripts; represent root/child execution relationships explicitly rather than inferring them from sandbox membership. Do not create a second disconnected tree for native fx children.
+### 4.2 Data ownership
 
-Every writable execution workspace has one owning execution. Parent and child do not concurrently modify the same agent-file tree. A shared agent's conversations share integrated memory through Git, not through one writable sandbox.
-
-Sources: [agentmesh architecture](../.reference/agentmesh/lat.md/architecture.md), [agent supervisor](../.reference/agentmesh/src/agentmesh/agent/agent.py), [Hatchery Rotor wiring](../backend/hatchery/agent/runtime.py).
-
-### 3.2 Data ownership
-
-| Database: authoritative operational state | Git: authoritative agent files |
+| Database | Git |
 | --- | --- |
-| Agent ID, name, slug, color, resource/repo associations, status, settings | `AGENTS.md`, shared operating context, core and topic memory |
-| Users, sessions, connection references, acting identity, audit attribution | Skills, scripts, shared Python libraries, pinned dependencies |
-| Chats, complete transcripts, events, channel bindings, request deduplication | Python API routes and recurring job declarations |
-| Rotor state, task tree, assignment status, pending inputs, signals | Shared wiki, team prompt, team skills, starter templates |
-| Worker/session references, leases, budgets, usage, grants, cleanup state | Thread branches, checkpoints, proposals, merge ancestry |
-| Encrypted secrets, secret requests, schedule pause overrides and run results | No secrets, credentials, runtime journals, or worker records |
-| Git operation IDs, revision pointers, review audit/projections | Proposal contents and historical file snapshots |
+| Agents (replace spaces): ID, name, color, repos/resources, settings | `AGENTS.md`, `USER.md`, `MEMORY.md`, `memories/` |
+| Users, sessions, connections (existing) | Skills, scripts, `lib/`, `requirements.txt` |
+| Chats, transcripts, events, channel bindings (existing) | `api/` routes, `schedules/` jobs |
+| Rotor state: thread tree, assignment status, messages, budget | `wiki/` (shared prompt and team skills) |
+| Encrypted secrets, schedule pauses and results | Thread branches, checkpoints, proposals |
+| Prompt jobs (existing) | No secrets or runtime state |
 
-Do not keep separately editable DB notes and Git memory. Move the notes capability to Git files; do not migrate old notes. The old freeform space description becomes agent instructions, not a competing DB prompt body.
+Notes move to Git memory. Old notes are not migrated. The space description becomes the agent's `AGENTS.md`.
 
-File declarations, such as `SCHEDULE`, remain in Git. Derived availability, next occurrence, pauses, and results belong in DB. Configuration that controls privileged publication, credentials, or budgets is operator-managed, not silently overridden by agent-edited files.
+`USER.md` holds shared team context, because agents are shared rather than personal.
 
-Sandbox files are working copies. `scratchpad/`, coding checkouts, fx session artifacts, and serving data are separate from curated agent memory. Preserve agentmesh's serving-local `/workspace/data` capability, including its documented loss on sandbox destruction; it is not a replacement for Hatchery's DB or a guarantee of durable application storage. Do not introduce a new general-purpose database SDK as part of this port. Workloads needing durable application data must use an explicit database integration.
-
-Sources: [Hatchery models](../backend/hatchery/models.py), [workspace contract](../.reference/agentmesh/docs/workspace.md), [handler data contract](../.reference/agentmesh/docs/api-routes.md).
-
-### 3.3 Repository and sandbox layout
-
-Adapt agentmesh's path mapping, not its Git algorithm. Use a stable directory key independent of an agent's display name:
+### 4.3 Repository and sandbox layout
 
 ```text
 hatchery-storage/
-  templates/default/
-    AGENTS.md
-    USER.md
-    MEMORY.md
-    memories/
-    skills/
-    scripts/
-    requirements.txt
   agents/<agent-id>/
-    AGENTS.md
-    USER.md
-    MEMORY.md
-    memories/
-    skills/<name>/SKILL.md
-    scripts/
-    requirements.txt
-    lib/
+    AGENTS.md  USER.md  MEMORY.md  memories/
+    skills/<name>/SKILL.md  scripts/  requirements.txt  lib/
     api/<route>/route.py
     schedules/<name>/job.py
   wiki/
     PROMPT.md
     skills/<name>/SKILL.md
-    ...
 ```
 
-- `AGENTS.md` takes the instruction/persona role of agentmesh's `SOUL.md`; avoid two competing persona files.
-- `USER.md` means shared team/project operating context here, not the private profile of the first person who creates an agent. UI and templates must explain that.
-- Templates seed a new workspace; runtime documentation, SDK, and helper scripts remain packaged with Hatchery and update on deployment.
-- Port agentmesh's runtime-only workspace identity marker with Hatchery naming. It is not agent-editable or displayed as user content; the agent registry itself remains DB-owned.
-- Creation is a recoverable DB/Git operation. Keep a creating/failed state until the initial directory commit succeeds; retry with the same operation ID.
+The default template, runtime skills, helper scripts, and SDK ship with Hatchery.
 
-Thread sandbox mapping:
+Thread sandbox, same as agentmesh with Hatchery naming:
 
 ```text
-/workspace/self         agent directory on this execution's branch
-/workspace/wiki         shared wiki on this execution's branch
-/workspace/collective   other agents' integrated files, read-only
-/workspace/scratchpad   disposable local notes
-/workspace/repos       independent coding repositories
-/workspace/.hatchery    runtime helpers, environment cache, session metadata
+/workspace/self         agent directory on this thread's branch
+/workspace/wiki         shared wiki on this thread's branch
+/workspace/collective   other agents on main, read-only
+/workspace/scratchpad   disposable, not checkpointed
+/workspace/repos        coding repositories (thread and fx subagents)
+/workspace/.hatchery    runtime helpers, venvs
 ```
 
-Coding-repository instructions remain scoped to their repositories. Explicitly test how fx discovers `AGENTS.md` so workspace instructions are neither omitted nor duplicated.
-
-## 4. Feature parity map
-
-Every row must land in code, an operator path where applicable, and behavior-based tests before migration is complete.
-
-| Capability | Reference | Hatchery destination / adaptation |
-| --- | --- | --- |
-| Creation, templates, configuration validation | `config.py`, `templates/`, `workspace/repo.py` | Shared Agent registry, creation flow, packaged default template and repo initialization |
-| Checkpoints, refresh, merge, proposals, GitHub/local review | `workspace/`, `agent/tools.py` | Shared workspace service used by dispatcher and fx tasks |
-| Main, thread, full/latest and proposal browsing | `workspace/browser.py`, console repository features | Authenticated repository endpoints and existing router |
-| Immediate thread sandbox, idle stop/resume, recovery | `sandbox/`, `agent/thread.py` | Extend current sandbox/worker adapters; separate execution and serving purposes |
-| Runtime/team/agent skills; pins and override warnings | `agent/context.py`, runtime assets | Same context rules for root and fx execution |
-| Persona, core memory, topic-memory catalog, shared prompt | `agent/context.py`, templates | Git-backed context; `AGENTS.md` naming and shared `USER.md` semantics |
-| Helpers, editable scripts, dependency environments | `runtime/`, `sandbox/dependencies.py` | Packaged Hatchery helpers and sandbox preparation |
-| Prompt buffering, signals, turn limits, resume | `agent/thread.py`, `messages.py` | Existing durable chat loop and unified task protocol |
-| Recursive delegation, parent messages, results, proposals | `agent/agent.py`, `agent/thread.py` | One managed tree with root dispatcher and fx descendants |
-| Budgets, grants, daily reset, usage | `agent/budget.py`, `agent/agent.py` | Agent-scoped DB/Rotor supervision covering both execution roles |
-| Request sizing, compaction, bounded tool previews | `agent/compaction.py`, `model_budget.py` | Dispatcher context lifecycle and integration with fx's own context handling |
-| Public Python handlers and request/response SDK | `serve/`, `sdk/` | Existing FastAPI entrypoint dispatching to isolated serving sandboxes |
-| Secret request, inventory, reveal, rotation, deletion | `vault.py`, operator API/UI | Agent-scoped encrypted DB storage; existing operator authentication |
-| Git-declared cron/interval jobs | `serve/scheduling.py` | Rotor scheduler with per-agent serving and existing DB execution stores |
-| Existing scheduled prompt jobs | Hatchery `store/jobs.py` | Retain as a distinct job kind, not a second scheduler for the same occurrence |
-| Tree navigation, activity, queued input, task conversation boards | console thread features | Mounted AppShell; existing streams and TanStack Router |
-| Live filesystem tree, previews, diff/review panels | console repository/workspace features | Base UI components; preserve terminals and sandbox controls |
-| Routes, schedules, secrets, connections, budget controls | console agent features | Shared-agent configuration and operations pages |
-| Archive, unarchive, cancellation, retirement and cleanup | Agent/thread/serve lifecycle | Explicit transitions and recoverable cleanup, not deletion shortcuts |
-| Local Git mode, checkout sync, CLI and setup | `cli/`, `workspace/local.py`, `checkout.py` | Hatchery command surface and existing deployment tooling |
-| HTTP/operator APIs, follow/reconnect, request IDs | `api/`, `cli/remote.py` | Extend current auth/API/SSE/WebSocket machinery |
-
-The references in this table are relative to [agentmesh's source](../.reference/agentmesh/src/agentmesh) or [console](../.reference/agentmesh/console/src), unless identified as Hatchery.
-
-## 5. Behavior contracts to port
-
-### 5.1 Git lifecycle: port as a unit
-
-1. A root execution branches from canonical `main`; record its exact fork point.
-2. Before a model turn, checkpoint any dirty workspace, merge the current upstream, synchronize the effective tree, then load context.
-3. Before delegation, checkpoint the parent. The child forks that checkpoint and uses the parent branch as upstream.
-4. At idle or completion, checkpoint and consolidate workspace and wiki separately.
-5. Children propose to their direct parent; acceptance requires explicit parent approval of the reviewed revision. Root proposals target `main`.
-6. Preserve default policies: ordinary workspace changes auto-merge; wiki and serving changes require review. Changes to `api/`, `schedules/`, `lib/`, or root `requirements.txt` select serving review for the entire workspace proposal.
-7. Repeated handoffs update the same proposal per section. Empty contributions withdraw pending proposals. Pending review is not a failed handoff.
-8. Compatible changes merge through Git. Conflicts return to the originating execution as repairable files. Never publish unresolved conflict markers.
-9. Approval validates the expected SHA, section scope, ancestry, and final tree. Stale approval requires re-review.
-10. If Git succeeded but sandbox sync failed, mark the sandbox stale and re-materialize from Git before it can export again.
-
-Retain stable operation IDs, compare-and-swap ref updates, bounded retries, uncertain-push/PR recovery, child merge ancestry, safe local checkout sync, and separate workspace/wiki review state. DB/Git/queue/sandbox effects are not one transaction: persist intent and reconcile partial success.
-
-In this plan, `main` means the configured canonical branch. The reference hardcodes `main` in parts of Git and review; configurable staging branches are a necessary Hatchery adaptation, not an existing reference capability. Resolve that branch consistently in checkpoint/refresh, upstream validation, PR targets, browser comparisons, local sync, serving, and schedule reconciliation. Test the complete staging publication cycle against a repository also containing production `main`, asserting production refs never advance.
-
-Keep privileged memory-repository Git operations outside model-controlled coding Git. Port isolated Git configuration/index/object storage and bounded regular-file transfer with executable bits. Retain path validation and exclusions for links, devices, `.git`, and Python caches. Keep platform credentials and runtime files outside exported roots. The reference does not detect arbitrary secrets written into regular agent files, and checkpointing does not honor `.gitignore`; do not present it as a secret scanner. Use the source limits initially: 4,096 files, 4 MiB/file, 32 MiB/tree.
-
-The Changes UI initially covers agent workspace/wiki changes, as agentmesh does. Coding repositories remain visible in the live filesystem and existing PR/terminal surfaces. Do not silently expand this port into a new multi-repository code-review product.
-
-Sources: [workspace implementation](../.reference/agentmesh/src/agentmesh/workspace/repo.py), [Git isolation](../.reference/agentmesh/src/agentmesh/workspace/git.py), [review](../.reference/agentmesh/src/agentmesh/workspace/review.py), [file transfer](../.reference/agentmesh/src/agentmesh/workspace/files.py), [policy defaults](../.reference/agentmesh/src/agentmesh/config.py).
-
-### 5.2 Sandbox and fx execution
-
-- First accepted input from UI, Slack, GitHub, a prompt job, or a handler effect creates/routes a chat. Acquire its sandbox and prepare context before inference. Empty drafts allocate nothing.
-- Represent startup explicitly. Retain accepted input across provisioning failure; resume without duplicate chats, sandboxes, or messages.
-- Give each managed fx task its own execution workspace, branch, and deterministic sandbox identity, including grandchildren. Retain exact fx session identity across restarts; do not use global `--resume last` as task identity.
-- Add direct shell/file/context tools to the dispatcher. Model inference stays in the current durable worker; only operations needing a filesystem run in its sandbox.
-- Serialize workspace mutations, refresh, checkpoint, and merge installation. Add quiescence checks for running tools and terminals; copying files over an actively writing process is not safe.
-- Checkpoint at handoff, keep idle sandboxes warm for the configured grace period, then stop without destruction. Budget holds and parked executions release promptly.
-- Preserve stop versus destroy, confirmed versus uncertain shutdown, and explicit recovery when a retained sandbox no longer exists. Recover Git-backed files; do not pretend lost scratch files or unpushed coding edits can be reconstructed.
-- Port command timeouts, output bounds, dependency-install locks, and runtime helper installation. Start with source defaults, adapting only where current platform limits require it.
-- Filesystem inspection must not create/reseed a missing sandbox. Bound directories/files and do not follow links; inspection may resume an existing retained sandbox.
-
-### 5.3 Unified task hierarchy
-
-Keep separate fields for execution state (starting/running/idle/held/failed) and assignment state (working/completed/cancelled), plus archive and publication state.
-
-Required task data includes agent/root/parent IDs, depth, parent-local handle, execution kind, exact session ID, workspace refs, completion payload, and durable directed messages. Reuse existing records where possible; avoid duplicate sources of truth.
-
-Port:
-
-- Delegation depth/fan-out limits; source defaults are two delegated levels and four direct children.
-- Immutable ordered `message_parent` and `message_task` exchanges.
-- Direct-child validation for parent actions; operator access remains governed by Hatchery auth.
-- Ordinary child replies visible to the operator without automatically becoming final parent results.
-- Explicit completion with summary, result, deliverables, and proposal references, delivered after checkpoint/handoff.
-- Reopening completed tasks without rewriting historical completions.
-- Subtree cancellation and cleanup; archive only when the subtree is settled and proposals resolved. Unarchive affects the selected root, not every descendant.
-- Safe handling of late completion, duplicate events, follow-up input racing with completion, and restarted workers.
-
-Route nested fx delegation through the managed Hatchery API, or register native fx children into this same tree if the supported fx interface permits full lifecycle control. Choose the supported route during the initial integration spike, not two independent systems.
-
-### 5.4 Context, skills, budgets, and compaction
-
-Load effective branch context before each model call, not just at sandbox launch. Port bounded core files, conflict quarantine, changed-file notices, topic-memory descriptions, and the runtime/team/agent skill catalog.
-
-Keep runtime skills non-shadowable, agent overrides of team skills, pinned upstream revisions, changed/removed pin warnings, complete bounded skill reads, support-file inventories, and script-shadow diagnostics. All workspace/repository content remains lower trust than platform instructions.
-
-Keep full transcripts and captured results for operators. Model context is a separately compacted representation. Port prospective request sizing, output reserve, role-safe splits, recent-message retention, skill reload markers, bounded tool previews, context-overflow recovery, and a visible parked state when a request cannot fit.
-
-Add a durable consumed-event cursor to Hatchery before enabling compaction: rebuilding a turn from the complete stored transcript must not reinsert compacted history.
-
-Budgets belong to the shared agent and cover root and descendant main/compaction calls. Port pre-call admission, post-call accounting, idempotent grants, UTC reset, wake-up of held work, and fencing of stale admissions. Preserve the source's cooperative limit: concurrent admitted calls can overshoot; it is not an exact billing cap. Preserve per-execution turn limits separately.
-
-**Early integration gate:** the current fx adapter does not demonstrate pre-model-call context/budget hooks, compaction hooks, or complete usage events. Verify the supported fx interface first. If missing, a compatible fx extension/version is required before full parity can be claimed. A launch-only budget check, prompt instruction, or task-control tool is not equivalent. Do not implement a second external compactor over fx's own context.
-
-Sources: [context](../.reference/agentmesh/src/agentmesh/agent/context.py), [compaction](../.reference/agentmesh/src/agentmesh/agent/compaction.py), [budget supervisor](../.reference/agentmesh/src/agentmesh/agent/agent.py), [current durable loop](../backend/hatchery/agent/durable.py), [current fx protocol](../backend/hatchery/worker/protocol.py).
-
-### 5.5 Published APIs, SDK, secrets, and schedules
-
-Port the handler SDK under Hatchery naming. It should remain a small request/response/job/effect contract, not a client carrying control-plane credentials.
-
-Serving behavior:
-
-- Discover only published `main` code; parse declarations without executing imports during discovery.
-- Support the source's GET/POST/PUT/PATCH/DELETE exports, sync/async functions, static/parameter/catch-all paths, precedence rules, invalid-route diagnostics, and response types.
-- Preserve repeated headers/query values, raw bodies, JSON helpers, buffered request/response behavior, body/time limits, sanitized failures, and bounded output. Do not promise streaming handlers or arbitrary WebSocket servers.
-- Run one isolated serving sandbox per agent, with published code read-only, a writable data area, shared content-addressed dependencies, and a deployment/execution lock.
-- Routes and jobs share one execution slot per agent; preserve busy responses and timeout behavior rather than inventing parallel serving.
-- Publish after observed/reconciled `main` advancement, without redeploying Hatchery. Show both desired and active revision plus deployment errors.
-- `prompt()` produces bounded validated effects delivered durably to the same shared agent. Preserve request/effect IDs and conversation keys; provider retries need explicit deduplication keys where request IDs change.
-
-Public handlers live on separate agent hosts under a configured serving domain, never under Hatchery's authenticated app origin. Preserve host/header/cookie isolation and handler-owned authentication/signature checks. Unknown hosts fail closed; operator APIs are unavailable on serving hosts. Use a separate staging domain for hosted preview acceptance; do not expose production agent routes through arbitrary previews.
-
-Secrets remain encrypted in DB, scoped to agent ID and environment. Port request cards, inventory, set/rotate, explicit authenticated reveal, delete, and retirement. Values must not enter Git, prompts, transcripts, telemetry, or worker command payload logs. Dependency installation receives no invocation secrets. Serving sandboxes receive only the agent's explicit handler secrets, not coding GitHub, queue, model-gateway, or control-plane credentials. Handler code can still leak its own secrets; document this boundary rather than promising impossible redaction.
-
-Scheduling behavior:
-
-- Discover `schedules/<name>/job.py` and literal metadata: five-field cron with optional IANA timezone, or interval of at least one minute; support disable/removal and visible invalid declarations.
-- One scheduler per agent and ticker per active job; generation fencing, stable occurrence IDs, revision-pinned execution, at-least-once delivery, overlap skipping, and bounded catch-up.
-- Rule changes replace a ticker; unchanged rules keep cadence; code-only changes affect future revisions.
-- Persist operator pause independently of Git rule edits. Pausing is not cancellation of an already running occurrence.
-- Preserve bounded recent results, failure prompts throttled per job, retries, and protected periodic reconciliation for external merges while idle.
-- Keep one-shot signals separate from recurring jobs.
-- Retain Hatchery's scheduled prompt capability as another job kind. Each occurrence has exactly one scheduling authority; do not arm both the old cron path and a new ticker for it.
-
-Sources: [HTTP guide](../.reference/agentmesh/docs/api-routes.md), [SDK](../.reference/agentmesh/src/agentmesh/sdk/__init__.py), [serving service](../.reference/agentmesh/src/agentmesh/serve/service.py), [scheduling](../.reference/agentmesh/src/agentmesh/serve/scheduling.py), [vault](../.reference/agentmesh/src/agentmesh/vault.py).
-
-### 5.6 Shared-agent identity and existing integrations
-
-Preserve Hatchery's existing allowlist/login and access checks. Agent sharing does not by itself make every user's chat or credential public. Child conversations inherit the root's access policy. Keep actor attribution for messages, approvals, grants, secret changes, and retirement.
-
-- Storage-repo operations use the configured App identity, scoped to that repository where supported.
-- Coding work retains explicit user-delegated authority when requested under a user grant, and explicit App/service authority for unattended work. Missing/revoked grants produce actionable errors, never silent elevation or use of the last speaker's token.
-- Carry the selected credential subject through the execution and its descendants. A different human posting a message must not silently change it.
-- Serving has its narrower secret-only authority described above.
-- Preserve Slack/GitHub routing, webhook deduplication, linked-thread replies, classification onto named agents, user connections, cron triggers, PR tracking, and telemetry.
-
-Verify live storage-repo installation and permissions during deployment preparation. The user's installation statement is intent/context, not a substitute for a successful read/write capability check in the target environment.
-
-Sources: [Hatchery connections](../backend/hatchery/connections.py), [sandbox credentials](../backend/hatchery/worker/sandbox.py), [agentmesh repository identity](../.reference/agentmesh/docs/workspace.md).
-
-### 5.7 Operator UI, CLI, and setup
-
-Port the agentmesh information layout and interaction behavior using Hatchery's components:
-
-- Agent switcher/create/settings; root and recursive child navigation, search revealing ancestors, counted descendant stacks, status/activity chips, and accessible reduced-motion behavior.
-- Conversation, optimistic accepted-input reconciliation, queued prompts, timestamp grouping, parent-message attribution, task conversation boards, result/deliverable handoffs, and expandable tool output.
-- Resizable independent panes; live Workspace, checkpointed Changes, and State/hierarchy views; keyboard controls and mobile navigation.
-- Integrated repository and agent-scoped file browsing, main/thread/proposal selector, full/latest diffs, full-file previews, current merge state, and SHA-pinned approval.
-- Budget holds/grants, turn resume, cancellation, archive, connection state, routes, schedules, secret workflows, and retirement confirmation.
-
-Keep AppShell mounted across navigation and preserve drafts/streams. Use TanStack routes and existing same-origin authenticated API/SSE/WebSocket URLs. Keep terminals, SSH, sandbox access, channel links, and PR/artifact links. Do not replace current communication machinery with agentmesh polling/WebSockets just because its UI uses them; add bounded polling only for state not already available in events.
-
-Port CLI capabilities as Hatchery commands: init/check/dev/serve/sync/setup, status/create-or-join/talk/thread/resume/approve/grant/retire/logs, stable request IDs, follow/reconnect, and local Git mode. Use existing Hatchery auth boundaries, not agentmesh's alternate console login. Require reviewed SHA for CLI approval as well as UI approval. Extra CLI parity beyond the reference's implemented commands is not a prerequisite.
-
-Adapt setup's observe/plan/reconcile and interruption recovery to the existing Hatchery project. Reuse the designated storage repo and existing Connect installation; do not create another app deployment by default. Keep software and agent-storage repositories separate. Validation/check mode must not mutate cloud resources.
-
-Sources: [console](../.reference/agentmesh/docs/console.md), [CLI](../.reference/agentmesh/docs/cli.md), [console layout](../.reference/agentmesh/console/src/app/console-layout.tsx), [Hatchery frontend rules](../backend/frontend/AGENTS.md).
-
-## 6. Implementation sequence and gates
-
-Each phase is a coherent change set. Supporting work may proceed in parallel after its contracts are fixed; a phase is complete only after its behavior gate passes.
-
-### Phase 0 — Freeze contracts and prove the fx integration boundary
-
-- Turn the feature map into a checked source → destination → behavioral-test ledger.
-- Inventory dependency/API differences against Hatchery's pinned Rotor/AI/Sandbox versions. Do not copy agentmesh's lockfiles or editable sibling dependencies.
-- Specify shared-agent identity, task statuses, branch ownership, event IDs, credential attribution, and public-serving boundary.
-- Probe supported fx session binding, nested tools, safe context-refresh points, pre-call admission, usage reporting, compaction, and tool-quiescence hooks.
-- Choose one managed delegation path; document any required fx version/extension as a prerequisite.
-
-Gate: a small real fx adapter exercise proves the required lifecycle hooks, or reports the exact missing upstream interface. Do not proceed to claims of complete budget/context/task parity on an unproven interface. Git/serving work can proceed independently.
-
-### Phase 1 — Shared Agent model and clean operational namespace
-
-- Replace Space naming across models, stores, classifier, channel routing, APIs, frontend types/routes, jobs, and tests.
-- Add agent registry/settings and execution relationships; preserve human attribution separately.
-- Add the new DB state and protocol namespaces without reusing incompatible old Rotor processes or queue messages.
-- Add recoverable agent/template creation and explicit setup diagnostics.
-
-Gate: two authorized users can work with one named agent under existing access rules; rename/create/retry behavior works; old incompatible IDs fail cleanly rather than crashing the application.
-
-### Phase 2 — Git workspace service and file context
-
-- Port file validation, isolated Git, workspace mapping, local/remote repositories, checkpoint/refresh/proposal/review, browser, and managed checkout sync.
-- Add templates, AGENTS/core-memory/skill context, runtime helpers, and dependency preparation.
-- Replace DB notes with Git memory operations.
-- Test against local bare repositories before touching the remote storage repo.
-
-Gate: replay-safe operations, concurrent root edits, child ancestry, section isolation, conflicts, stale approvals, uncertain remote writes, and Git-success/sandbox-failure repair pass behavioral tests.
-
-### Phase 3 — Automatic root sandbox and dispatcher tools
-
-- Add workspace lifecycle to the existing dispatcher, before first inference from every ingress path.
-- Add serialized shell/file/skill tools and context refresh; startup/error/retry projections; idle stop/resume and cleanup.
-- Add full-transcript versus model-context separation and a durable ingestion cursor.
-- Preserve terminals and existing coding-repository setup without allowing them to race destructive workspace synchronization.
-
-Gate: a root chat edits an agent file, checkpoints, publishes/reviews it, sleeps, resumes, and sees another chat's accepted changes; no explicit create-sandbox request is needed.
-
-### Phase 4 — Hierarchical fx execution and shared runtime policies
-
-- Extend the daemon protocol and exact session persistence; wire fx lifecycle hooks proven in Phase 0.
-- Implement managed descendants, directed messages, explicit completion, parent proposals, cancellation/reopen/archive semantics.
-- Complete per-call context refresh, shared budget/grants, signals, turn limits, and compaction integration for both roles.
-- Preserve complete event history and channel behavior during retries/restarts.
-
-Gate: dispatcher → fx child → fx grandchild completes through one task tree, with branch isolation, parent approval, publication-before-result, budget holds/resume, and restart recovery. Compacted history stays compacted.
-
-### Phase 5 — Operator workspace and hierarchy UI
-
-- Port the layout, both trees, task conversations, state/activity, repository browsing, diffs, review, budget controls, and lifecycle controls.
-- Extend the current router/AppShell, not replace them. Add an actual component-test harness; the current test script only discovers `.test.ts` tests.
-- Retain drafts, in-flight streams, terminal state, accessible navigation, and narrow-screen behavior.
-
-Gate: component and browser tests cover navigation during streaming, startup/reconnect, child messaging, live-vs-committed files, stale review, and preserved drafts.
-
-### Phase 6 — Isolated serving, SDK, and encrypted secrets
-
-- Port AST discovery, SDK runner/effects, per-agent serving/dependency lifecycle, host isolation, published-revision tracking, and secret workflows.
-- Add authenticated operator endpoints and UI for diagnostics, URLs, desired/active revisions, and secrets.
-- Verify separate staging host routing before public activation.
-
-Gate: a reviewed Python route becomes live without redeploy; an unreviewed route does not. Public requests cannot reach the control plane, credentials stay out of transcripts, and duplicate effects do not duplicate agent input.
-
-### Phase 7 — Executable schedules and full operations
-
-- Port Git job discovery, scheduler/tickers, pause overrides, revision pinning, history, failure reporting, maintenance, and retirement cleanup.
-- Integrate existing prompt jobs as a distinct kind and remove duplicate scheduling paths.
-- Finish API/CLI/local setup/check/sync/follow capabilities and configuration documentation.
-
-Gate: cron/timezone/interval jobs, pauses, edits, deleted jobs, missed intervals, retries, serving contention, and retirement behave like the reference; CLI and UI reflect the same state.
-
-### Phase 8 — Fresh-start cutover and live certification
-
-- Remove replaced notes/space/manual-only lifecycle paths and temporary dual implementations.
-- Seed fresh shared agents from templates; require no legacy migration.
-- Use separate DB/process/queue/sandbox namespaces for preview and cutover. Isolate preview storage branches from production canonical state; preview jobs and public handlers must not consume production authority accidentally.
-- Quiesce old ingress/subscribers/jobs before promotion so old deployments cannot act on the new state or continue duplicate schedules.
-- Deploy and run the end-to-end scenarios below; inspect traces and retain exact evidence.
-- Keep old resources inert for rollback/recovery initially. Explicit old-data deletion is a separate cleanup action, not a prerequisite for launch. Never erase auth/connection state as collateral to discarding old agent records.
-
-Gate: every feature ledger entry is implemented and verified or the migration is explicitly incomplete. Rollback disables new work before restoring the old deployment; it must not reset the shared storage repo or resurrect competing schedulers.
-
-## 7. Likely code ownership
-
-Keep modules small and ownership clear; the following are destinations, not a requirement to reproduce every agentmesh file one-for-one.
-
-| Existing / proposed area | Responsibility |
+## 5. Feature map
+
+Every row lands in code and gets tests adapted from the listed agentmesh tests before the migration is done. Source paths are relative to [agentmesh src](../.reference/agentmesh/src/agentmesh). Test paths are relative to [agentmesh](../.reference/agentmesh).
+
+| Capability | Agentmesh source | Hatchery destination | Reference tests |
+| --- | --- | --- | --- |
+| Agent create, templates, config | `config.py`, `templates/`, `workspace/repo.py` | `store/agents.py` (replaces spaces), packaged template | `tests/unit/test_config.py`; `tests/integration/test_workspace.py` |
+| Checkpoint, refresh, merge, proposals, review | `workspace/`, `agent/tools.py` | `hatchery/workspace/` | `tests/integration/test_workspace.py`, `test_github_review.py`; `tests/unit/test_review.py`, `test_git_runtime.py` |
+| Repository browsing (main/thread/proposal) | `workspace/browser.py` | API endpoints + router | `tests/integration/test_repository_browser.py`; `console/tests/repository.test.tsx` |
+| Thread sandbox start, idle stop, resume, recovery | `sandbox/`, `agent/thread.py` | `hatchery/worker/sandbox.py`, durable loop | `tests/integration/test_thread.py`; `tests/unit/test_sandboxes.py`, `test_vercel_sandbox.py` |
+| Shell/file/skill tools | `agent/tools.py` | durable loop tools | `tests/integration/test_thread.py` |
+| Context: persona, memory, skills, pins, wiki prompt | `agent/context.py` | durable loop context | `tests/unit/test_agent_context.py` |
+| Helpers, scripts, dependency envs | `runtime/`, `sandbox/dependencies.py` | packaged assets, sandbox prep | `tests/unit/test_vercel_sandbox.py` |
+| Input queueing, signals, turn limits, resume | `agent/thread.py`, `messages.py` | durable loop | `tests/integration/test_thread.py`; `console/tests/composer.test.tsx`, `thread-actions.test.tsx` |
+| Delegated threads, messages, completion, parent review | `agent/agent.py`, `agent/thread.py` | supervisor + child threads | `tests/integration/test_thread.py` |
+| Budget, grants, daily reset | `agent/budget.py`, `agent/agent.py` | supervisor | `tests/integration/test_thread.py` |
+| Compaction, request sizing, tool previews | `agent/compaction.py`, `model_budget.py` | durable loop | `tests/unit/test_agent_context.py`; `tests/integration/test_thread.py` |
+| Public Python handlers, SDK, prompt effects | `serve/`, `sdk/` | `hatchery/serve/`, `hatchery/sdk/` | `tests/unit/test_serve_routing.py`, `test_serve_host.py`, `test_sdk.py` |
+| Secrets vault | `vault.py` | agent-scoped encrypted store | `tests/unit/test_vault.py` |
+| Git schedules | `serve/scheduling.py` | Rotor tickers | `tests/unit/test_serve_scheduling.py` |
+| Prompt jobs (existing) | Hatchery `store/jobs.py` | kept as-is | `backend/tests/store/test_jobs.py` |
+| Thread tree, activity, task conversations | `console/src/features/threads/` | AppShell + existing streams | `console/tests/thread-navigation.test.tsx`, `thread-activity.test.tsx`, `subagents.test.tsx`, `task-conversations.test.tsx`, `conversation.test.tsx`, `transcript.test.tsx` |
+| Live files, changes, diff/review panes, layout | `console/src/features/repository/`, `workspace-panel.tsx`, `console-layout.tsx` | Base UI components; terminals kept | `console/tests/workspace-panel.test.tsx`, `console-layout.test.tsx`, `resize-handle.test.tsx`, `stream-recovery.test.tsx` |
+| Agent switcher, API/secrets view, budget notice | `console/src/features/agents/` | agent pages | `console/tests/agent-switcher.test.tsx`, `agent-api-view.test.tsx` |
+| Archive, cancel, retire | agent/thread/serve lifecycle | explicit transitions | `tests/integration/test_thread.py`, `test_gateway.py` |
+| Operator API, follow, request IDs | `api/` | existing auth/API/SSE | `tests/integration/test_gateway.py`; `tests/unit/test_api.py` |
+| ~~CLI remote commands, local checkout sync~~ | ~~`cli/remote.py`, `cli/local.py`, `workspace/checkout.py`~~ | ~~Hatchery CLI~~ (dropped by user decision) | ~~`tests/unit/test_cli.py`~~ |
+| ~~`setup` / `check`~~ | ~~`cli/setup/`~~ | ~~check and reconcile the existing project only~~ (dropped with the CLI) | ~~`tests/unit/test_setup.py`~~ |
+
+Existing Hatchery features stay: Slack/GitHub channels, classifier, topic naming, connections, fx subagents, extra sandboxes, terminals/SSH, prompt jobs, PR tracking, and telemetry. Notes are replaced by Git memory.
+
+## 6. Behavior to port
+
+### 6.1 Git lifecycle (port as a unit)
+
+1. A root thread branches from `main` and records its fork point.
+2. Before each turn: checkpoint any dirty work, merge upstream, sync, then load context.
+3. Before delegating, checkpoint the parent. The child forks from that checkpoint, and its upstream is the parent branch.
+4. At idle or complete: checkpoint, then propose the workspace and the wiki separately.
+5. Children propose to their parent, and the parent must approve the reviewed revision. Roots propose to `main`.
+6. Default policies: ordinary workspace changes auto-merge. Wiki and serving changes need review. Touching `api/`, `schedules/`, `lib/`, or root `requirements.txt` sends the whole workspace proposal to serving review.
+7. Conflicts go back to the originating thread as files to fix.
+8. Approval checks the expected SHA. A stale approval needs a new review.
+
+Keep agentmesh's operation IDs, compare-and-swap ref updates, isolated Git config, path validation, and file limits (4,096 files, 4 MiB per file, 32 MiB per tree).
+
+Sources: [repo](../.reference/agentmesh/src/agentmesh/workspace/repo.py), [git](../.reference/agentmesh/src/agentmesh/workspace/git.py), [review](../.reference/agentmesh/src/agentmesh/workspace/review.py), [files](../.reference/agentmesh/src/agentmesh/workspace/files.py), [workspace guide](../.reference/agentmesh/docs/workspace.md).
+
+### 6.2 Threads and sandboxes
+
+- The first accepted input from any ingress (UI, Slack, GitHub, prompt job, handler effect) starts the thread sandbox before inference. An empty draft allocates nothing.
+- Sandbox operations run serially within a thread. Command timeouts, output limits, and dependency locks follow agentmesh defaults.
+- On idle, keep the sandbox warm for the grace period, then stop it without destroying it. Stop and destroy stay distinct. If a sandbox is lost, rebuild the Git-backed files from Git.
+- Delegation limits come from agentmesh config (`max_delegation_depth`, per-thread fan-out).
+- Tasks: `message_parent`/`message_task`, explicit completion with result, reopening, subtree cancel, and archiving only a settled subtree.
+- The manual "create sandbox" flow is replaced by automatic start. The dispatcher's extra-sandbox tool and terminals stay.
+
+### 6.3 Context, budget, compaction
+
+- Load context from the branch before every model call: `AGENTS.md`, memory, wiki prompt, the skill catalog (runtime, team, agent), pins, and change notices.
+- The budget belongs to the agent and covers thread main calls and compaction calls. It has pre-call admission, grants, and a UTC daily reset. fx usage is not counted, as today.
+- Compaction follows agentmesh: request sizing, output reserve, recent-message retention, and bounded tool previews. Operators still see the full transcript. Hatchery needs a stored cursor so a rebuilt turn doesn't bring compacted history back.
+
+Sources: [context](../.reference/agentmesh/src/agentmesh/agent/context.py), [compaction](../.reference/agentmesh/src/agentmesh/agent/compaction.py), [budget](../.reference/agentmesh/src/agentmesh/agent/budget.py).
+
+### 6.4 Serving, secrets, schedules
+
+- Serve only published `main` code. Discover routes with AST parsing and never import user code during discovery.
+- Routes match agentmesh: GET/POST/PUT/PATCH/DELETE; static, `[param]`, and `[...rest]` segments; the same limits, one request at a time per agent, and `/workspace/data`.
+- Host routing is `<agent>.<serve-domain>`, with agentmesh's preview header override. Unknown hosts fail closed.
+- `prompt()` effects go back to the same agent with idempotency keys.
+- Secrets are encrypted in the DB and scoped to an agent. They cover request, list, reveal, rotate, delete, and clearing on retire. Serving sandboxes get only that agent's secrets.
+- Schedules: `schedules/<name>/job.py` with cron+timezone or an interval. There is a ticker per job, operator pause, recent results, and maintenance reconciliation.
+- Hatchery prompt jobs stay as a separate job kind.
+
+Sources: [serve](../.reference/agentmesh/lat.md/serve.md), [api routes](../.reference/agentmesh/docs/api-routes.md), [schedules](../.reference/agentmesh/docs/schedules.md), [vault](../.reference/agentmesh/src/agentmesh/vault.py).
+
+### 6.5 Identity and integrations
+
+- Keep Hatchery's login, allowlist, and chat access as they are.
+- Storage-repo Git uses the Connect App identity, as in agentmesh.
+- Coding work keeps Hatchery's existing GitHub connection behavior.
+- Slack/GitHub routing, dedupe, linked replies, and classification now target agents instead of spaces.
+
+### 6.6 UI and CLI
+
+- Port the agentmesh console layout and behavior onto Hatchery's AppShell, routes, and Base UI. That means the agent switcher, thread tree, conversation, task boards, workspace/changes/state panes, repository browser, diffs, SHA-pinned approval, budget notice, API/secrets view, and retire.
+- Keep Hatchery's streams, terminals, drafts, and channel/PR links. Do not add agentmesh's polling or WebSocket client where Hatchery streams already cover it.
+- ~~CLI: `status`, `create` (join), `talk --follow`, `thread`, `grant`, `resume`, `approve`, `retire`, `logs`, `sync`, and `check`/`setup` for the existing project. Mutations accept `--request-id`. Use Hatchery auth.~~ Dropped by user decision; the UI is the only client.
+
+Sources: [console](../.reference/agentmesh/docs/console.md), [cli](../.reference/agentmesh/docs/cli.md), [frontend rules](../backend/frontend/AGENTS.md).
+
+## 7. Phases
+
+Each phase is done when its gate passes.
+
+1. **Agents replace spaces.** Rename across models, stores, classifier, channels, APIs, frontend, jobs, and tests. Add the agent supervisor process. Gate: two users work with one agent, and create/rename work.
+2. **Git workspace.** Port `workspace/`, templates, context loading, and runtime helpers. Replace notes with Git memory. Test against local bare repos first. Gate: agentmesh workspace/review tests pass after adaptation.
+3. **Thread sandbox and tools.** Add auto-start, shell/file/skill tools, per-turn refresh, idle stop/resume, and the transcript cursor. Gate: a root chat edits an agent file, checkpoints, publishes, sleeps, resumes, and sees another chat's merged change.
+4. **Delegation, budget, compaction.** Add child threads, messages, completion, and parent review, plus the budget and grants and compaction. Gate: parent → child → grandchild completes with parent approval. Budget holds and resumes, and compacted history stays compacted.
+5. **UI.** Port the console features onto AppShell. Add a TSX component test runner so the ported console tests run. Gate: the ported console tests pass.
+6. **Serving and secrets.** Gate: a reviewed route goes live without a redeploy, an unreviewed route does not, and secrets stay out of transcripts.
+7. **Schedules~~, CLI, setup~~.** Gate: agentmesh scheduling scenarios pass~~, and the CLI and UI show the same state~~. The CLI and setup were dropped by user decision.
+8. **Cutover.** Remove spaces, notes, and manual-sandbox code. Seed fresh agents, deploy, and run live acceptance.
+
+## 8. Verification
+
+- Port meaningful agentmesh tests (real local Git, real SDK subprocesses, scripted models). Don't count mocks or callable-presence checks.
+- From `backend/`: `uv run pytest tests/agent tests/worker`, then `tests/workspace`, `tests/serve`, and `tests/sdk` as they appear.
+- From `backend/frontend/`: `pnpm test`, `pnpm lint`, `pnpm build`.
+- Live acceptance on a preview deployment ([agent-browser](use-agent-browser.md), [Braintrust](use-braintrust.md)):
+  1. Create an agent. A second user sees it and edits `AGENTS.md`.
+  2. Chat: the sandbox starts, context loads, files change, the diff appears, then idle stop and resume.
+  3. Delegate to a child and grandchild: messages, review, complete, cancel, archive.
+  4. Two chats edit the same file: a clean merge or a visible conflict.
+  5. Budget hold and grant; compaction; large output.
+  6. Publish a handler and a schedule: secrets, deps, pause, effects.
+  7. Slack/GitHub in and out, prompt jobs, fx subagents, terminals.
+  8. Retire a test agent.
+
+## 9. Configuration
+
+- `HATCHERY_STORAGE_REPO` = `vercel-internal-playground/hatchery-storage`.
+- The existing GitHub Connect connector. Check read/write access to the storage repo.
+- `HATCHERY_SERVE_DOMAIN` plus a wildcard domain (agentmesh `serve.domain`).
+- `HATCHERY_SECRETS_KEY` (agentmesh `MESH_SECRETS_KEY`).
+- Model, turn, command, idle, delegation, budget, review, and serve limits, starting from agentmesh defaults. Keep Hatchery's current model choices.
+
+## 10. Done when
+
+Every feature-map row is implemented with adapted tests, existing Hatchery features still work, live acceptance passes, and no spaces, notes, or second runtime remain.
+
+Remaining risks, from agentmesh's own roadmap: live Vercel behavior was never certified in agentmesh. That covers sandbox lifecycle, scheduled delivery, and wildcard hosts. The preview acceptance above is the first real check.
+
+## Implementation conventions
+
+Decisions made while implementing, so every phase lands the same way.
+
+- **Agent record**: ID, name, color (one of the 28 accent IDs, nothing else), repos, resources, created time. No `about`: `AGENTS.md` in Git is the description, and create commits the plain template. The classifier routes on name, ID, repos, and resources.
+- **Agent ID** is an agentmesh slug (`config.validate_slug`: 1-63 lowercase letters, digits, interior hyphens). It is a Git path segment, a ref segment, and a DNS label for serving. Create takes a display `name` and an optional `id`; without one the ID is slugified from the name. Taken IDs return 409. The seeded default agent is `hatchery`.
+- **Module map** (backend/hatchery):
+  - `models.py` `Agent` replaces `Space`; `store/agents.py` replaces `store/spaces.py` (table `hatchery_agents`).
+  - `config.py`: agentmesh `MeshConfig` sections (model, thread, budget, review, serve limits) with agentmesh defaults, read from env. No `mesh.toml`. Model ID stays Hatchery's.
+  - `environment.py`: agentmesh `Mesh` (config, workspace repo, review, sandbox provider, model, clock) with `current()`/`install()`/`use()`.
+  - `workspace/`: agentmesh `workspace/` (repo, git, files, review, git_runtime, browser, connect, local). `checkout` (local checkout sync) went with the CLI; `local` stays for tests.
+  - `templates/default/`: agentmesh default template with `SOUL.md` renamed `AGENTS.md`.
+  - `runtime/`: runtime scripts and skills installed into sandboxes. `runtime.sandbox_files()` is agentmesh `runtime_files()`: the stdlib-only `hatchery/sdk` plus `scripts/*`, installed root-owned under `/workspace/.hatchery/runtime/<digest>` (SDK 0444, scripts 0555) and on `PYTHONPATH`.
+  - `worker/provider.py` (agentmesh `sandbox/base.py`), `worker/scripted.py`, `worker/dependencies.py`, `worker/transfer.py`. `worker/sandbox.py` is the one Vercel adapter: Hatchery chat sandboxes plus `VercelSandboxProvider`.
+  - `model_budget.py`, `provider_errors.py`, `messages.py`: agentmesh modules of the same names (`Prompt.github_subject` becomes `actor_user_id`).
+- **Thread sandbox**: a normal chat sandbox. `acquire(name, purpose="thread", chat=ThreadChat(...))` gets or creates the worker record `name.removeprefix("hatchery-")` owned by that chat, with the daemon, then applies the agentmesh layout and ready marker. Repos clone best effort to `/workspace/repos/<repo>`. Serve sandboxes have no worker record or daemon.
+  - `agent/thread.py`: agentmesh `AgentThread` plus Hatchery's chat projection, channel delivery, and tools. Replaces `DurableDispatcher`. Hatchery's part of the system prompt is `context.hatchery_prompt()` with the text in `agent/prompts/hatchery.md` (was `agent/dispatcher.py`).
+  - `agent/supervisor.py`: agentmesh `Agent`. `agent/context.py`, `agent/compaction.py`, `agent/budget.py`, `agent/tools.py`, `agent/prompts/`.
+  - `serve/`, `sdk/`, `vault.py`: ports of the same agentmesh modules. `cli/` was ported, then removed by user decision.
+- **Storage layout**: `agents/<agent-id>/` and `wiki/` on `main`. Agentmesh `workspaces/<owner>` maps to `agents/<agent-id>`. No marker files; the collective view lists `agents/*` directories on `main`.
+- **Code style**: Hatchery rules win over agentmesh style. Import modules, not names (except `typing`). No `from __future__ import annotations`. Tests mirror app paths (`hatchery/workspace/repo.py` → `tests/workspace/test_repo.py`).
+- Agentmesh `repositories/` is not ported. Coding credentials stay Hatchery's.
+- **Runtime (phases 3-4)**: one Rotor `Supervisor` per agent (`key=<agent id>`, `scope="agents"`, `agent/supervisor.py`) spawns `AgentThread` children (`agent/thread.py`). A root thread's key is `chat:<chat id>`; a delegated thread's key is its task id (`<parent task id>:<tool call id>`).
+  - Every thread has a chat. A delegated thread creates `chat_<sha256(thread id)[:12]>` (trigger `task`, `parent_chat_id` set). `GET /api/chats` lists root chats; `?parent_chat_id=` lists children.
+  - The chat's events stream `thread` holds `{agent_id, thread_id, cursor}`. `supervisor.start_turn` sends a `TurnInput` with only the user messages after the cursor, so compacted history never comes back. The chat's `messages` stream stays the full transcript; the thread's `messages` state is the model history.
+  - Hatchery turns map onto thread inputs. A turn streams under its `turn_id` until its answer is final; `finish_turn` persists messages, delivers replies, and projects the end. Work the thread starts itself (signals, task messages, grants, resumes) gets an internal turn (origin `thread`). A budget hold, park, or stop ends the open turn as failed/cancelled; the input stays queued.
+  - Hatchery tools run as serial `run_hatchery_tool` children beside `run_bash`. Notes tools are not offered (notes are replaced by Git memory). `secret_request` is inline in the thread and records only name and note on the supervisor.
+- **Serving and schedules (phases 6-7)**:
+  - `serve/host.py` `HostDispatch` is the outermost middleware of the one FastAPI app: exactly `<agent>.<HATCHERY_SERVE_DOMAIN>` (default `localhost`) goes to `serve/app.py`, everything else to the normal app; malformed or nested agent hosts get 400/421. `X-Hatchery-Agent` (agentmesh's owner header) is honored only when `VERCEL_ENV=preview`.
+  - `serve/service.py` reads the agent's directory at current `main` per request (15 s cache, cleared by the main observer) and redeploys the one serve sandbox (`provider.sandbox_name("serve:v1:<env>:<agent>")`, no daemon) when the revision moved. No Hatchery redeploy is needed. Operator endpoints are in `serve/api.py` under `/api/agents/{id}/`: `serve`, `routes`, `schedules`, `schedules/{name}/pause|resume`, `secrets`, `secrets/{name}` (set = rotate), `secrets/{name}/reveal|delete`.
+  - `prompt()` effects become normal turns via `supervisor.prompt`: the conversation key (default route path or `schedule:<name>`) names a chat `chat_<sha256[:12]>` (trigger `api`/`schedule`), and the effect key fixes message and turn IDs, so retries add nothing.
+  - `vault.py` keeps agentmesh's storage: one `SecretVault` Rotor process per agent (DB-backed) holding AES-GCM envelopes bound to agent and name. Key `HATCHERY_SECRETS_KEY`, or `<data dir>/secrets-key` outside Vercel. Retire clears it and leaves the tombstone that makes serving answer 410.
+  - `serve/scheduling.py`: one `Scheduler` per agent (scope `agents`) with a Rotor `Ticker` per job. `runtime.install()` sets `scheduling.observe` as the repo's main observer; `/api/cron` reconciles every fifth minute. Prompt jobs stay in `store/jobs.py`.
+  - All serve processes are in `scheduling.PROCESSES`; `agent/runtime.py` registers `supervisor.PROCESSES + scheduling.PROCESSES`. `rotor-schema.json` is `python -m rotor.check hatchery.agent.runtime`.
+  - The idle sandbox stop is deferred while an fx task in that sandbox is pending/running/attention or a terminal is open. A running thread sandbox for the same actor is reacquired without another `prepare_for_command`.
+  - A chat's agent can change only before its thread starts (409 after).
+
+## Progress
+
+Updated 2026-09-25.
+
+| Phase | Status |
 | --- | --- |
-| `hatchery/models.py`, `store/agents.py` (replaces spaces), existing stores | Shared identity and operational records |
-| `hatchery/agent/` | Current durable root loop, supervisor, context, compaction, tools, signals, budget |
-| `hatchery/workspace/` (new) | Git persistence, review, file validation, browser, checkout sync |
-| `hatchery/worker/` | Existing fx adapter/daemon, hierarchical tasks, sessions, events, sandbox lifecycle |
-| `hatchery/serve/`, `hatchery/sdk/` (new) | Handler/job discovery, execution, SDK and prompt effects |
-| Agent-scoped secret store and vault module | Encryption and authorized secret operations |
-| Packaged templates/runtime assets | Default agent files, helpers, skill documentation |
-| `hatchery/app/`, existing channels/connections | Authenticated control API, public host dispatch, ingress/egress |
-| `frontend/src/app`, feature components, existing routes/lib | Layout and operator parity on existing machinery |
-| Hatchery CLI / scripts | Local lifecycle, operator commands, setup/check and deployment validation |
+| 0 — Inventory | Done |
+| 1–2 | Done in the working tree |
+| 3 — Thread sandbox and tools | Done: gate in `tests/agent/test_thread.py` |
+| 4 — Delegation, budget, compaction | Done: gates in `tests/agent/test_supervisor.py`, `test_budget.py`, `test_compaction.py` |
+| 5 — UI | Done in the working tree: ported console tests pass under `pnpm test` (vitest + Testing Library + jsdom beside `tsx --test`); see Phase 5 notes |
+| 6 — Serving and secrets | Done in the working tree: gate in `tests/serve/test_service.py` (reviewed route live without a redeploy, unreviewed route 404, secrets out of transcripts and only in their agent's serve sandbox); also `tests/serve/test_routing.py`, `test_host.py`, `test_api.py`, `tests/sdk/test_sdk.py`, `tests/test_vault.py` |
+| 7 — Schedules~~, CLI, setup~~ | Done in the working tree: schedules in `tests/serve/test_scheduling.py`. CLI and setup dropped by user decision; see Phase 7 notes |
+| 8 — Cutover | Code done in the working tree (see Phase 8 notes). Not deployed; live steps and acceptance open |
 
-Mirror module structure in tests. Use module imports in Python, preserve locality, and avoid generalized provider/plugin abstractions unless required by the actual port.
+Phase 6-7 open items: serving, wildcard hosts, and scheduled delivery were not run on Vercel. Live needs `*.HATCHERY_SERVE_DOMAIN` on the project, `HATCHERY_SERVE_DOMAIN`, and `HATCHERY_SECRETS_KEY` (32 bytes, base64url). The serve runner calls `python3` in the sandbox (agentmesh: `python`).
 
-## 8. Verification plan
+### Phase 7 notes (CLI and setup)
 
-### Deterministic contracts first
+- The CLI was built, then dropped by user decision. Removed: `hatchery/cli/`, `tests/cli/`, the `hatchery` console script, the `typer` and `watchfiles` deps, `workspace/checkout.py` (local checkout sync) and `WorkspaceRepo`'s managed checkout, the CLI login (`cli_port`/`cli_challenge`, `POST /api/auth/cli`, bearer-header sessions), `request_id` on agent create and approve, and `Agent.request_id`. Web login is exactly as in 0.1.
+- `request_id` stays where the UI sends one: grants, retire, resume, stop, schedule pause/resume, and secrets.
 
-- Port meaningful source tests around real local Git, real SDK subprocesses, deterministic clocks/models, and state transitions. Do not count callable-presence checks or mock expectations as feature parity.
-- Git: duplicate operations, cross-section/path restrictions, concurrent edits, replay after partial failure, pinned approvals, recursive ancestry, local checkout conflicts.
-- Runtime: duplicate inputs, queue ordering, accepted-input recovery, no history resurrection, budget reset/grant races, signals, tool serialization, late worker events, exact session recovery.
-- Tasks: nested delegation, immediate directed messages, operator vs parent attribution, explicit completion, reopened work, cancellation and archive races, publication before final result.
-- Serving: AST matching/ambiguity, request/response protocol, errors and limits, host/header isolation, published-only code, secret lifecycle, dependency install without secrets, revision changes under load.
-- Schedules: cron/timezones including DST, intervals, pause/edit/remove, stable IDs, overlap, bounded catch-up, generation fencing, failure throttles, external-main reconciliation.
-- UI: optimistic/queued input, stream reconnect, preserved draft/state, task boards, both trees, diff modes, SHA-pinned review, secrets, schedule controls, keyboard/mobile/reduced motion.
+### Phase 8 notes
 
-Reference test starting points: [workspace integration](../.reference/agentmesh/tests/integration/test_workspace.py), [thread integration](../.reference/agentmesh/tests/integration/test_thread.py), [gateway integration](../.reference/agentmesh/tests/integration/test_gateway.py), [SDK unit tests](../.reference/agentmesh/tests/unit/test_sdk.py), [context tests](../.reference/agentmesh/tests/unit/test_agent_context.py), [console tests](../.reference/agentmesh/console/tests).
+- Removed: the manual sandbox flow (`POST /api/chats/{id}/sandboxes`, `GET /api/sandboxes/suggestion`, `GET /api/chats/{id}/sandboxes/suggestion`, `agent/sandbox.py` `suggest`), `GET /api/chats/{id}/messages` (the UI uses `/transcript`), and the Slack `legacy_token` binding migration. The `create_sandbox`/`list_sandboxes` tools, sandbox listing, terminals, SSH, and fx endpoints stay.
+- Storage: old data stays, nothing is dropped or altered. A table keeps its 0.1 name when its schema is unchanged and its old rows can't reach new code; otherwise it gets a `_v2` name (index names too, since Postgres index names are schema-wide):
+  - `hatchery_chats_v2`: `space_id` became `agent_id`; old chats would show up in lists.
+  - `hatchery_bindings_v2`: old bindings would route Slack/GitHub replies to chats that no longer exist (and `claim` would fail on them).
+  - `hatchery_jobs_v2`: `space_id` became `agent_id`; old jobs would run.
+  - `hatchery_workers_v2`: old worker records would let 0.1 sandbox daemons' events trigger turns.
+  - `hatchery_streams`, `hatchery_events` (and `pg_notify` channel `hatchery_events`): same schema; read only by stream ID, and new stream IDs are fresh.
+  - `hatchery_job_executions_v2`: new; same schema, but the 30-day cleanup would otherwise delete old rows, and old data stays untouched.
+  - `hatchery_worker_tasks`, `hatchery_worker_terminals`: same schema; read only by fresh IDs, chats, or workers. `worker_event` drops events whose worker is not in `hatchery_workers_v2` before touching tasks (`tests/app/test_server.py::test_worker_event_rejects_old_daemon_whose_worker_is_unknown`).
+  - Users, sessions, OAuth states, identities, and dedupe keep their names; `hatchery_agents` is new. The old `ALTER TABLE` lines are gone.
+- Rotor has no table prefix or schema option, and Neon's pooler rejects a `search_path` startup parameter, so Rotor keeps the shared `rotor_*` tables and their old rows. Rotor claims and dispatches only registered type names, so old `DurableDispatcher` rows are inert. The two task names the old runtime also spawned stay renamed (`run_tool` → `run_hatchery_tool`, `announce_turn` → `announce_thread_turn`) so old rows can't be claimed; the only remaining shared names are Rotor's `Group` and `Ticker`, which old Hatchery never started.
+- Queue topics are the 0.1 names: `hatchery-dispatcher-v1`, `hatchery-dispatcher-maintenance-v1` (consumer group `hatchery-dispatcher-v1`), `hatchery-worker-events-v1` (consumer group `hatchery-control-plane-v1`). A 0.1 daemon's events arrive and are dropped by the worker check above.
+- Other old-only code removed: `Agent.about` and its default text, legacy agent colors (aliases and custom values, backend and UI), `WorkerSpec` `vcpus`/`memory` and the `legacy` size label, the list-time Slack title cleanup, the transcript's duplicate-tool-part repair, and `agent/dispatcher.py` (folded into the thread prompt; spans are now `hatchery.thread.turn`/`hatchery.thread.tool`).
+- Seed: the first call that lists agents on a fresh deployment (`_agents()` in `app/server.py`) creates `hatchery` and commits the template through the same `join` as `POST /api/agents`. A failed commit removes the row, so the next call retries; a commit that already landed is found (`FileExistsError`) and not repeated. The startup hook no longer creates the row without its files. Gate: `tests/app/test_server.py::test_default_agent_seed_commits_the_template_once_and_retries_after_failure`.
+- Wiki: as in agentmesh, `wiki/PROMPT.md` and `wiki/skills/` are optional and nothing seeds them at runtime (agentmesh only has `wiki/README.md` from its `init` scaffold, which §3 drops). A thread on a `main` without `wiki/` works, and the first reviewed wiki proposal creates it. Gate: `tests/agent/test_thread.py::test_fresh_storage_without_wiki_gets_it_from_the_first_reviewed_proposal`.
+- Live: the Vercel project `hatchery` deploys from `vercel-internal-playground/hatchery-storage`, a wrapper that pins the `vercel-hatchery` wheel and declares its own queue subscribers. That repo is also the storage repo, so it needs a new wheel (0.2.0.dev0; its topics are unchanged), and agentmesh's `ignoreCommand` (skip builds for thread branches and for `main` commits that only touch `agents/` and `wiki/`), or every agent publish redeploys production.
 
-### Commands during implementation
+### Phase 5 notes
 
-Run focused tests for each touched area first, from `backend/`:
+- Console features live in `frontend/src/features/{threads,repository,agents}` on AppShell. A root thread is its chat (`/chats/<id>`); the draft at `/` stays mounted through chat creation; Workspace is `/agents/<id>`, the API view `/agents/<id>/api`, Repository `/repository`. The last conversation stays mounted (React `Activity`) under other views.
+- Streams: the transcript is `GET /api/chats/{id}/transcript` (stored model messages with time and provenance); the running turn streams through `useChat`; thread details refresh on the chat's SSE and while the turn streams. Only roster activity (5 s) and live sandbox files (2 s, visible tab) poll, since no stream reports them.
+- Endpoints: `GET /api/repository` (`chat_id`, `proposal`, `path`, `revision`, `comparison`), `GET /api/chats/{id}/thread/filesystem[/file]`, `GET /api/chats/{id}/transcript`. `GET /api/agents/{id}/threads` and `/api/chats/{id}/thread` add Rotor activity and refreshed proposal `merged`.
+- The API view (routes, schedules, secrets) uses the serve endpoints in `hatchery/serve/api.py`; agentmesh's per-agent GitHub connection is not ported (Hatchery keeps its account connection).
+- Notes store, API, and UI are removed; the agent page shows `AGENTS.md` from `main`. The manual create-sandbox UI is removed; the thread sandbox and extra sandboxes appear in the Terminal tab.
 
-```sh
-uv run pytest tests/agent tests/worker
-# After the corresponding new test trees exist:
-uv run pytest tests/workspace
-uv run pytest tests/serve tests/sdk
-```
+The earlier fx lifecycle blocker no longer applies (see §3). fx subagents keep the current adapter and its pinned fx 0.0.8.
 
-Broaden to `uv run pytest` at shared-integration and final gates after inspecting test environment requirements. Do not assume all tests under `tests/evals` require live models.
+### Baselines
 
-For frontend changes, from `backend/frontend/`:
+- Hatchery started clean at `95d77dc5827378e073dd940cc87367fc1a0c4526`.
+- Agentmesh at `27242e9acdd7a080542c37cbb1d490cda631bb03`, clean.
+- Agentmesh's Rotor checkout matches Hatchery's installed Rotor source byte-for-byte. Persisted state and schemas are still not transferable.
 
-```sh
-pnpm test
-pnpm lint
-pnpm build
-```
+### Dependency differences
 
-Extend the test command/harness to run component tests, not silently leave imported TSX scenarios undiscovered. Check new CLI packaging and `--help`/read-only check mode as part of its phase.
-
-### Live acceptance on an isolated preview/staging environment
-
-1. Create a shared named agent. Confirm its Git directory and DB record; edit instructions and verify another authorized operator sees the same agent.
-2. Submit UI input. Observe automatic sandbox startup, loaded instructions/skills, file changes, live tree, checkpoint diff, idle stop, and resume.
-3. Run child/grandchild fx work. Exchange directed messages, review child changes, complete, reopen, cancel, archive, and resume after a worker restart.
-4. Run concurrent chats editing the same agent file. Verify clean merges or visible repairable conflicts, never silent loss.
-5. Trigger budget hold and grant, UTC rollover with controlled tests, compaction, large output, and context changes. Confirm full operator transcript survives.
-6. Publish/review a handler and a scheduled job. Verify secrets, dependency setup, deployed revision, bounded effects, pause, retries, contention, and external Git merge reconciliation.
-7. Verify Slack/GitHub incoming and linked outgoing messages, scheduled prompt jobs, coding GitHub identity, PR tracking, terminals, and same-origin stream reconnects.
-8. Exercise revoked grants, provisioning failures, Git/DB outages, lost responses, deployment restart, and stale approval. Accepted work must remain recoverable.
-9. Retire a test agent: refuse new work, stop task/scheduler activity, clear appropriate secrets/serving resources, retain documented coding recovery state, and show cleanup failures for retry.
-10. Verify preview isolation, promotion, and rollback without competing consumers or public-origin leakage.
-
-Use [agent-browser guidance](use-agent-browser.md) and [Braintrust guidance](use-braintrust.md). Correlate agent/chat/task/worker IDs, Git SHAs, operation IDs, and deployment IDs. Add spans for workspace refresh/checkpoint/merge, publication, serving, scheduling, admission, and cleanup without logging secrets.
-
-## 9. Configuration and deployment prerequisites
-
-Names below are proposed Hatchery names; they are not claims about existing environment variables.
-
-- `HATCHERY_STORAGE_REPO`: intended production value `vercel-internal-playground/hatchery-storage`.
-- `HATCHERY_STORAGE_BRANCH`: canonical branch, normally `main`; explicit isolated value for staging.
-- Reuse the existing GitHub Connect connector configuration; validate repository access and policy in the deployment environment.
-- `HATCHERY_SERVE_DOMAIN`: separate public agent host domain and staging counterpart, with matching routing/DNS configuration.
-- A dedicated vault encryption key and stable application/environment identity; document key rotation before production secret use.
-- Validated operator settings for models, context/output limits, daily budgets, command/turn/idle limits, delegation limits, review policies, serving timeouts, and revision TTL. Start from reference defaults where compatible; keep current Hatchery model choices unless intentionally changed.
-- Versioned worker protocol/queue topics, new Rotor process registrations, protected maintenance, and environment-specific resource naming.
-- Pin the fx version supporting the proven adapter contract. Fail startup/check with actionable diagnostics when required capabilities are absent.
-
-No cloud resources, credentials, DNS, remote Git branches, or data were changed while generating this plan.
-
-## 10. Completion criteria and remaining technical gates
-
-The migration is complete when shared agents have the full reference capability set on Hatchery's existing platform, every parity row has behavioral evidence, existing integrations still work, and no hidden second runtime or legacy memory store remains.
-
-Known gates to resolve during implementation:
-
-1. **fx lifecycle interface:** per-call admission/context/usage and managed nested tasks are not proven by the current adapter. This is the first dependency to validate.
-2. **Dependency compatibility:** adapt to Hatchery's installed SDK/Rotor interfaces; regenerate necessary durable schemas rather than copying process state or lockfiles.
-3. **Cross-system recovery:** Git, DB, queues, and sandboxes need tested reconciliation, not an assumed transaction.
-4. **Shared authority:** explicitly selected app/user grants and existing access policy must survive messages, delegation, schedules, and reconnects.
-5. **Production certification:** the reference's local tests do not certify hosted routing, microVM lifecycle, scheduling, or cleanup. Those require the staging gates above.
-
-Plan verification is limited to source review and document checks. Runtime tests, builds, remote permission checks, and deployment acceptance have not been run.
+| Dependency | Agentmesh | Hatchery | Note |
+| --- | --- | --- | --- |
+| Python | `>=3.12` | `>=3.14,<3.15` (3.14.7) | Don't copy lockfiles. |
+| AI SDK | 0.5.2 | 0.7.0 | APIs used by agentmesh exist; test behavior. |
+| Rotor | `rotorcore` 0.0.1 | `rotorcore[vercel]` 0.0.2 | Regenerate schemas. |
+| Sandbox | 0.4.0 | 0.6.0 (via `vercel` 0.11.3) | Verify process/timeout behavior. |
+| Connect | 0.1.0 | 0.2.0 | Verify adapted calls. |
+| Cryptography | 48.x | 50.0.0 (transitive) | Vault needs a direct dependency. |
+| modelsdotdev | 0.20260818.0 | 0.20260610.0 | Check context sizing for current models. |
+| WebSockets | 17.1 | 16.1.1 (`<17`) | Use Hatchery's version. |
+| PyYAML / Typer / Watchfiles | present | PyYAML only | Typer and Watchfiles went with the CLI. |
+| Cron | Rotor `Cron`/`Interval`/`Ticker` | `croniter` + Rotor | Prompt jobs keep croniter. |

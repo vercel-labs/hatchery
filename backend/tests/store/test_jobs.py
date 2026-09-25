@@ -17,7 +17,7 @@ def test_validate_schedule_accepts_only_five_fields():
 
 async def test_crud_and_owner_scoped_listing():
     created = await jobs.create(
-        "spc_1",
+        "1",
         "user_1",
         "0 9 * * 1-5",
         "Check reports",
@@ -25,8 +25,8 @@ async def test_crud_and_owner_scoped_listing():
     )
 
     assert created.author_display_name == "Ada Lovelace"
-    assert await jobs.list_for_space("spc_1", "user_2") == []
-    assert (await jobs.list_for_space("spc_1", "user_1"))[0] == created
+    assert await jobs.list_for_agent("1", "user_2") == []
+    assert (await jobs.list_for_agent("1", "user_1"))[0] == created
 
     updated = await jobs.update(created.id, "30 10 * * *", "Check builds")
     assert updated.schedule == "30 10 * * *"
@@ -41,7 +41,7 @@ def test_legacy_job_and_execution_attribution_is_optional():
     job = models.Job.model_validate(
         {
             "id": "job_legacy",
-            "space_id": "spc_1",
+            "agent_id": "1",
             "owner_id": "user_1",
             "schedule": "0 9 * * *",
             "prompt": "Check reports",
@@ -65,7 +65,7 @@ def test_legacy_job_and_execution_attribution_is_optional():
 
 async def test_claim_due_coalesces_and_is_idempotent(monkeypatch):
     job = await jobs.create(
-        "spc_1",
+        "1",
         "user_1",
         "* * * * *",
         "Run maintenance",
@@ -88,7 +88,7 @@ async def test_claim_due_coalesces_and_is_idempotent(monkeypatch):
         id=chat.id,
         user_id="user_1",
         author_display_name="Ada Lovelace",
-        space_id="spc_1",
+        agent_id="1",
         title="scheduled run · 2026-09-04 09:00 UTC",
         trigger=f"cron:{job.id}",
         created_at=chat.created_at,
@@ -119,7 +119,7 @@ async def test_claim_due_coalesces_and_is_idempotent(monkeypatch):
 
 async def test_pause_and_delete_cancel_pending_executions():
     now = datetime.datetime(2026, 9, 4, 12, 0, tzinfo=datetime.UTC)
-    paused = await jobs.create("spc_1", "user_1", "* * * * *", "Pause me")
+    paused = await jobs.create("1", "user_1", "* * * * *", "Pause me")
     paused.next_run_at = (now - datetime.timedelta(minutes=1)).isoformat()
     jobs._write_job(paused)
     paused_execution = (await jobs.claim_due(now))[0]
@@ -132,7 +132,7 @@ async def test_pause_and_delete_cancel_pending_executions():
 
     assert await events.read(paused_execution.chat_id, "messages") == []
 
-    deleted = await jobs.create("spc_1", "user_1", "* * * * *", "Delete me")
+    deleted = await jobs.create("1", "user_1", "* * * * *", "Delete me")
     deleted.next_run_at = (now - datetime.timedelta(minutes=1)).isoformat()
     jobs._write_job(deleted)
     deleted_execution = (await jobs.claim_due(now))[0]
@@ -146,7 +146,7 @@ async def test_pause_and_delete_cancel_pending_executions():
 
 async def test_pause_keeps_chat_after_turn_started():
     now = datetime.datetime(2026, 9, 4, 12, 0, tzinfo=datetime.UTC)
-    job = await jobs.create("spc_1", "user_1", "* * * * *", "Already started")
+    job = await jobs.create("1", "user_1", "* * * * *", "Already started")
     job.next_run_at = (now - datetime.timedelta(minutes=1)).isoformat()
     jobs._write_job(job)
     execution = (await jobs.claim_due(now))[0]
@@ -160,7 +160,7 @@ async def test_pause_keeps_chat_after_turn_started():
 
 async def test_stable_turn_has_one_run_owner_and_cleanup_is_bounded():
     now = datetime.datetime(2026, 9, 4, 12, 0, tzinfo=datetime.UTC)
-    job = await jobs.create("spc_1", "user_1", "* * * * *", "Run once")
+    job = await jobs.create("1", "user_1", "* * * * *", "Run once")
     job.next_run_at = (now - datetime.timedelta(days=40)).isoformat()
     jobs._write_job(job)
     execution = (await jobs.claim_due(now))[0]

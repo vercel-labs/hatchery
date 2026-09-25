@@ -3,7 +3,7 @@
 One stream per chat per concern:
 
 - (chat_id, "messages"): UI transcript and bootstrap history for a chat's Rotor
-  dispatcher process. Channel inbound appends user messages; completed Rotor
+  thread process. Channel inbound appends user messages; completed Rotor
   turns project assistant and tool messages in order.
 - (chat_id, "ui"): lightweight change notifications consumed by the UI.
 

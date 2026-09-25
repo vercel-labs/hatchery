@@ -11,13 +11,13 @@ from hatchery import store
 from hatchery.worker import models
 
 _SCHEMA = """\
-CREATE TABLE IF NOT EXISTS hatchery_workers (
+CREATE TABLE IF NOT EXISTS hatchery_workers_v2 (
     id         TEXT PRIMARY KEY,
     chat_id    TEXT NOT NULL,
     data       JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS hatchery_workers_chat ON hatchery_workers (chat_id, created_at);
+CREATE INDEX IF NOT EXISTS hatchery_workers_v2_chat ON hatchery_workers_v2 (chat_id, created_at);
 CREATE TABLE IF NOT EXISTS hatchery_worker_tasks (
     id         TEXT PRIMARY KEY,
     chat_id    TEXT NOT NULL,
@@ -74,6 +74,15 @@ async def list_all(chat_id: str | None = None) -> list[models.Worker]:
 
 
 async def delete(worker_id: str) -> bool:
+    """Delete one worker record together with its tasks and terminals."""
+    worker = await get(worker_id)
+    if worker is not None:
+        for task in await list_tasks(worker.chat_id):
+            if task.worker_id == worker_id:
+                await delete_task(task.id)
+        for terminal in await list_terminals(worker.chat_id):
+            if terminal.worker_id == worker_id:
+                await delete_terminal(terminal.id)
     return await _delete("workers", worker_id)
 
 
@@ -292,7 +301,7 @@ async def _save(kind: str, item_id: str, data: str, *, chat_id: str, worker_id: 
         from hatchery.store import db
 
         table = {
-            "workers": "hatchery_workers",
+            "workers": "hatchery_workers_v2",
             "worker_tasks": "hatchery_worker_tasks",
             "worker_terminals": "hatchery_worker_terminals",
         }[kind]
@@ -313,7 +322,7 @@ async def _get(kind: str, item_id: str) -> str | None:
     if store.use_postgres():
         from hatchery.store import db
 
-        table = {"workers": "hatchery_workers", "worker_tasks": "hatchery_worker_tasks", "worker_terminals": "hatchery_worker_terminals"}[kind]
+        table = {"workers": "hatchery_workers_v2", "worker_tasks": "hatchery_worker_tasks", "worker_terminals": "hatchery_worker_terminals"}[kind]
         row = await (await db.pool()).fetchrow(f"SELECT data FROM {table} WHERE id = $1", item_id)
         if row is None:
             return None
@@ -326,7 +335,7 @@ async def _list(kind: str, chat_id: str | None) -> list[str]:
     if store.use_postgres():
         from hatchery.store import db
 
-        table = {"workers": "hatchery_workers", "worker_tasks": "hatchery_worker_tasks", "worker_terminals": "hatchery_worker_terminals"}[kind]
+        table = {"workers": "hatchery_workers_v2", "worker_tasks": "hatchery_worker_tasks", "worker_terminals": "hatchery_worker_terminals"}[kind]
         query = f"SELECT data FROM {table}"
         args = ()
         if chat_id is not None:
@@ -347,7 +356,7 @@ async def _delete(kind: str, item_id: str) -> bool:
     if store.use_postgres():
         from hatchery.store import db
 
-        table = {"workers": "hatchery_workers", "worker_tasks": "hatchery_worker_tasks", "worker_terminals": "hatchery_worker_terminals"}[kind]
+        table = {"workers": "hatchery_workers_v2", "worker_tasks": "hatchery_worker_tasks", "worker_terminals": "hatchery_worker_terminals"}[kind]
         result = await (await db.pool()).execute(f"DELETE FROM {table} WHERE id = $1", item_id)
         return result != "DELETE 0"
     path = _path(kind, item_id)

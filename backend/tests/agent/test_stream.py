@@ -2,11 +2,9 @@ import asyncio
 
 import ai
 import rotor
-import rotor.testing
 
-from hatchery.agent import durable, runtime, stream
-from hatchery.app import server
-from hatchery.store import chats, events, spaces
+from hatchery.agent import stream
+from hatchery.store import events
 
 
 async def _never_terminal(_process_id, _turn_id):
@@ -127,41 +125,11 @@ async def test_to_sse_emits_reload_marker_for_discarded_activation(monkeypatch):
     assert '"type": "data-reload"' in body
 
 
-async def test_to_sse_finishes_from_durable_record_after_live_spool_settles(
-    monkeypatch,
-):
-    space = await spaces.default()
-    chat = await chats.create(space.id, "settled")
-    user = ai.user_message("fast")
-    await events.append(chat.id, "messages", user.model_dump(mode="json"))
-
-    async def model_step(_history, _tools, _turn_id):
-        return ai.assistant_message("done")
-
-    monkeypatch.setattr(durable, "model_step", model_step)
-    monkeypatch.setattr(
-        server,
-        "_deliver",
-        lambda *_args, **_kwargs: asyncio.sleep(0, result=[]),
-    )
-    async with rotor.testing.LocalRuntime(*durable.PROCESSES) as local:
-        handle = await local.client.start(
-            durable.DurableDispatcher,
-            input={"chat_id": chat.id},
-            key="dispatcher",
-            scope=chat.id,
-        )
-        await handle.send(
-            durable.TurnInput(
-                chat.id,
-                "turn_fast",
-                "ui",
-                [user.model_dump(mode="json")],
-            )
-        )
-        await local.drain()
-        monkeypatch.setattr(runtime, "client", local.client)
-        body = "".join([chunk async for chunk in stream.to_sse(handle.id, "turn_fast")])
+async def test_to_sse_finishes_from_the_thread_record_after_live_spool_settles(run):
+    async with run([ai.user_message("fast"), ai.assistant_message("done")]) as app:
+        chat_id = await app.chat("fast", turn_id="turn_fast")
+        thread_id = await app.thread_id(chat_id)
+        body = "".join([chunk async for chunk in stream.to_sse(thread_id, "turn_fast")])
 
     assert '"type": "data-reload"' in body
     assert body.endswith("data: [DONE]\n\n")

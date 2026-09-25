@@ -41,7 +41,7 @@ def dump_event(event: StreamEvent) -> dict[str, typing.Any]:
 async def get_readable(
     process_id: str,
 ) -> collections.abc.AsyncIterator[rotor.Chunk | rotor.Settled | rotor.Gap]:
-    """Replay the in-flight spool, then follow one dispatcher process live."""
+    """Replay the in-flight spool, then follow one thread process live."""
     from hatchery.agent import runtime
 
     async for item in runtime.client.live(process_id=process_id, replay_inflight=True):

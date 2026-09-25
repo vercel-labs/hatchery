@@ -1,0 +1,1 @@
+# Pin shared Python dependencies for scripts, API routes, and scheduled jobs here.

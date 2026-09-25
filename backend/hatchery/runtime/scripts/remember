@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# remember NOTE...  -  append a dated line to memories/journal.md
+set -euo pipefail
+
+if [[ $# -lt 1 || "$1" == "--help" || "$1" == "-h" ]]; then
+  echo "usage: remember NOTE..."
+  echo "  Appends '- YYYY-MM-DD: NOTE' to /workspace/self/memories/journal.md."
+  echo "  For lasting knowledge, write a topic file in memories/ instead."
+  exit 0
+fi
+
+journal="${HATCHERY_HOME:-/workspace/self}/memories/journal.md"
+mkdir -p "$(dirname "$journal")"
+[[ -f "$journal" ]] || printf '%s\n' '---' 'description: >-' \
+  '  Append-only dated observations. Read when reconstructing recent events or changes.' \
+  '---' '' '# Journal' '' > "$journal"
+printf -- '- %s: %s\n' "$(date -u +%Y-%m-%d)" "$*" >> "$journal"
+tail -n 1 "$journal"

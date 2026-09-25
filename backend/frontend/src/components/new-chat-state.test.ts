@@ -6,9 +6,8 @@ import type { UIMessage } from "ai";
 
 import type { Chat } from "../lib/api.ts";
 import {
-  AUTO_SPACE_VALUE,
+  AUTO_AGENT_VALUE,
   createChatPersister,
-  isBrandNewChat,
   newChatHandoff,
   newChatRequest,
   startsFreshDraft,
@@ -19,7 +18,7 @@ function chat(id: string): Chat {
   return {
     id,
     user_id: "user_1",
-    space_id: null,
+    agent_id: null,
     title: "new chat",
     topic: null,
     trigger: "ui",
@@ -32,18 +31,18 @@ function chat(id: string): Chat {
   };
 }
 
-test("builds a retry-safe new chat request with an optional draft space", () => {
+test("builds a retry-safe new chat request with an optional draft agent", () => {
   assert.deepEqual(newChatRequest("chat_123456789abc", null), {
     id: "chat_123456789abc",
   });
-  assert.deepEqual(newChatRequest("chat_123456789abc", "space_1"), {
+  assert.deepEqual(newChatRequest("chat_123456789abc", "agent_1"), {
     id: "chat_123456789abc",
-    space_id: "space_1",
+    agent_id: "agent_1",
   });
-  assert.equal(AUTO_SPACE_VALUE, "__auto__");
+  assert.equal(AUTO_AGENT_VALUE, "__auto__");
 });
 
-test("coalesces concurrent persistence and keeps the first selected space", async () => {
+test("coalesces concurrent persistence and keeps the first selected agent", async () => {
   const requests: ReturnType<typeof newChatRequest>[] = [];
   let resolve!: (value: Chat) => void;
   const persister = createChatPersister(
@@ -56,11 +55,11 @@ test("coalesces concurrent persistence and keeps the first selected space", asyn
     "chat_123456789abc",
   );
 
-  const first = persister("space_1");
-  const second = persister("space_2");
+  const first = persister("agent_1");
+  const second = persister("agent_2");
   assert.equal(first, second);
   assert.deepEqual(requests, [
-    { id: "chat_123456789abc", space_id: "space_1" },
+    { id: "chat_123456789abc", agent_id: "agent_1" },
   ]);
 
   resolve(chat("chat_123456789abc"));
@@ -78,11 +77,11 @@ test("retries failed persistence with the same chat id", async () => {
     "chat_123456789abc",
   );
 
-  await assert.rejects(persister("space_1"), /offline/);
-  assert.equal((await persister("space_2")).id, "chat_123456789abc");
+  await assert.rejects(persister("agent_1"), /offline/);
+  assert.equal((await persister("agent_2")).id, "chat_123456789abc");
   assert.deepEqual(requests, [
-    { id: "chat_123456789abc", space_id: "space_1" },
-    { id: "chat_123456789abc", space_id: "space_1" },
+    { id: "chat_123456789abc", agent_id: "agent_1" },
+    { id: "chat_123456789abc", agent_id: "agent_1" },
   ]);
 });
 
@@ -144,7 +143,7 @@ test("the handoff message starts one send and no reconnect", async () => {
 test("recognizes every navigation into the root as a fresh draft", () => {
   assert.equal(startsFreshDraft(null, "/"), true);
   assert.equal(startsFreshDraft("/chats/chat_1", "/"), true);
-  assert.equal(startsFreshDraft("/spaces/space_1", "/"), true);
+  assert.equal(startsFreshDraft("/agents/agent_1", "/"), true);
   assert.equal(startsFreshDraft("/", "/"), false);
   assert.equal(startsFreshDraft("/", "/chats/chat_1"), false);
 });
@@ -156,9 +155,4 @@ test("settles a locally owned stream without replay and resumes on error", () =>
   assert.equal(streamAttachmentAction(0, 1, "error", true), "resume");
   assert.equal(streamAttachmentAction(1, 1, "ready", false), "ignore");
   assert.equal(streamAttachmentAction(1, 2, "ready", false), "resume");
-});
-
-test("historical empty chats still use the new-chat layout", () => {
-  assert.equal(isBrandNewChat(0), true);
-  assert.equal(isBrandNewChat(1), false);
 });

@@ -344,11 +344,11 @@ class SlackChannel:
     async def on_event(self, event: channels.Event, state: dict) -> None:
         if event.type == channels.protocol.TURN_STARTED:
             await self._set_status(state, "is thinking...")
-        elif event.type == channels.protocol.SPACE_ASSIGNING:
-            await self._set_status(state, "assigning a space...")
-        elif event.type == channels.protocol.SPACE_ASSIGNED:
+        elif event.type == channels.protocol.AGENT_ASSIGNING:
+            await self._set_status(state, "assigning an agent...")
+        elif event.type == channels.protocol.AGENT_ASSIGNED:
             await self._set_status(
-                state, f"assigned {event.data.get('space', {}).get('name', 'space')}"
+                state, f"assigned {event.data.get('agent', {}).get('name', 'agent')}"
             )
         elif event.type == channels.protocol.STATUS_UPDATED:
             await self._set_status(

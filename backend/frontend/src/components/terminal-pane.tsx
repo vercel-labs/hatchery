@@ -202,15 +202,11 @@ export function TerminalPane({
   chatId,
   sandboxes,
   preferredSandboxId,
-  onClose,
-  onCreateSandbox,
   onChanged,
 }: {
   chatId: string;
   sandboxes: SandboxWorkspace[];
   preferredSandboxId?: string;
-  onClose: () => void;
-  onCreateSandbox: () => void;
   onChanged: () => void;
 }) {
   const latest =
@@ -293,14 +289,14 @@ export function TerminalPane({
       setSelectedSandboxId(next?.id ?? "");
       setSelectedTabId(tabs(next).at(-1)?.id ?? "");
       onChanged();
-      if (!remaining.length) onClose();
     } finally {
       setDeletingId("");
     }
   };
 
   return (
-    <div className="flex h-2/5 min-w-0 flex-none flex-col border-t @4xl:h-auto @4xl:min-w-[28rem] @4xl:flex-1 @4xl:border-t-0 @4xl:border-l">
+    // The thread sandbox starts on its own; this lists it beside extra sandboxes.
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <div className="flex h-10 shrink-0 items-center gap-1 overflow-x-auto border-b px-2">
         {sandboxes.map((box, index) => (
           <div key={box.id} className="flex shrink-0 items-center">
@@ -324,24 +320,6 @@ export function TerminalPane({
             </Button>
           </div>
         ))}
-        <Button
-          variant="ghost"
-          size="icon"
-          className="size-7 shrink-0"
-          aria-label="Create sandbox"
-          onClick={onCreateSandbox}
-        >
-          <PlusIcon />
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="ml-auto size-7 shrink-0"
-          aria-label="Close sandboxes"
-          onClick={onClose}
-        >
-          <XIcon />
-        </Button>
       </div>
       <div className="flex h-9 shrink-0 items-center gap-1 overflow-x-auto border-b px-2">
         {activeTabs.map((tab, index) => (

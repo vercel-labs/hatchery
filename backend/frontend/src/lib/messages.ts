@@ -1,7 +1,6 @@
 import type { UIMessage } from "ai";
 
-// Worker tools live in the Python backend. Their implementations are migration
-// stubs until the Vercel Sandbox control plane lands.
+// Sandbox and subagent tools run in the Python backend (hatchery/agent/tools.py).
 export type HatcheryTools = {
   create_sandbox: {
     input: { repos?: string[]; title?: string };
@@ -21,10 +20,10 @@ export type ChatUIMessage = UIMessage<
   { origin?: "slack" | "github" | "ui" | "cron"; author?: string },
   {
     reload: unknown;
-    "space-assignment": {
+    "agent-assignment": {
       state: "assigning" | "assigned";
-      space_id?: string;
-      space_name?: string;
+      agent_id?: string;
+      agent_name?: string;
     };
   },
   HatcheryTools

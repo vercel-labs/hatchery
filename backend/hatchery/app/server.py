@@ -1,12 +1,12 @@
 """Vercel entrypoint (see [tool.vercel] in pyproject.toml).
 
-Health check, channel webhooks, and the dispatcher chat:
+Health check, channel webhooks, and the thread chat:
 - /channels/v1/slack   needs SLACK_CONNECTOR (connect uid, e.g. "slack/hatchery")
 - /channels/v1/github  needs GITHUB_CONNECTOR + GITHUB_APP_SLUG
-- /api/chat            dispatcher agent turn, AI SDK UI message stream (SSE)
+- /api/chat            thread turn, AI SDK UI message stream (SSE)
 
 Application projections live in the store (Postgres via DATABASE_URL, local
-files without). Rotor checkpoints the canonical dispatcher conversation; the
+files without). Rotor checkpoints the canonical thread conversation; the
 (chat_id, "messages") stream feeds the UI and bootstraps existing chats.
 Slack/GitHub inbound lands in its chat through _StoreHub, then enters the
 chat's Rotor mailbox.
@@ -14,6 +14,7 @@ chat's Rotor mailbox.
 
 import asyncio
 import contextlib
+import dataclasses
 import datetime
 import hashlib
 import hmac
@@ -23,12 +24,15 @@ import logging
 import os
 import pathlib
 import re
+import typing
 import urllib.parse
 
 import fastapi
 import fastapi.middleware.cors
 import fastapi.responses
 import pydantic
+import rotor
+import rotor.stores.base
 import websockets.asyncio.client
 
 import ai
@@ -37,15 +41,23 @@ import ai.ui.ai_sdk.ui_events
 from hatchery import auth
 from hatchery import channels
 from hatchery import connections
+from hatchery import environment
+from hatchery import messages
 from hatchery import models
 from hatchery import store
+from hatchery import templates
 import vercel.functions
 import vercel.queue
-from hatchery.agent import classifier, durable, runtime as rotor_runtime, sandbox, stream as agent_stream, telemetry, topic
+from hatchery.agent import classifier, runtime as rotor_runtime, sandbox, stream as agent_stream, supervisor, telemetry, thread, topic
 from hatchery import worker
 from hatchery.worker import protocol as worker_protocol
 from hatchery.channels import github, slack
-from hatchery.store import chats, events, jobs, notes, spaces, turns
+from hatchery import config
+from hatchery.serve import api as serve_api, app as serve_app, host as serve_host
+from hatchery.store import agents, chats, events, jobs, turns
+from hatchery.workspace import browser as workspace_browser
+from hatchery.workspace import git as workspace_git
+from hatchery.workspace import review as workspace_review
 
 log = logging.getLogger("app")
 _background: set[asyncio.Task] = set()
@@ -86,7 +98,7 @@ async def _channel_user(channel: str, state: dict) -> tuple[str | None, dict | N
 
 
 class _StoreHub:
-    """Land inbound messages in a chat and run one dispatcher turn.
+    """Land inbound messages in a chat and run one thread turn.
 
     The channel endpoint already defers dispatch until after its fast ack, so
     this coroutine can own the full turn and its reply delivery.
@@ -102,13 +114,11 @@ class _StoreHub:
                 author_user = actor
             else:
                 _, author_user = await _channel_user(channel, inbound.state)
-            found = await spaces.list_all() or [await spaces.default()]
+            found = await _agents()
             title = inbound.title or inbound.text.strip().splitlines()[0][:80]
             token = f"{channel}:{inbound.token}"
-            legacy_token = None
             if channel == "slack":
                 token = f"slack:{inbound.state['team_id']}:{inbound.token}"
-                legacy_token = f"slack:{inbound.token}"
             linked = await chats.binding(token)
             actor_allowed = auth.allowed_user(actor)
             if channel in {"slack", "github"} and linked is None and not actor_allowed:
@@ -129,7 +139,6 @@ class _StoreHub:
                     inbound.state,
                     user_id=actor_id,
                     author_display_name=_user_display_name(actor),
-                    legacy_token=legacy_token,
                 )
             span.set_attrs({"chat.id": chat.id}, accepted=True)
             async with telemetry.use_chat(chat.id):
@@ -139,7 +148,7 @@ class _StoreHub:
                     async with turns.run(chat.id):
                         chat = await chats.get(chat.id) or chat
                         dispatch_span.set_attrs(
-                            {"chat.id": chat.id, "space.id": chat.space_id or ""},
+                            {"chat.id": chat.id, "agent.id": chat.agent_id or ""},
                             channel=channel,
                             created=created,
                         )
@@ -199,7 +208,7 @@ class _StoreHub:
                             )
                             return
 
-                        if chat.space_id is None and (
+                        if chat.agent_id is None and (
                             actor_allowed or channel not in {"slack", "github"}
                         ):
                             await _classify_chat(
@@ -220,7 +229,7 @@ class _StoreHub:
                             actor_allowed or channel not in {"slack", "github"}
                         )
                         dispatch_span.set_attrs(
-                            {"space.id": chat.space_id or ""}, invoke=invoke
+                            {"agent.id": chat.agent_id or ""}, invoke=invoke
                         )
                         log.info(
                             "inbound %s -> %s chat %s",
@@ -280,8 +289,8 @@ async def _name_chat(chat_id: str, prompt: str) -> None:
 
 
 async def _classify_chat(
-    chat_id: str, prompt: str, metadata: dict, candidates: list[models.Space]
-) -> models.Space:
+    chat_id: str, prompt: str, metadata: dict, candidates: list[models.Agent]
+) -> models.Agent:
     async with telemetry.use_chat(chat_id):
         async with ai.experimental_telemetry.span("hatchery.classify") as span:
             span.set_attrs(
@@ -289,17 +298,17 @@ async def _classify_chat(
                 origin=str(metadata.get("origin", "unknown")),
                 candidate_count=len(candidates),
             )
-            await _emit(chat_id, channels.event(channels.protocol.SPACE_ASSIGNING))
+            await _emit(chat_id, channels.event(channels.protocol.AGENT_ASSIGNING))
             selected = await classifier.classify(prompt, metadata, candidates)
-            span.set_attrs({"space.id": selected.id})
-            assigned = await chats.assign_space(chat_id, selected.id)
+            span.set_attrs({"agent.id": selected.id})
+            assigned = await chats.assign_agent(chat_id, selected.id)
             if assigned is None:
                 raise fastapi.HTTPException(404, "unknown chat")
             await _emit(
                 chat_id,
                 channels.event(
-                    channels.protocol.SPACE_ASSIGNED,
-                    space={
+                    channels.protocol.AGENT_ASSIGNED,
+                    agent={
                         "id": selected.id,
                         "name": selected.name,
                         "color": selected.color,
@@ -318,7 +327,6 @@ bot.add(github.channel())
 async def lifespan(_: fastapi.FastAPI):
     telemetry.install()
     await store.ensure_ready()
-    await spaces.default()
     yield
     telemetry.flush()
 
@@ -392,6 +400,15 @@ app.add_middleware(
     allow_headers=["*"],
     allow_credentials=True,
 )
+# Outermost: `<agent>.<HATCHERY_SERVE_DOMAIN>` goes to the agent's published routes
+# before session auth; malformed agent hosts fail closed.
+app.add_middleware(
+    serve_host.HostDispatch,
+    serve_app=serve_app.create_serve_app(),
+    domain=config.load().serve.domain,
+    allow_agent_header=os.environ.get("VERCEL_ENV") == "preview",
+)
+app.include_router(serve_api.router)
 
 
 @app.get("/api/health")
@@ -401,7 +418,7 @@ async def health() -> dict:
 
 @app.post("/api/rotor/activate")
 async def activate_rotor(request: fastapi.Request) -> dict[str, bool]:
-    """Explicitly transfer dispatcher execution to this Vercel deployment."""
+    """Explicitly transfer Rotor execution to this Vercel deployment."""
     secret = os.environ.get("ROTOR_RELEASE_SECRET")
     authorization = request.headers.get("authorization", "")
     if not secret or not hmac.compare_digest(authorization, f"Bearer {secret}"):
@@ -501,26 +518,25 @@ async def disconnect_slack(request: fastapi.Request) -> None:
     await connections.disconnect_slack(request.state.user)
 
 
-class SpaceWarning(pydantic.BaseModel):
-    space_id: str
+class AgentWarning(pydantic.BaseModel):
+    agent_id: str
     repo: str
     warning: str
 
 
-@app.get("/api/spaces")
-async def list_spaces() -> list[models.Space]:
-    found = await spaces.list_all()
-    return found or [await spaces.default()]
+@app.get("/api/agents")
+async def list_agents() -> list[models.Agent]:
+    return await _agents()
 
 
-@app.get("/api/spaces/warnings")
-async def space_warnings(request: fastapi.Request) -> list[SpaceWarning]:
+@app.get("/api/agents/warnings")
+async def agent_warnings(request: fastapi.Request) -> list[AgentWarning]:
     user = request.state.user
     warnings = []
-    for space in await spaces.list_all() or [await spaces.default()]:
-        if not space.repos:
+    for agent in await _agents():
+        if not agent.repos:
             continue
-        repo = space.repos[0]
+        repo = agent.repos[0]
         try:
             warning = await connections.github_repo_warning(user["id"], repo)
         except connections.ConnectionRequired:
@@ -528,14 +544,87 @@ async def space_warnings(request: fastapi.Request) -> list[SpaceWarning]:
         if warning is None:
             continue
         log.warning(
-            "space main repository lacks Hatchery GitHub access",
-            extra={"space_id": space.id, "repo": repo, "user_id": user["id"]},
+            "agent main repository lacks Hatchery GitHub access",
+            extra={"agent_id": agent.id, "repo": repo, "user_id": user["id"]},
         )
-        warnings.append(SpaceWarning(space_id=space.id, repo=repo, warning=warning))
+        warnings.append(AgentWarning(agent_id=agent.id, repo=repo, warning=warning))
     return warnings
 
 
-class CreateSpaceRequest(pydantic.BaseModel):
+class CreateAgentRequest(pydantic.BaseModel):
+    name: str
+    id: str | None = None
+    color: models.AccentColor | None = None
+
+    @pydantic.field_validator("name")
+    @classmethod
+    def valid_name(cls, name: str) -> str:
+        name = name.strip()
+        if not name:
+            raise ValueError("name must not be empty")
+        return name
+
+    @pydantic.field_validator("id")
+    @classmethod
+    def valid_id(cls, agent_id: str | None) -> str | None:
+        return None if agent_id is None else agents.validate_slug(agent_id)
+
+
+@app.post("/api/agents")
+async def create_agent(request: CreateAgentRequest) -> models.Agent:
+    """Register the agent, then commit its template directory to the storage repo.
+
+    A failed commit removes the row again, so the same request can simply be retried.
+    A taken ID is 409.
+    """
+    try:
+        agent = await agents.create(request.name, request.id, request.color)
+    except agents.Taken as error:
+        raise fastapi.HTTPException(409, f"agent id {error} is taken") from error
+    except ValueError as error:
+        raise fastapi.HTTPException(422, "cannot derive an id from this name; pass an id") from error
+    try:
+        return await _join(agent)
+    except Exception as error:
+        raise fastapi.HTTPException(502, "could not create the agent workspace") from error
+
+
+async def _join(agent: models.Agent) -> models.Agent:
+    """Commit a new agent's template directory to the storage repo (agentmesh `join`).
+
+    A failed commit removes the row again, so the caller can simply retry. A retry
+    after a commit that did land finds the directory and succeeds.
+    """
+    env = rotor_runtime.install()
+    if env is None:
+        return agent
+    try:
+        await env.workspaces.join(agent.id, templates.load())
+    except FileExistsError:
+        pass  # a retried create already committed it
+    except Exception:
+        await agents.delete(agent.id)
+        log.exception("could not commit the template for agent %s", agent.id)
+        raise
+    return agent
+
+
+async def _agents() -> list[models.Agent]:
+    """All agents. A fresh deployment first seeds the default agent the way create does."""
+    return await agents.list_all() or [await _join(await agents.default())]
+
+
+@app.delete("/api/agents/{agent_id}", status_code=204)
+async def delete_agent(agent_id: str) -> None:
+    if any(chat.agent_id == agent_id for chat in await chats.list_all()):
+        raise fastapi.HTTPException(409, "agent still has chats")
+    if await agents.get(agent_id) is None:
+        raise fastapi.HTTPException(404, "unknown agent")
+    await jobs.delete_for_agent(agent_id)
+    await agents.delete(agent_id)
+
+
+class UpdateAgentRequest(pydantic.BaseModel):
     name: str
     color: models.AccentColor | None = None
 
@@ -548,49 +637,19 @@ class CreateSpaceRequest(pydantic.BaseModel):
         return name
 
 
-@app.post("/api/spaces")
-async def create_space(request: CreateSpaceRequest) -> models.Space:
-    return await spaces.create(request.name, request.color)
-
-
-@app.delete("/api/spaces/{space_id}", status_code=204)
-async def delete_space(space_id: str) -> None:
-    if any(chat.space_id == space_id for chat in await chats.list_all()):
-        raise fastapi.HTTPException(409, "space still has chats")
-    if await spaces.get(space_id) is None:
-        raise fastapi.HTTPException(404, "unknown space")
-    await jobs.delete_for_space(space_id)
-    await notes.delete_for_space(space_id)
-    await spaces.delete(space_id)
-
-
-class UpdateSpaceRequest(pydantic.BaseModel):
-    name: str
-    about: str
-    color: models.AccentColor | None = None
-
-    @pydantic.field_validator("name")
-    @classmethod
-    def valid_name(cls, name: str) -> str:
-        name = name.strip()
-        if not name:
-            raise ValueError("name must not be empty")
-        return name
-
-
-@app.patch("/api/spaces/{space_id}")
-async def update_space(space_id: str, request: UpdateSpaceRequest) -> models.Space:
-    space = await spaces.get(space_id)
-    if space is None:
-        raise fastapi.HTTPException(404, "unknown space")
-    values = {**space.model_dump(), "name": request.name, "about": request.about}
+@app.patch("/api/agents/{agent_id}")
+async def update_agent(agent_id: str, request: UpdateAgentRequest) -> models.Agent:
+    agent = await agents.get(agent_id)
+    if agent is None:
+        raise fastapi.HTTPException(404, "unknown agent")
+    values = {**agent.model_dump(), "name": request.name}
     if request.color is not None:
         values["color"] = request.color
-    updated = models.Space.model_validate(values)
-    return await spaces.save(updated)
+    updated = models.Agent.model_validate(values)
+    return await agents.save(updated)
 
 
-class UpdateSpaceResourcesRequest(pydantic.BaseModel):
+class UpdateAgentResourcesRequest(pydantic.BaseModel):
     repos: list[str]
     resources: list[models.Resource]
 
@@ -608,124 +667,26 @@ class UpdateSpaceResourcesRequest(pydantic.BaseModel):
         return repos
 
 
-@app.patch("/api/spaces/{space_id}/resources")
-async def update_space_resources(
-    space_id: str, request: UpdateSpaceResourcesRequest
-) -> models.Space:
-    space = await spaces.get(space_id)
-    if space is None:
-        raise fastapi.HTTPException(404, "unknown space")
-    updated = models.Space.model_validate(
+@app.patch("/api/agents/{agent_id}/resources")
+async def update_agent_resources(
+    agent_id: str, request: UpdateAgentResourcesRequest
+) -> models.Agent:
+    agent = await agents.get(agent_id)
+    if agent is None:
+        raise fastapi.HTTPException(404, "unknown agent")
+    updated = models.Agent.model_validate(
         {
-            **space.model_dump(),
+            **agent.model_dump(),
             "repos": request.repos,
             "resources": request.resources,
         }
     )
-    return await spaces.save(updated)
-
-
-class CreateNoteRequest(pydantic.BaseModel):
-    filename: str
-    content: str = pydantic.Field(default="", max_length=notes.MAX_CONTENT_LENGTH)
-
-    @pydantic.field_validator("filename")
-    @classmethod
-    def valid_filename(cls, filename: str) -> str:
-        return notes.valid_filename(filename)
-
-
-class UpdateNoteRequest(pydantic.BaseModel):
-    content: str = pydantic.Field(max_length=notes.MAX_CONTENT_LENGTH)
-    expected_revision: int = pydantic.Field(ge=1)
-    override: bool = False
-
-
-async def _note_space(space_id: str) -> models.Space:
-    space = await spaces.get(space_id)
-    if space is None:
-        raise fastapi.HTTPException(404, "unknown space")
-    return space
-
-
-@app.get("/api/spaces/{space_id}/notes")
-async def list_notes(space_id: str) -> list[models.NoteSummary]:
-    await _note_space(space_id)
-    return await notes.list_summaries(space_id)
-
-
-@app.get("/api/spaces/{space_id}/notes/{filename}")
-async def read_note(space_id: str, filename: str) -> models.Note:
-    await _note_space(space_id)
-    try:
-        filename = notes.valid_filename(filename)
-    except ValueError as error:
-        raise fastapi.HTTPException(422, str(error)) from error
-    found = await notes.get(space_id, filename)
-    if found is None:
-        raise fastapi.HTTPException(404, "unknown note")
-    return found
-
-
-@app.post("/api/spaces/{space_id}/notes", status_code=201)
-async def create_note(space_id: str, request: CreateNoteRequest) -> models.Note:
-    await _note_space(space_id)
-    try:
-        return await notes.create(space_id, request.filename, request.content)
-    except notes.NoteExists as error:
-        raise fastapi.HTTPException(409, "note already exists") from error
-    except notes.NoteLimitReached as error:
-        raise fastapi.HTTPException(409, "space has reached its note limit") from error
-
-
-@app.put("/api/spaces/{space_id}/notes/{filename}")
-async def update_note(
-    space_id: str, filename: str, request: UpdateNoteRequest
-) -> models.Note:
-    await _note_space(space_id)
-    try:
-        filename = notes.valid_filename(filename)
-    except ValueError as error:
-        raise fastapi.HTTPException(422, str(error)) from error
-    try:
-        updated = await notes.update(
-            space_id,
-            filename,
-            request.content,
-            request.expected_revision,
-        )
-    except notes.NoteConflict as error:
-        message = (
-            "This note changed again before it could be overwritten. Review the latest version and retry."
-            if request.override
-            else "This note changed after editing began. Review the latest version or explicitly overwrite it."
-        )
-        raise fastapi.HTTPException(
-            409,
-            {
-                "message": message,
-                "current": error.current.model_dump(mode="json"),
-            },
-        ) from error
-    if updated is None:
-        raise fastapi.HTTPException(404, "unknown note")
-    return updated
-
-
-@app.delete("/api/spaces/{space_id}/notes/{filename}", status_code=204)
-async def delete_note(space_id: str, filename: str) -> None:
-    await _note_space(space_id)
-    try:
-        filename = notes.valid_filename(filename)
-    except ValueError as error:
-        raise fastapi.HTTPException(422, str(error)) from error
-    if not await notes.delete(space_id, filename):
-        raise fastapi.HTTPException(404, "unknown note")
+    return await agents.save(updated)
 
 
 class JobResponse(pydantic.BaseModel):
     id: str
-    space_id: str
+    agent_id: str
     author_display_name: str | None = None
     schedule: str
     prompt: str
@@ -765,25 +726,25 @@ def _job_response(job: models.Job) -> JobResponse:
     return JobResponse.model_validate(job.model_dump())
 
 
-@app.get("/api/spaces/{space_id}/jobs")
-async def list_jobs(space_id: str, request: fastapi.Request) -> list[JobResponse]:
-    if await spaces.get(space_id) is None:
-        raise fastapi.HTTPException(404, "unknown space")
+@app.get("/api/agents/{agent_id}/jobs")
+async def list_jobs(agent_id: str, request: fastapi.Request) -> list[JobResponse]:
+    if await agents.get(agent_id) is None:
+        raise fastapi.HTTPException(404, "unknown agent")
     return [
         _job_response(job)
-        for job in await jobs.list_for_space(space_id, request.state.user["id"])
+        for job in await jobs.list_for_agent(agent_id, request.state.user["id"])
     ]
 
 
-@app.post("/api/spaces/{space_id}/jobs")
+@app.post("/api/agents/{agent_id}/jobs")
 async def create_job(
-    space_id: str, body: JobRequest, request: fastapi.Request
+    agent_id: str, body: JobRequest, request: fastapi.Request
 ) -> JobResponse:
-    if await spaces.get(space_id) is None:
-        raise fastapi.HTTPException(404, "unknown space")
+    if await agents.get(agent_id) is None:
+        raise fastapi.HTTPException(404, "unknown agent")
     return _job_response(
         await jobs.create(
-            space_id,
+            agent_id,
             request.state.user["id"],
             body.schedule,
             body.prompt,
@@ -848,7 +809,7 @@ async def cron_heartbeat(request: fastapi.Request) -> dict:
         job = await jobs.get(execution.job_id)
         if job is None:
             continue
-        await durable.start_turn(
+        await supervisor.start_turn(
             execution.chat_id,
             "cron",
             turn_id=execution.turn_id,
@@ -856,25 +817,23 @@ async def cron_heartbeat(request: fastapi.Request) -> dict:
         )
         started += 1
     await jobs.cleanup(now)
+    if now.minute % 5 == 0:
+        await serve_api.maintain()  # Git schedules, a separate job kind
     return {"ok": True, "started": started}
 
 
 @app.get("/api/chats")
-async def list_chats(request: fastapi.Request) -> list[models.Chat]:
-    found = await chats.list_all()
-    for chat in found:
-        if not chat.trigger.startswith("slack:") or chat.title.startswith("slack:"):
-            continue
-        title = re.sub(r"^<@[^>]+>\s*", "", chat.title)
-        title = html.unescape(" ".join(title.split())).strip()
-        chat.title = f"slack: {title[:53]}" if title else "slack: thread"
-    return found
+async def list_chats(
+    request: fastapi.Request, parent_chat_id: str | None = None
+) -> list[models.Chat]:
+    """Root chats, or with `parent_chat_id` the chats of that chat's delegated threads."""
+    return await chats.list_all(parent_chat_id)
 
 
 class CreateChatRequest(pydantic.BaseModel):
     id: str | None = pydantic.Field(default=None, pattern=r"^chat_[0-9a-f]{12}$")
     title: str = "new chat"
-    space_id: str | None = None
+    agent_id: str | None = None
 
 
 @app.post("/api/chats")
@@ -882,18 +841,16 @@ async def create_chat(
     request: CreateChatRequest, http_request: fastapi.Request
 ) -> models.Chat:
     user = http_request.state.user
-    found = await spaces.list_all()
-    if not found:
-        found = [await spaces.default()]
-    if request.space_id is not None and not any(
-        space.id == request.space_id for space in found
+    found = await _agents()
+    if request.agent_id is not None and not any(
+        agent.id == request.agent_id for agent in found
     ):
-        raise fastapi.HTTPException(404, "unknown space")
+        raise fastapi.HTTPException(404, "unknown agent")
     if request.id is not None:
         try:
             return await chats.create_once(
                 request.id,
-                request.space_id,
+                request.agent_id,
                 request.title,
                 user_id=user["id"] if user is not None else None,
                 author_display_name=_user_display_name(user),
@@ -901,7 +858,7 @@ async def create_chat(
         except ValueError as error:
             raise fastapi.HTTPException(409, str(error)) from error
     return await chats.create(
-        request.space_id,
+        request.agent_id,
         request.title,
         user_id=user["id"] if user is not None else None,
         author_display_name=_user_display_name(user),
@@ -918,17 +875,23 @@ async def archive_chat(chat_id: str, request: ArchiveChatRequest) -> models.Chat
         chat = await chats.get(chat_id)
         if chat is None:
             raise fastapi.HTTPException(404, "unknown chat")
-        if request.archived and await durable.active_turn(chat_id) is not None:
+        if request.archived and await supervisor.active_turn(chat_id) is not None:
             raise fastapi.HTTPException(409, "chat has an active turn")
         updated = await chats.set_archived(chat_id, request.archived)
         if updated is None:
             raise fastapi.HTTPException(404, "unknown chat")
+        thread_id = await supervisor.thread_for_chat(chat_id)
+        if thread_id is not None and chat.agent_id is not None:
+            # A root archive cascades through its settled delegated subtree.
+            await supervisor.send(
+                chat.agent_id, messages.ArchiveThread(thread_id, archived=request.archived)
+            )
         await events.append(chat_id, "ui", {"type": "chat.changed"})
         return updated
 
 
-class AssignChatSpaceRequest(pydantic.BaseModel):
-    space_id: str
+class AssignChatAgentRequest(pydantic.BaseModel):
+    agent_id: str
 
 
 @app.post("/api/chats/{chat_id}/seen")
@@ -940,16 +903,314 @@ async def mark_chat_seen(chat_id: str) -> models.Chat:
     return updated
 
 
-@app.patch("/api/chats/{chat_id}/space")
-async def assign_chat_space(
-    chat_id: str, request: AssignChatSpaceRequest
+@app.patch("/api/chats/{chat_id}/agent")
+async def assign_chat_agent(
+    chat_id: str, request: AssignChatAgentRequest
 ) -> models.Chat:
-    if await spaces.get(request.space_id) is None:
-        raise fastapi.HTTPException(404, "unknown space")
+    if await agents.get(request.agent_id) is None:
+        raise fastapi.HTTPException(404, "unknown agent")
     if await chats.get(chat_id) is None:
         raise fastapi.HTTPException(404, "unknown chat")
-    # TODO: add history for space changes
-    return await chats.assign_space(chat_id, request.space_id)
+    if await supervisor.thread_for_chat(chat_id) is not None:
+        raise fastapi.HTTPException(409, "the chat's thread has started; its agent is fixed")
+    # TODO: add history for agent changes
+    return await chats.assign_agent(chat_id, request.agent_id)
+
+
+async def _chat_thread(chat_id: str) -> tuple[models.Chat, str]:
+    chat = await chats.get(chat_id)
+    if chat is None:
+        raise fastapi.HTTPException(404, "unknown chat")
+    thread_id = await supervisor.thread_for_chat(chat_id)
+    if thread_id is None or chat.agent_id is None:
+        raise fastapi.HTTPException(404, "the chat has no thread yet")
+    return chat, thread_id
+
+
+@app.get("/api/chats/{chat_id}/thread")
+async def chat_thread(chat_id: str) -> dict:
+    """The chat's thread: status, branch, proposals, tasks, tokens, and model history."""
+    _, thread_id = await _chat_thread(chat_id)
+    try:
+        snapshot = await rotor_runtime.client.snapshot(thread_id)
+        value, revision = await rotor_runtime.client.query(
+            thread_id, thread.AgentThread.details
+        )
+    except rotor.ProcessNotFound as error:
+        raise fastapi.HTTPException(404, "the thread has not started yet") from error
+    if snapshot.phase == "terminal":
+        value["status"] = "done" if snapshot.terminal_status == "completed" else "failed"
+    await _refresh_proposals(value["proposals"])
+    return {
+        **value,
+        "live": snapshot.phase != "terminal",
+        "revision": revision,
+        "activity": _runtime_activity(value["activity"], snapshot),
+    }
+
+
+def _runtime_activity(value: dict, snapshot: rotor.stores.base.Snapshot) -> dict:
+    """Combine the thread's committed work with Rotor's current execution and mailbox."""
+    terminal = snapshot.terminal_status
+    return {
+        **value,
+        "status": ("done" if terminal == "completed" else terminal) or value["status"],
+        "phase": snapshot.phase,
+        "mailbox_depth": snapshot.mailbox_depth,
+        "schedules": snapshot.schedules,
+        "updated_at": snapshot.updated_at,
+    }
+
+
+async def _refresh_proposals(proposals: list[dict]) -> None:
+    """Git ancestry decides `merged`, even after the thread that proposed has stopped."""
+    env = rotor_runtime.install()
+    open_branches = [p["branch"] for p in proposals if not p["merged"]]
+    if env is None or not open_branches:
+        return
+    merged = await env.workspaces.merged_proposals(open_branches)
+    for proposal in proposals:
+        if proposal["branch"] in merged:
+            proposal["merged"] = merged[proposal["branch"]]
+
+
+@app.get("/api/repository")
+async def repository(
+    chat_id: str | None = None,
+    proposal: str | None = None,
+    path: str | None = None,
+    revision: str | None = None,
+    comparison: typing.Literal["full", "latest"] = "full",
+) -> dict:
+    """Browse committed `main`, a chat thread's branch, or one of its proposals.
+
+    With `path`, one file's before/after preview and diff; without, the tree and changes.
+    """
+    env = rotor_runtime.install()
+    if env is None:
+        raise fastapi.HTTPException(409, "storage is not configured")
+    branch, base = "main", None
+    if chat_id is not None:
+        _, thread_id = await _chat_thread(chat_id)
+        try:
+            detail, _ = await rotor_runtime.client.query(thread_id, thread.AgentThread.details)
+        except rotor.ProcessNotFound as error:
+            raise fastapi.HTTPException(404, "the thread has not started yet") from error
+        branch = detail["branch"]
+        base = (detail["base_sha"] or None) if comparison == "full" else None
+        if proposal is not None:
+            if not any(p["branch"] == proposal for p in detail["proposals"]):
+                raise fastapi.HTTPException(404, "proposal is not recorded on this thread")
+            if comparison == "latest":
+                raise fastapi.HTTPException(
+                    422, "latest comparison is only available for thread edits"
+                )
+            branch = proposal
+    elif proposal is not None:
+        raise fastapi.HTTPException(422, "a proposal requires its chat_id")
+    elif comparison == "latest":
+        raise fastapi.HTTPException(422, "latest comparison requires a chat_id")
+    try:
+        view = await workspace_browser.RepositoryBrowser(env.workspaces).inspect(
+            branch, base=base, path=path, revision=revision
+        )
+    except ValueError as error:
+        raise fastapi.HTTPException(422, str(error)) from error
+    except FileNotFoundError as error:
+        raise fastapi.HTTPException(404, str(error)) from error
+    except workspace_git.GitError as error:
+        raise fastapi.HTTPException(409, str(error)) from error
+    return {
+        **view,
+        "remote": env.workspaces.remote,
+        "review": env.config.review.model_dump(),
+        "local_review": isinstance(env.review, workspace_review.LocalReview),
+        "checkout": None,
+    }
+
+
+async def _thread_sandbox(chat_id: str) -> tuple[environment.Environment, str]:
+    env = rotor_runtime.install()
+    if env is None:
+        raise fastapi.HTTPException(409, "storage is not configured")
+    _, thread_id = await _chat_thread(chat_id)
+    try:
+        detail, _ = await rotor_runtime.client.query(thread_id, thread.AgentThread.details)
+    except rotor.ProcessNotFound as error:
+        raise fastapi.HTTPException(404, "the thread has not started yet") from error
+    name = detail.get("sandbox")
+    if not isinstance(name, str) or not name:
+        raise fastapi.HTTPException(404, "thread sandbox is unavailable")
+    return env, name
+
+
+@app.get("/api/chats/{chat_id}/thread/filesystem")
+async def thread_directory(chat_id: str, path: str = "") -> dict:
+    """List one directory of the thread sandbox's live `/workspace`."""
+    env, name = await _thread_sandbox(chat_id)
+    try:
+        view = await env.sandboxes.list_directory(name, path)
+    except ValueError as error:
+        raise fastapi.HTTPException(422, str(error)) from error
+    except FileNotFoundError as error:
+        raise fastapi.HTTPException(404, str(error)) from error
+    return dataclasses.asdict(view)
+
+
+@app.get("/api/chats/{chat_id}/thread/filesystem/file")
+async def thread_file(chat_id: str, path: str) -> dict:
+    """Preview a bounded regular file from the thread sandbox's live `/workspace`."""
+    env, name = await _thread_sandbox(chat_id)
+    try:
+        preview = await env.sandboxes.read_file(
+            name, path, limit=workspace_browser.PREVIEW_BYTES
+        )
+    except ValueError as error:
+        raise fastapi.HTTPException(422, str(error)) from error
+    except FileNotFoundError as error:
+        raise fastapi.HTTPException(404, str(error)) from error
+    try:
+        text = preview.content.decode("utf-8")
+    except UnicodeDecodeError as error:
+        # Only a truncated final UTF-8 character is tolerated.
+        cut = (
+            preview.truncated
+            and error.end == len(preview.content)
+            and error.reason == "unexpected end of data"
+        )
+        text = preview.content[: error.start].decode("utf-8") if cut else None
+    if text is not None and "\0" in text:
+        text = None
+    return {
+        "path": preview.path,
+        "text": text,
+        "notice": "Binary file; preview unavailable"
+        if text is None
+        else "Preview truncated at 256 KiB"
+        if preview.truncated
+        else None,
+        "truncated": preview.truncated,
+        "bytes_read": len(preview.content),
+    }
+
+
+class ThreadCommand(pydantic.BaseModel):
+    request_id: str = pydantic.Field(min_length=1, max_length=200)
+
+
+@app.post("/api/chats/{chat_id}/thread/resume", status_code=202)
+async def resume_thread(chat_id: str, request: ThreadCommand) -> dict:
+    """Resume a parked thread; a turn-ceiling park gets one more window of turns."""
+    _, thread_id = await _chat_thread(chat_id)
+    outcome = await rotor_runtime.client.send(
+        thread_id, messages.Resume(), idempotency_key=f"resume:{request.request_id}"
+    )
+    return {"request_id": request.request_id, "outcome": outcome}
+
+
+@app.post("/api/chats/{chat_id}/thread/stop", status_code=202)
+async def stop_thread(chat_id: str, request: ThreadCommand) -> dict:
+    """Interrupt the thread's current work; it stays live and resumable."""
+    _, thread_id = await _chat_thread(chat_id)
+    outcome = await rotor_runtime.client.send(
+        thread_id,
+        messages.Stop(),
+        idempotency_key=f"stop:{request.request_id}",
+        preempt=True,
+    )
+    return {"request_id": request.request_id, "outcome": outcome}
+
+
+class ApproveRequest(pydantic.BaseModel):
+    branch: str
+    expected_sha: str = pydantic.Field(pattern=r"^[0-9a-f]{40}$")
+
+
+@app.post("/api/chats/{chat_id}/thread/approve")
+async def approve_proposal(chat_id: str, request: ApproveRequest) -> dict:
+    """Merge a root thread's reviewed proposal at exactly the reviewed commit."""
+    _, thread_id = await _chat_thread(chat_id)
+    env = rotor_runtime.install()
+    if env is None:
+        raise fastapi.HTTPException(409, "storage is not configured")
+    value, _ = await rotor_runtime.client.query(thread_id, thread.AgentThread.details)
+    if value["parent_thread_id"]:
+        raise fastapi.HTTPException(409, "the parent thread reviews this proposal")
+    if not any(p["branch"] == request.branch for p in value["proposals"]):
+        raise fastapi.HTTPException(404, "proposal is not recorded on this thread")
+    if not isinstance(env.review, workspace_review.LocalReview):
+        raise fastapi.HTTPException(409, "review this proposal on GitHub")
+    try:
+        sha = await env.review.merge(request.branch, expected_sha=request.expected_sha)
+    except workspace_git.MergeConflict as error:
+        raise fastapi.HTTPException(409, f"{error}. Prompt the thread to re-merge.") from error
+    return {"branch": request.branch, "commit": sha}
+
+
+@app.get("/api/agents/{agent_id}/threads")
+async def agent_threads(agent_id: str) -> dict:
+    """The agent's thread tree, tasks, waiting threads, and daily budget."""
+    if await agents.get(agent_id) is None:
+        raise fastapi.HTTPException(404, "unknown agent")
+    roster = await supervisor.roster(agent_id)
+    # The supervisor's last report can stay idle through a background activation, so
+    # read live execution directly, bounded and without loading journals.
+    reads = asyncio.Semaphore(8)
+
+    async def enrich(item: dict) -> None:
+        async with reads:
+            try:
+                snapshot = await rotor_runtime.client.snapshot(item["thread_id"])
+                value, _ = await rotor_runtime.client.query(
+                    item["thread_id"], thread.AgentThread.activity
+                )
+            except rotor.ProcessNotFound:
+                return  # terminal process retention may expire before its report
+            item["activity"] = _runtime_activity(value, snapshot)
+
+    threads = roster.get("threads", [])
+    await asyncio.gather(*(enrich(item) for item in threads if item.get("live")))
+    await _refresh_proposals([p for item in threads for p in item.get("proposals", [])])
+    env = rotor_runtime.install()
+    return {
+        **roster,
+        "local_review": env is not None
+        and isinstance(env.review, workspace_review.LocalReview),
+    }
+
+
+class GrantRequest(pydantic.BaseModel):
+    request_id: str = pydantic.Field(min_length=1, max_length=200)
+    amount: int = pydantic.Field(gt=0)
+
+
+@app.post("/api/agents/{agent_id}/grants", status_code=202)
+async def grant_budget(agent_id: str, request: GrantRequest) -> dict:
+    """Add tokens to today's budget; held threads resume."""
+    if await agents.get(agent_id) is None:
+        raise fastapi.HTTPException(404, "unknown agent")
+    outcome = await supervisor.send(
+        agent_id,
+        messages.Grant(request.request_id, request.amount),
+        idempotency_key=f"grant:{request.request_id}",
+    )
+    return {"request_id": request.request_id, "outcome": outcome}
+
+
+@app.post("/api/agents/{agent_id}/retire", status_code=202)
+async def retire_agent(agent_id: str, request: ThreadCommand) -> dict:
+    """Cancel every thread; each sandbox gets a final checkpoint and is stopped, not deleted.
+
+    Serving is torn down first: the vault is cleared, the serve sandbox and its data are
+    destroyed, schedules are cancelled, and the agent's host answers 410 from then on.
+    """
+    if await agents.get(agent_id) is None:
+        raise fastapi.HTTPException(404, "unknown agent")
+    await serve_api.retire(agent_id, request.request_id)
+    outcome = await supervisor.send(
+        agent_id, messages.Retire(), idempotency_key=f"retire:{request.request_id}"
+    )
+    return {"request_id": request.request_id, "outcome": outcome}
 
 
 @app.get("/api/chats/{chat_id}/events")
@@ -989,52 +1250,58 @@ async def chat_events(
     )
 
 
-@app.get("/api/chats/{chat_id}/messages")
-async def chat_messages(chat_id: str) -> list[ai.ui.ai_sdk.UIMessage]:
-    """The stored transcript as UI messages, with internal messages hidden."""
+TRANSCRIPT_METADATA = (
+    "timestamp",
+    "source",
+    "request_id",
+    "turn",
+    "task_id",
+    "task_handle",
+    "reporting_thread_id",
+    "task_status",
+    "task_event",
+)
+
+
+@app.get("/api/chats/{chat_id}/transcript")
+async def chat_transcript(chat_id: str) -> list[dict]:
+    """The stored transcript as model messages with time and provenance (the console).
+
+    A turn's steps stay separate messages and each keeps the metadata the thread
+    stored beside it: timestamp, source, task and request IDs.
+    """
     if await chats.get(chat_id) is None:
         raise fastapi.HTTPException(404, "unknown chat")
-    transcript = [
-        message
-        for message in await _transcript(chat_id)
-        if (message.provider_metadata or {}).get("hatchery", {}).get("kind")
-        != "subagent_result"
-    ]
-    messages = ai.ui.ai_sdk.to_ui_messages(transcript)
-    metadata = {
-        message.id: (message.provider_metadata or {}).get("hatchery", {})
-        for message in transcript
-    }
-    for message in messages:
-        if message.role != "user":
+    raw = {data.get("id"): data for _, data in await events.read(chat_id, "messages")}
+    found = []
+    for message in await _transcript(chat_id):
+        source = (message.provider_metadata or {}).get("hatchery", {})
+        if source.get("kind") == "subagent_result":
             continue
-        source = metadata.get(message.id, {})
-        if source.get("origin"):
-            message.metadata = {
-                key: source[key] for key in ("origin", "author") if key in source
-            }
-        for part in message.parts:
-            if getattr(part, "type", None) != "text":
-                continue
-            if "display_text" in source:
-                part.text = source["display_text"]
-                continue
-            for tag, origin in (
-                ("slack_message", "slack"),
-                ("github_context", "github"),
-            ):
-                match = re.fullmatch(
-                    rf"<{tag}\b[^>]*>\s*(.*?)\s*</{tag}>", part.text, re.DOTALL
-                )
-                if match:
-                    part.text = (
-                        html.unescape(match.group(1))
-                        if origin == "slack"
-                        else match.group(1)
+        stored = raw.get(message.id, {})
+        item = {
+            **message.model_dump(mode="json", exclude={"provider_metadata", "usage"}),
+            **{key: stored[key] for key in TRANSCRIPT_METADATA if key in stored},
+            **{key: source[key] for key in ("origin", "author") if key in source},
+        }
+        if message.role == "user":
+            for part in item["parts"]:
+                if part.get("kind") != "text":
+                    continue
+                if "display_text" in source:
+                    part["text"] = source["display_text"]
+                    continue
+                for tag, origin in (("slack_message", "slack"), ("github_context", "github")):
+                    match = re.fullmatch(
+                        rf"<{tag}\b[^>]*>\s*(.*?)\s*</{tag}>", part["text"], re.DOTALL
                     )
-                    message.metadata = {**(message.metadata or {}), "origin": origin}
-                    break
-    return messages
+                    if match:
+                        text = match.group(1)
+                        part["text"] = html.unescape(text) if origin == "slack" else text
+                        item["origin"] = origin
+                        break
+        found.append(item)
+    return found
 
 
 class ChatRequest(pydantic.BaseModel):
@@ -1106,7 +1373,7 @@ async def chat(
             )
             if first is not None:
                 _spawn(_name_chat(request.chat_id, first.text))
-        if current.space_id is None:
+        if current.agent_id is None:
             first = next(
                 (message for message in stored if message.role == "user"), None
             )
@@ -1116,7 +1383,7 @@ async def chat(
                 request.chat_id,
                 first.text,
                 {"origin": "ui", "author": "current user"},
-                await spaces.list_all() or [await spaces.default()],
+                await _agents(),
             )
         request_message = next(
             (message for message in reversed(incoming) if message.role == "user"),
@@ -1127,7 +1394,7 @@ async def chat(
         turn_id = "turn_" + hashlib.sha256(
             f"ui:{request.chat_id}:{request_message.id}".encode()
         ).hexdigest()
-        turn = await durable.start_turn(
+        turn = await supervisor.start_turn(
             request.chat_id,
             "ui",
             turn_id=turn_id,
@@ -1144,7 +1411,7 @@ async def resume_chat_stream(chat_id: str):
     """Replay and tail the active durable turn, or return 204 while idle."""
     if await chats.get(chat_id) is None:
         raise fastapi.HTTPException(404, "unknown chat")
-    turn = await durable.active_turn(chat_id)
+    turn = await supervisor.active_turn(chat_id)
     if turn is None:
         return fastapi.Response(status_code=204)
     return fastapi.responses.StreamingResponse(
@@ -1153,104 +1420,23 @@ async def resume_chat_stream(chat_id: str):
     )
 
 
-async def _space_for_chat(chat_id: str) -> models.Space:
+async def _agent_for_chat(chat_id: str) -> models.Agent:
     chat = await chats.get(chat_id)
     if chat is None:
         raise fastapi.HTTPException(404, "unknown chat")
-    if chat.space_id is None:
-        raise fastapi.HTTPException(409, "chat has no space")
-    space = await spaces.get(chat.space_id)
-    if space is None:
-        raise RuntimeError(f"chat {chat_id} belongs to unknown space {chat.space_id}")
-    return space
+    if chat.agent_id is None:
+        raise fastapi.HTTPException(409, "chat has no agent")
+    agent = await agents.get(chat.agent_id)
+    if agent is None:
+        raise RuntimeError(f"chat {chat_id} belongs to unknown agent {chat.agent_id}")
+    return agent
 
 
 async def _transcript(chat_id: str) -> list[ai.messages.Message]:
-    stored = [
+    return [
         ai.messages.Message.model_validate(data)
         for _, data in await events.read(chat_id, "messages")
     ]
-    return _dedupe_tool_history(stored)
-
-
-def _dedupe_tool_history(
-    messages: list[ai.messages.Message],
-) -> list[ai.messages.Message]:
-    """Drop duplicate tool parts left by the old UI transcript ingestion bug."""
-    seen_calls = set()
-    seen_results = set()
-    repaired = []
-    for message in messages:
-        parts = []
-        for part in message.parts:
-            if isinstance(part, ai.messages.ToolCallPart):
-                if part.tool_call_id in seen_calls:
-                    continue
-                seen_calls.add(part.tool_call_id)
-            elif isinstance(part, ai.messages.ToolResultPart):
-                if (
-                    part.tool_call_id in seen_results
-                    or part.tool_call_id not in seen_calls
-                ):
-                    continue
-                seen_results.add(part.tool_call_id)
-            parts.append(part)
-        if parts:
-            repaired.append(
-                message
-                if len(parts) == len(message.parts)
-                else message.model_copy(update={"parts": parts})
-            )
-    return repaired
-
-
-@app.get("/api/sandboxes/suggestion")
-async def suggest_draft_sandbox(space_id: str | None = None) -> sandbox.Launch:
-    space = await spaces.get(space_id) if space_id else None
-    if space_id is not None and space is None:
-        raise fastapi.HTTPException(404, "unknown space")
-    if space is None:
-        found = await spaces.list_all()
-        space = found[0] if found else await spaces.default()
-    async with ai.experimental_telemetry.span("sandbox.suggest") as span:
-        span.set_attrs({"space.id": space.id})
-        return await sandbox.suggest(space)
-
-
-@app.get("/api/chats/{chat_id}/sandboxes/suggestion")
-async def suggest_chat_sandbox(chat_id: str) -> sandbox.Launch:
-    chat = await chats.get(chat_id)
-    if chat is None:
-        raise fastapi.HTTPException(404, "unknown chat")
-    space = await spaces.get(chat.space_id) if chat.space_id else None
-    if space is None:
-        found = await spaces.list_all()
-        space = found[0] if found else await spaces.default()
-    async with telemetry.use_chat(chat_id):
-        async with ai.experimental_telemetry.span("sandbox.suggest") as span:
-            span.set_attrs({"chat.id": chat_id, "space.id": space.id})
-            return await sandbox.suggest(space)
-
-
-@app.post("/api/chats/{chat_id}/sandboxes")
-async def create_chat_sandbox(
-    chat_id: str, request: sandbox.Launch, http_request: fastapi.Request
-) -> dict:
-    async with turns.run(chat_id):
-        chat = await chats.get(chat_id)
-        if chat is None:
-            raise fastapi.HTTPException(404, "unknown chat")
-        if chat.archived_at is not None:
-            raise fastapi.HTTPException(
-                409, "chat is archived; unarchive it before creating a sandbox"
-            )
-        try:
-            created = await sandbox.create(
-                chat_id, request, actor_user_id=http_request.state.user["id"]
-            )
-        except RuntimeError as error:
-            raise fastapi.HTTPException(409, str(error)) from error
-        return created.model_dump(exclude={"daemon_token"})
 
 
 @app.get("/api/chats/{chat_id}/sandboxes")
@@ -1578,7 +1764,13 @@ async def manual_tty(ws: fastapi.WebSocket, chat_id: str, terminal_id: str) -> N
     max_concurrency=1,
 )
 async def worker_event(event: worker_protocol.Event) -> None:
-    """Persist one at-least-once worker event and wake the owning chat."""
+    """Persist one at-least-once worker event and wake the owning chat.
+
+    Events from a worker without a record are dropped, e.g. sandboxes started
+    before the agents cutover (their tasks remain in the same table).
+    """
+    if await worker.store.get(event.worker_id) is None:
+        return
     task = await worker.store.get_task(event.task_id) if event.task_id else None
     if task is not None and event.worker_id != task.worker_id:
         return
@@ -1727,7 +1919,7 @@ async def worker_event(event: worker_protocol.Event) -> None:
 
 
 async def complete_worker_task(task: worker.Task) -> None:
-    """Persist one internal result, then let the dispatcher continue the chat."""
+    """Persist one internal result, then let the thread continue the chat."""
     async with turns.run(task.chat_id):
         current = await worker.get_task(task.chat_id, task.id)
         if current is None or current.completion_delivered:
@@ -1763,7 +1955,7 @@ async def complete_worker_task(task: worker.Task) -> None:
         completion_turn_id = "turn_" + hashlib.sha256(
             f"worker:{current.id}:{current.completion_sequence}".encode()
         ).hexdigest()
-        await durable.start_turn(
+        await supervisor.start_turn(
             current.chat_id,
             "worker",
             current.id,
@@ -1846,9 +2038,9 @@ async def _deliver(
 
 
 async def _run_inbound_turn(chat_id: str, actor_user_id: str | None = None) -> None:
-    """Start one durable dispatcher turn after the channel has been acknowledged."""
+    """Start one agent thread turn after the channel has been acknowledged."""
     async with turns.run(chat_id):
-        await durable.start_turn(chat_id, "channel", actor_user_id=actor_user_id)
+        await supervisor.start_turn(chat_id, "channel", actor_user_id=actor_user_id)
 
 
 app.include_router(bot.router)
