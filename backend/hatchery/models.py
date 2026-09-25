@@ -1,4 +1,4 @@
-"""Core entities: spaces and chats. (Named models.py: types.py would shadow stdlib types.)"""
+"""Core entities: agents and chats. (Named models.py: types.py would shadow stdlib types.)"""
 
 import typing
 
@@ -44,13 +44,12 @@ class Resource(pydantic.BaseModel):
     kind: str = "link"  # link | reference | ...
 
 
-class Space(pydantic.BaseModel):
-    id: str  # "spc_<hex>"
+class Agent(pydantic.BaseModel):
+    id: str  # agentmesh slug, see store.agents.validate_slug; never changes
     name: str
-    about: str = ""  # markdown, the space's canvas
     repos: list[str] = []  # "owner/repo", autocloned into the sandbox
     resources: list[Resource] = []  # extra links; repos show up alongside these
-    color: str  # semantic accent ID; legacy aliases/custom values remain readable
+    color: AccentColor
     created_at: str  # utc isoformat, same as Event.meta.at
 
     @pydantic.field_validator("repos")
@@ -63,20 +62,9 @@ class Space(pydantic.BaseModel):
         return repos
 
 
-class NoteSummary(pydantic.BaseModel):
-    filename: str
-    revision: int
-    updated_at: str
-
-
-class Note(NoteSummary):
-    space_id: str
-    content: str
-
-
 class Job(pydantic.BaseModel):
     id: str
-    space_id: str
+    agent_id: str
     owner_id: str
     author_display_name: str | None = None
     schedule: str
@@ -90,7 +78,8 @@ class Chat(pydantic.BaseModel):
     id: str  # "chat_<hex>"
     user_id: str | None = None
     author_display_name: str | None = None
-    space_id: str | None = None
+    agent_id: str | None = None
+    parent_chat_id: str | None = None  # set on a delegated thread's chat
     title: str
     topic: str | None = None
     trigger: str  # what spawned it: "slack:<token>", "cron", "ui", ...

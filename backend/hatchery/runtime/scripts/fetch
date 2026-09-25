@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""fetch URL [--raw] [--max-chars N]  -  download a page as readable text.
+
+HTML is reduced to text with links kept as `text (url)`. JSON and plain text are
+printed as-is. Output is capped (default 40000 chars) to protect your context.
+"""
+
+import argparse
+import html
+import re
+import sys
+import urllib.error
+import urllib.request
+from html.parser import HTMLParser
+
+SKIP = {"script", "style", "noscript", "svg", "head", "nav", "footer"}
+BLOCK = {"p", "div", "br", "li", "h1", "h2", "h3", "h4", "h5", "h6", "tr", "pre", "section", "article"}
+
+
+class Text(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self.skip = 0
+        self.href: str | None = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag in SKIP:
+            self.skip += 1
+        elif tag in BLOCK:
+            self.parts.append("\n")
+        elif tag == "a":
+            self.href = dict(attrs).get("href")
+        elif tag.startswith("h") and tag[1:].isdigit():
+            self.parts.append("\n" + "#" * int(tag[1:]) + " ")
+
+    def handle_endtag(self, tag):
+        if tag in SKIP and self.skip:
+            self.skip -= 1
+        elif tag == "a" and self.href:
+            self.parts.append(f" ({self.href})")
+            self.href = None
+        elif tag in BLOCK:
+            self.parts.append("\n")
+
+    def handle_data(self, data):
+        if not self.skip:
+            self.parts.append(data)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("url")
+    parser.add_argument("--raw", action="store_true", help="do not strip HTML")
+    parser.add_argument("--max-chars", type=int, default=40000)
+    args = parser.parse_args()
+    request = urllib.request.Request(args.url, headers={"User-Agent": "hatchery-fetch/1"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            kind = response.headers.get_content_type()
+            body = response.read(8 * 1024 * 1024).decode(response.headers.get_content_charset() or "utf-8", "replace")
+    except (urllib.error.URLError, ValueError) as error:
+        print(f"fetch: {error}", file=sys.stderr)
+        return 1
+    if not args.raw and kind in ("text/html", "application/xhtml+xml"):
+        parser_ = Text()
+        parser_.feed(body)
+        body = html.unescape("".join(parser_.parts))
+        body = re.sub(r"[ \t]+", " ", body)
+        body = re.sub(r"\n\s*\n+", "\n\n", body).strip()
+    if len(body) > args.max_chars:
+        body = body[: args.max_chars] + f"\n\n[truncated at {args.max_chars} chars]"
+    print(body)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

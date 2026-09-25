@@ -1,6 +1,10 @@
 # Sandbox
 
 - Hatchery runs coding environments as persistent Vercel Sandboxes.
+- Every thread gets its own sandbox before its first model call. It holds `/workspace/self` (the agent's files on the thread's branch), `/workspace/wiki`, `/workspace/collective` (other agents, read-only), `/workspace/scratchpad`, and `/workspace/repos` (coding checkouts).
+- An idle thread's sandbox stays warm for `HATCHERY_THREAD_SANDBOX_IDLE_SECONDS`, then stops without being destroyed. It is not stopped while an fx subagent or a terminal still uses it. A lost sandbox is rebuilt from Git.
+- A thread can create extra sandboxes with the `create_sandbox` tool, for example for fx subagents that need other repositories or a bigger machine. There is no manual create flow.
+- Serving uses one more sandbox per agent, without a daemon or worker record (see `serving.md`).
 - Each sandbox has a stable Hatchery worker record stored in Postgres, or in local JSON files when `DATABASE_URL` is absent.
 - Sandbox creation can clone a primary GitHub repository, clone additional repositories, select a branch or commit, run a setup script, expose ports, and set CPU and memory limits.
 - Hatchery stores the sandbox name, declared routes, daemon token, specification, status, and timestamps.

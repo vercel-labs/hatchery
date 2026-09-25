@@ -4,16 +4,16 @@ import json
 import pytest
 
 from hatchery import store
-from hatchery.store import chats, spaces
+from hatchery.store import agents, chats
 
 
 async def test_claim_creates_then_reuses():
-    space = await spaces.default()
+    agent = await agents.default()
     first, created_first = await chats.claim(
-        "slack:C1:100.1", "slack", space.id, "hello", {"channel_id": "C1"}
+        "slack:C1:100.1", "slack", agent.id, "hello", {"channel_id": "C1"}
     )
     second, created_second = await chats.claim(
-        "slack:C1:100.1", "slack", space.id, "other", {"user_id": "U2"}
+        "slack:C1:100.1", "slack", agent.id, "other", {"user_id": "U2"}
     )
     assert (created_first, created_second) == (True, False)
     assert first.id == second.id
@@ -73,39 +73,12 @@ async def test_claim_keeps_creator_while_updating_shared_binding_state():
     assert binding.state == {"user_id": "U2"}
 
 
-async def test_allowed_user_migrates_binding_without_rewriting_creator():
-    legacy, _ = await chats.claim(
-        "slack:C1:100.1",
-        "slack",
-        None,
-        "legacy",
-        {"team_id": "T1", "user_id": "U1"},
-    )
-
-    claimed, created = await chats.claim(
-        "slack:T1:C1:100.1",
-        "slack",
-        None,
-        "connected",
-        {"team_id": "T1", "user_id": "U1"},
-        user_id="hatchery_1",
-        legacy_token="slack:C1:100.1",
-    )
-
-    assert created is False
-    assert claimed.id == legacy.id
-    assert claimed.user_id is None
-    assert (await chats.get(legacy.id)).user_id is None
-    [binding] = await chats.bindings(legacy.id)
-    assert binding.token == "slack:T1:C1:100.1"
-
-
-async def test_migrating_legacy_binding_does_not_invent_creator():
-    legacy, _ = await chats.claim(
+async def test_claiming_a_bound_token_does_not_invent_creator():
+    first, _ = await chats.claim(
         "slack:T1:C1:100.2",
         "slack",
         None,
-        "legacy",
+        "first",
         {"team_id": "T1", "user_id": "U1"},
     )
 
@@ -120,80 +93,23 @@ async def test_migrating_legacy_binding_does_not_invent_creator():
     )
 
     assert created is False
-    assert claimed.id == legacy.id
+    assert claimed.id == first.id
     assert claimed.user_id is None
     assert claimed.author_display_name is None
 
 
-async def test_different_identity_can_migrate_shared_legacy_binding():
-    legacy, _ = await chats.claim(
-        "slack:C1:100.1",
-        "slack",
-        None,
-        "legacy",
-        {"team_id": "T1", "user_id": "U1"},
-    )
-
-    rejected, created = await chats.claim(
-        "slack:T1:C1:100.1",
-        "slack",
-        None,
-        "takeover",
-        {"team_id": "T1", "user_id": "U2"},
-        user_id="hatchery_2",
-        legacy_token="slack:C1:100.1",
-    )
-
-    assert created is False
-    assert rejected.id == legacy.id
-    assert rejected.user_id is None
-    [binding] = await chats.bindings(legacy.id)
-    assert binding.token == "slack:T1:C1:100.1"
-    assert binding.state == {"team_id": "T1", "user_id": "U2"}
-
-
-async def test_other_workspace_ignores_legacy_collision_and_creates_scoped_binding():
-    legacy, _ = await chats.claim(
-        "slack:C1:100.1",
-        "slack",
-        None,
-        "legacy",
-        {"team_id": "T1", "user_id": "U1"},
-    )
-
-    scoped, created = await chats.claim(
-        "slack:T2:C1:100.1",
-        "slack",
-        None,
-        "other workspace",
-        {"team_id": "T2", "user_id": "U2"},
-        user_id="hatchery_2",
-        legacy_token="slack:C1:100.1",
-    )
-
-    assert created is True
-    assert scoped.id != legacy.id
-    assert scoped.user_id == "hatchery_2"
-    assert {binding.token for binding in await chats.bindings(legacy.id)} == {
-        "slack:C1:100.1"
-    }
-    assert {binding.token for binding in await chats.bindings(scoped.id)} == {
-        "slack:T2:C1:100.1"
-    }
-
-
 async def test_claim_separates_tokens():
-    space = await spaces.default()
-    a, _ = await chats.claim("slack:C1:100.1", "slack", space.id, "t", {})
-    b, _ = await chats.claim("slack:C1:200.2", "slack", space.id, "t", {})
-    c, _ = await chats.claim("github:repo:1:issue:1", "github", space.id, "t", {})
+    agent = await agents.default()
+    a, _ = await chats.claim("slack:C1:100.1", "slack", agent.id, "t", {})
+    b, _ = await chats.claim("slack:C1:200.2", "slack", agent.id, "t", {})
+    c, _ = await chats.claim("github:repo:1:issue:1", "github", agent.id, "t", {})
     assert len({a.id, b.id, c.id}) == 3
 
 
 async def test_claim_is_single_owner_under_concurrency():
-    space = await spaces.default()
+    agent = await agents.default()
     results = await asyncio.gather(
-        *(chats.claim("slack:C1:1.0", "slack", space.id, "t", {}) for _ in range(20))
+        *(chats.claim("slack:C1:1.0", "slack", agent.id, "t", {}) for _ in range(20))
     )
     assert len({chat.id for chat, _ in results}) == 1
     assert sum(1 for _, created in results if created) == 1
@@ -216,7 +132,7 @@ async def test_create_once_rejects_conflicting_retry():
 
     with pytest.raises(ValueError, match="conflicts"):
         await chats.create_once(
-            "chat_123456789abc", "space_other", "new chat", user_id="user_1"
+            "chat_123456789abc", "agent_other", "new chat", user_id="user_1"
         )
 
 
@@ -227,7 +143,7 @@ async def test_create_get_list():
     assert chat.trigger == "ui"
     assert chat.user_id == "user_1"
     assert chat.author_display_name == "Ada"
-    assert chat.space_id is None
+    assert chat.agent_id is None
     assert [c.id for c in await chats.list_all()] == [chat.id]
     loaded = await chats.get(chat.id)
     assert loaded is not None and loaded.title == "manual chat"
@@ -289,16 +205,16 @@ async def test_claim_user_sets_legacy_owner_once():
     assert unchanged.author_display_name == "Ada"
 
 
-async def test_assign_space_updates_chat():
-    destination = await spaces.create("docs")
+async def test_assign_agent_updates_chat():
+    destination = await agents.create("docs")
     chat = await chats.create(None, "work")
 
-    assigned = await chats.assign_space(chat.id, destination.id)
+    assigned = await chats.assign_agent(chat.id, destination.id)
 
-    assert assigned is not None and assigned.space_id == destination.id
+    assert assigned is not None and assigned.agent_id == destination.id
     loaded = await chats.get(chat.id)
-    assert loaded is not None and loaded.space_id == destination.id
-    assert await chats.assign_space("chat_missing", destination.id) is None
+    assert loaded is not None and loaded.agent_id == destination.id
+    assert await chats.assign_agent("chat_missing", destination.id) is None
 
 
 async def test_set_topic_updates_chat():
@@ -313,8 +229,8 @@ async def test_set_topic_updates_chat():
 
 
 async def test_finish_updates_status_and_artifact():
-    space = await spaces.default()
-    chat = await chats.create(space.id, "work")
+    agent = await agents.default()
+    chat = await chats.create(agent.id, "work")
     finished = await chats.finish(chat.id, "done", "https://example.com/pr/1")
     assert finished is not None
     assert finished.status == "done"

@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from hatchery.channels import destinations
-from hatchery.store import chats, spaces
+from hatchery.store import agents, chats
 
 
 @pytest.fixture
@@ -45,10 +45,10 @@ async def directory(monkeypatch):
 
     monkeypatch.setattr(destinations.auth_store, "get_user", get_user)
     monkeypatch.setattr(destinations.auth_store, "list_people", list_people)
-    space = await spaces.create("Hatchery")
-    space.repos = ["acme/hatchery"]
-    await spaces.save(space)
-    return await chats.create(space.id, "notify", user_id="andrey")
+    agent = await agents.create("Hatchery")
+    agent.repos = ["acme/hatchery"]
+    await agents.save(agent)
+    return await chats.create(agent.id, "notify", user_id="andrey")
 
 
 def slack_client(requests):

@@ -2,21 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { Chat } from "./api.ts";
-import {
-  chatAttentionFilterLabel,
-  chatAttentionLabel,
-  chatSidebarText,
-  filterSidebarChats,
-  selectSidebarSpace,
-  type ChatSidebarFilters,
-} from "./chat-sidebar.ts";
+import type { Thread } from "./api-types.ts";
+import { chatAttentionLabel, chatSidebarText, sidebarThreads } from "./chat-sidebar.ts";
 
 function chat(overrides: Partial<Chat> = {}): Chat {
   return {
     id: "chat_1",
     user_id: "user_1",
     author_display_name: "Ada",
-    space_id: null,
+    agent_id: null,
     title: "new chat",
     topic: null,
     trigger: "ui",
@@ -29,53 +23,6 @@ function chat(overrides: Partial<Chat> = {}): Chat {
     ...overrides,
   };
 }
-
-test("uses the Requires attention filter label", () => {
-  assert.equal(chatAttentionFilterLabel, "Requires attention");
-});
-
-test("filters active chats by attention and one space", () => {
-  const chats = [
-    chat({ id: "matching", space_id: "space_1", attention_reason: "blocked" }),
-    chat({ id: "other-space", space_id: "space_2", attention_reason: "blocked" }),
-    chat({ id: "no-attention", space_id: "space_1" }),
-    chat({
-      id: "archived",
-      space_id: "space_1",
-      attention_reason: "result_available",
-      archived_at: "2026-09-05T00:00:00Z",
-    }),
-  ];
-
-  assert.deepEqual(
-    filterSidebarChats(chats, { requiresAttention: true, spaceId: "space_1" }).map(
-      ({ id }) => id,
-    ),
-    ["matching"],
-  );
-  assert.deepEqual(
-    filterSidebarChats(chats, { requiresAttention: false, spaceId: null }).map(
-      ({ id }) => id,
-    ),
-    ["matching", "other-space", "no-attention"],
-  );
-});
-
-test("selecting and removing a space filter keeps other filters active", () => {
-  const filters: ChatSidebarFilters = {
-    requiresAttention: true,
-    spaceId: "space_1",
-  };
-
-  assert.deepEqual(selectSidebarSpace(filters, "space_2"), {
-    requiresAttention: true,
-    spaceId: "space_2",
-  });
-  assert.deepEqual(selectSidebarSpace(filters, null), {
-    requiresAttention: true,
-    spaceId: null,
-  });
-});
 
 test("labels persisted attention reasons", () => {
   assert.equal(
@@ -123,4 +70,60 @@ test("uses pending and legacy fallbacks", () => {
     chatSidebarText(chat({ author_display_name: null })).label,
     "New chat",
   );
+});
+
+function rosterThread(threadId: string, values: Partial<Thread> = {}): Thread {
+  return {
+    thread_id: threadId,
+    parent_thread_id: "",
+    depth: 0,
+    upstream: "main",
+    children: [],
+    status: "idle",
+    live: true,
+    archived: false,
+    task_id: "",
+    task_handle: "",
+    task_status: "",
+    deliverables: [],
+    summary: "",
+    result: "",
+    error: "",
+    input_tokens: 0,
+    output_tokens: 0,
+    proposals: [],
+    ...values,
+  };
+}
+
+test("builds the agent's thread tree from its root chats and delegated threads", () => {
+  const chats = [
+    chat({ id: "newer", agent_id: "agent_1", topic: "Newer", created_at: "2026-09-06T00:00:00Z" }),
+    chat({ id: "older", agent_id: "agent_1", topic: "Older", trigger: "slack:T1" }),
+    chat({ id: "unassigned", agent_id: null, topic: "Classifying" }),
+    chat({ id: "other", agent_id: "agent_2" }),
+    chat({ id: "shelved", agent_id: "agent_1", archived_at: "2026-09-05T00:00:00Z" }),
+  ];
+  const threads = [
+    rosterThread("root-older", { chat_id: "older", status: "active" }),
+    rosterThread("child", { chat_id: "child-chat", parent_thread_id: "root-older", depth: 1 }),
+    rosterThread("root-shelved", { chat_id: "shelved" }),
+    rosterThread("hidden-child", { chat_id: "hidden", parent_thread_id: "root-shelved" }),
+  ];
+
+  const tree = sidebarThreads(chats, threads, "agent_1");
+
+  assert.deepEqual(
+    tree.map((thread) => [thread.thread_id, thread.chat_id]),
+    [
+      ["root-older", "older"],
+      ["chat:unassigned", "unassigned"],
+      ["chat:newer", "newer"],
+      ["child", "child-chat"],
+    ],
+  );
+  assert.equal(tree[0].title, "Ada Older");
+  assert.equal(tree[0].trigger, "slack:T1");
+  assert.equal(tree[0].status, "active");
+  assert.equal(tree[2].status, "idle");
 });

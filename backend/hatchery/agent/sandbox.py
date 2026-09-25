@@ -1,31 +1,16 @@
 """Chat-scoped Vercel Sandbox control-plane boundary."""
 
-import json
-
-import ai
 import pydantic
 
 from hatchery.agent import telemetry
-from hatchery import models
 from hatchery.store import chats, events
 from hatchery import worker
 
 
 class Launch(pydantic.BaseModel):
-    model_config = pydantic.ConfigDict(
-        extra="forbid",
-        json_schema_extra={
-            "required": [
-                "title",
-                "repos",
-                "setup_script",
-                "ports",
-                "branch",
-                "git_sha",
-                "size",
-            ]
-        },
-    )
+    """Launch parameters for an extra chat sandbox (the `create_sandbox` tool)."""
+
+    model_config = pydantic.ConfigDict(extra="forbid")
 
     title: str = "sandbox"
     repos: list[str] = []
@@ -68,46 +53,6 @@ class Launch(pydantic.BaseModel):
         self.branch = self.branch.strip() if self.branch else None
         self.git_sha = self.git_sha.strip() if self.git_sha else None
         return self
-
-
-_SYSTEM = """\
-Suggest launch parameters for a coding sandbox from the hatchery space below.
-Select only relevant owner/repo repositories from the space. The first repo is
-primary. Copy an applicable recommended setup script verbatim; otherwise omit
-it. Expose only ports the described project is likely to use, at most four.
-Use a short plain title. Omit branch and git_sha unless the description names
-them explicitly. Use small for research, reading, triage, light edits, and
-focused work. Use big only when development plus meaningful tests or builds
-are anticipated, including full suites, dev servers, browser or E2E tests,
-monorepos, native compilation, or heavier workloads. Return only the requested
-structured output."""
-
-
-async def suggest(space: models.Space) -> Launch:
-    request = json.dumps(
-        {
-            "name": space.name,
-            "description": space.about,
-            "repositories": space.repos,
-            "resources": [resource.model_dump() for resource in space.resources],
-        },
-        ensure_ascii=False,
-    )
-    agent = ai.Agent()
-    async with agent.run(
-        ai.get_model("openai/gpt-5.6-luna"),
-        [ai.system_message(_SYSTEM), ai.user_message(request)],
-        output_type=Launch,
-        params=ai.InferenceRequestParams(
-            sampling={
-                ai.TemperatureSamplerParams: ai.TemperatureSamplerParams(temperature=0)
-            },
-            output=ai.OutputParams(max_tokens=4096),
-        ),
-    ) as result:
-        async for _ in result:
-            pass
-        return result.output
 
 
 async def create(

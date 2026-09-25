@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# search REGEX [PATH] [-i]  -  grep the tree for a pattern with file:line context.
+set -euo pipefail
+
+if [[ $# -lt 1 || "$1" == "--help" || "$1" == "-h" ]]; then
+  echo "usage: search REGEX [PATH] [-i]"
+  echo "  Recursive regex search that skips .git, node_modules, caches and binaries."
+  echo "  Uses ripgrep when available, otherwise grep. Output is capped at 200 lines."
+  exit 0
+fi
+
+pattern="$1"; shift
+path="."
+flags=()
+for arg in "$@"; do
+  case "$arg" in
+    -i) flags+=("-i") ;;
+    *) path="$arg" ;;
+  esac
+done
+
+results="$(mktemp)"
+trap 'rm -f "$results"' EXIT
+status=0
+if command -v rg >/dev/null 2>&1; then
+  rg --line-number --no-heading --color=never --hidden \
+     --glob '!.git' --glob '!node_modules' --glob '!__pycache__' --glob '!.venv' \
+     --glob '!dist' --glob '!build' ${flags[@]+"${flags[@]}"} -e "$pattern" "$path" > "$results" \
+     || status=$?
+else
+  grep -rnE -I \
+     --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=__pycache__ \
+     --exclude-dir=.venv --exclude-dir=dist --exclude-dir=build \
+     ${flags[@]+"${flags[@]}"} -e "$pattern" "$path" > "$results" || status=$?
+fi
+head -n 200 "$results"
+exit "$status"

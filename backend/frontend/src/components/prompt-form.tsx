@@ -20,59 +20,92 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { AUTO_SPACE_VALUE } from "@/components/new-chat-state";
+import { AUTO_AGENT_VALUE } from "@/components/new-chat-state";
 import { braintrustTraceUrl } from "@/lib/braintrust";
-import type { Space } from "@/lib/api";
-import { resolveSpaceColor } from "@/lib/space-colors";
+import type { Agent } from "@/lib/api";
+import { resolveAgentColor } from "@/lib/agent-colors";
 
 // Trimmed port of seal's prompt-form: text only, no attachments or model
-// select.
+// select. Send, stop, and queueing follow the agentmesh console composer:
+// Enter sends, the text clears at once and comes back if sending fails, and
+// while the thread works an empty composer offers Stop but typed text queues.
 export function PromptForm({
+  ref,
   isBusy,
   traceId,
-  spaces,
-  spaceId,
+  agents,
+  agentId,
   showMarkAsRead,
   isMarkingAsRead,
-  showAutoSpace = false,
+  showAutoAgent = false,
   autoFocus = false,
+  sendDisabled = false,
   onSubmit,
   onStop,
-  onSpaceChange,
+  onAgentChange,
   onMarkAsRead,
 }: {
+  ref?: React.Ref<HTMLTextAreaElement>;
   isBusy: boolean;
   traceId: string | null;
-  spaces: Space[];
-  spaceId: string | null;
+  agents: Agent[];
+  agentId: string | null;
   showMarkAsRead: boolean;
   isMarkingAsRead: boolean;
-  showAutoSpace?: boolean;
+  showAutoAgent?: boolean;
   autoFocus?: boolean;
-  onSubmit: (message: { text: string }) => void | Promise<void>;
-  onStop: () => void;
-  onSpaceChange: (spaceId: string) => void | Promise<void>;
+  sendDisabled?: boolean;
+  // Resolve false (or throw) when the message was not accepted.
+  onSubmit: (message: { text: string }) => void | boolean | Promise<void | boolean>;
+  onStop: () => void | Promise<void>;
+  onAgentChange: (agentId: string) => void | Promise<void>;
   onMarkAsRead: () => void;
 }) {
   const [input, setInput] = React.useState("");
+  const [operation, setOperation] = React.useState<"send" | "stop" | null>(null);
   const [traceCopied, setTraceCopied] = React.useState(false);
-  const [isChangingSpace, setIsChangingSpace] = React.useState(false);
-  const selectedSpace = spaces.find((space) => space.id === spaceId);
+  const [isChangingAgent, setIsChangingAgent] = React.useState(false);
+  const textarea = React.useRef<HTMLTextAreaElement>(null);
+  React.useImperativeHandle(ref, () => textarea.current!, []);
+  const selectedAgent = agents.find((agent) => agent.id === agentId);
+  const showStop = isBusy && !input.trim();
 
   async function handleSubmit(event?: React.FormEvent) {
     event?.preventDefault();
     const text = input.trim();
-    if (!text || isBusy || isChangingSpace) return;
+    if (!text || operation || sendDisabled || isChangingAgent) return;
+    setOperation("send");
+    setInput("");
     try {
-      await onSubmit({ text });
-      setInput("");
-    } catch {}
+      if ((await onSubmit({ text })) === false) {
+        setInput((current) => current || text);
+      }
+    } catch {
+      setInput((current) => current || text);
+    } finally {
+      setOperation(null);
+      requestAnimationFrame(() => textarea.current?.focus());
+    }
+  }
+
+  async function stop() {
+    if (operation) return;
+    setOperation("stop");
+    try {
+      await onStop();
+    } finally {
+      setOperation(null);
+    }
   }
 
   return (
     <form onSubmit={handleSubmit}>
       <InputGroup>
         <InputGroupTextarea
+          ref={textarea}
+          aria-label="Message agent"
+          aria-busy={operation !== null}
+          enterKeyHint="send"
           autoFocus={autoFocus}
           placeholder="What should we build?"
           className="p-3.5"
@@ -90,34 +123,34 @@ export function PromptForm({
           }}
         />
         <InputGroupAddon align="block-end">
-          {(spaceId || showAutoSpace) && (
+          {(agentId || showAutoAgent) && (
             <Select
-              disabled={isChangingSpace}
-              value={spaceId ?? AUTO_SPACE_VALUE}
-              onValueChange={(nextSpaceId) => {
-                if (nextSpaceId && nextSpaceId !== AUTO_SPACE_VALUE) {
-                  setIsChangingSpace(true);
-                  Promise.resolve(onSpaceChange(nextSpaceId)).finally(() =>
-                    setIsChangingSpace(false),
+              disabled={isChangingAgent}
+              value={agentId ?? AUTO_AGENT_VALUE}
+              onValueChange={(nextAgentId) => {
+                if (nextAgentId && nextAgentId !== AUTO_AGENT_VALUE) {
+                  setIsChangingAgent(true);
+                  Promise.resolve(onAgentChange(nextAgentId)).finally(() =>
+                    setIsChangingAgent(false),
                   );
                 }
               }}
             >
               <SelectTrigger
                 size="sm"
-                aria-label="Chat space"
+                aria-label="Chat agent"
                 className="h-6 max-w-44 rounded-xl border-transparent bg-secondary px-2 text-secondary-foreground hover:bg-secondary/80"
               >
                 <SelectValue>
-                  {selectedSpace ? (
+                  {selectedAgent ? (
                     <>
                       <span
                         className="size-2 shrink-0 rounded-full"
                         style={{
-                          backgroundColor: resolveSpaceColor(selectedSpace.color),
+                          backgroundColor: resolveAgentColor(selectedAgent.color),
                         }}
                       />
-                      <span className="truncate">{selectedSpace.name}</span>
+                      <span className="truncate">{selectedAgent.name}</span>
                     </>
                   ) : (
                     <span className="truncate">Auto</span>
@@ -126,16 +159,16 @@ export function PromptForm({
               </SelectTrigger>
               <SelectContent align="start">
                 <SelectGroup>
-                  {showAutoSpace && (
-                    <SelectItem value={AUTO_SPACE_VALUE}>Auto</SelectItem>
+                  {showAutoAgent && (
+                    <SelectItem value={AUTO_AGENT_VALUE}>Auto</SelectItem>
                   )}
-                  {spaces.map((space) => (
-                    <SelectItem key={space.id} value={space.id}>
+                  {agents.map((agent) => (
+                    <SelectItem key={agent.id} value={agent.id}>
                       <span
                         className="size-2 shrink-0 rounded-full"
-                        style={{ backgroundColor: resolveSpaceColor(space.color) }}
+                        style={{ backgroundColor: resolveAgentColor(agent.color) }}
                       />
-                      {space.name}
+                      {agent.name}
                     </SelectItem>
                   ))}
                 </SelectGroup>
@@ -191,27 +224,31 @@ export function PromptForm({
               {isMarkingAsRead ? "Marking as read…" : "Mark as read"}
             </InputGroupButton>
           )}
-          {isBusy ? (
-            <InputGroupButton
-              type="button"
-              size="icon-sm"
-              variant="outline"
-              aria-label="Stop"
-              onClick={onStop}
-            >
-              <SquareIcon />
-            </InputGroupButton>
-          ) : (
-            <InputGroupButton
-              type="submit"
-              size="icon-sm"
-              variant="default"
-              aria-label="Submit"
-              disabled={!input.trim() || isChangingSpace}
-            >
-              <ArrowUpIcon />
-            </InputGroupButton>
-          )}
+          <InputGroupButton
+            type={showStop ? "button" : "submit"}
+            size="icon-sm"
+            variant={showStop ? "outline" : "default"}
+            aria-label={
+              operation === "stop"
+                ? "Stopping thread"
+                : operation === "send"
+                  ? "Sending message"
+                  : showStop
+                    ? "Stop"
+                    : "Submit"
+            }
+            title={showStop ? "Stop thread" : "Send (Enter)"}
+            disabled={
+              operation !== null ||
+              (showStop
+                ? false
+                : !input.trim() || sendDisabled || isChangingAgent)
+            }
+            onClick={showStop ? () => void stop() : undefined}
+            onMouseDown={(event) => event.preventDefault()}
+          >
+            {showStop ? <SquareIcon /> : <ArrowUpIcon />}
+          </InputGroupButton>
         </InputGroupAddon>
       </InputGroup>
     </form>

@@ -1,10 +1,10 @@
 import type { Chat } from "@/lib/api";
 
-export const AUTO_SPACE_VALUE = "__auto__";
+export const AUTO_AGENT_VALUE = "__auto__";
 
 export type NewChatRequest = {
   id: string;
-  space_id?: string;
+  agent_id?: string;
 };
 
 export type NewChatHandoff = {
@@ -56,21 +56,21 @@ export function streamAttachmentAction(
 
 export function newChatRequest(
   id: string,
-  spaceId: string | null,
+  agentId: string | null,
 ): NewChatRequest {
-  return { id, ...(spaceId ? { space_id: spaceId } : {}) };
+  return { id, ...(agentId ? { agent_id: agentId } : {}) };
 }
 
 export function createChatPersister(
   create: (request: NewChatRequest) => Promise<Chat>,
   id = newChatId(),
-): (spaceId: string | null) => Promise<Chat> {
+): (agentId: string | null) => Promise<Chat> {
   let pending: Promise<Chat> | null = null;
   let request: NewChatRequest | null = null;
 
-  return (spaceId) => {
+  return (agentId) => {
     if (pending) return pending;
-    request ??= newChatRequest(id, spaceId);
+    request ??= newChatRequest(id, agentId);
     const attempt = create(request);
     pending = attempt;
     attempt.catch(() => {
@@ -78,8 +78,4 @@ export function createChatPersister(
     });
     return pending;
   };
-}
-
-export function isBrandNewChat(messageCount: number): boolean {
-  return messageCount === 0;
 }

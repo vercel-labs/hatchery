@@ -1,5 +1,7 @@
 // mirrors backend/models.py
 
+import type { AccentColor } from "@/lib/agent-colors";
+
 // Production is same-origin. Vite development dials FastAPI directly so SSE
 // and WebSocket connections do not pass through a development proxy.
 const BACKEND_ORIGIN =
@@ -12,6 +14,57 @@ export function apiBase(): string {
 
 export function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   return fetch(`${BACKEND_ORIGIN}${path}`, { credentials: "include", ...init });
+}
+
+function errorDetail(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  if (!Array.isArray(value)) return null;
+  const issues = value.flatMap((issue) => {
+    if (!issue || typeof issue !== "object") return [];
+    const { loc, msg } = issue as { loc?: unknown; msg?: unknown };
+    if (typeof msg !== "string") return [];
+    const location = Array.isArray(loc)
+      ? loc
+          .filter((part) => part !== "body")
+          .map(String)
+          .join(".")
+      : "";
+    return [location ? `${location}: ${msg}` : msg];
+  });
+  return issues.length ? issues.join("; ") : null;
+}
+
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+// JSON GET, or POST when a body is given; FastAPI `detail` becomes the error message.
+export async function api<T>(
+  path: string,
+  body?: Record<string, unknown>,
+): Promise<T> {
+  const response = await apiFetch(path, {
+    method: body ? "POST" : "GET",
+    headers: body ? { "Content-Type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    const result = (await response.json().catch(() => ({}))) as {
+      detail?: unknown;
+    };
+    throw new ApiError(
+      errorDetail(result.detail) ?? `HTTP ${response.status}`,
+      response.status,
+    );
+  }
+  return response.json() as Promise<T>;
 }
 
 export function wsBase(): string {
@@ -54,36 +107,24 @@ export type Resource = {
   kind: string;
 };
 
-export type Space = {
+export type Agent = {
   id: string;
   name: string;
-  about: string;
   repos: string[];
   resources: Resource[];
-  color: string;
+  color: AccentColor;
   created_at: string;
 };
 
-export type SpaceWarning = {
-  space_id: string;
+export type AgentWarning = {
+  agent_id: string;
   repo: string;
   warning: string;
 };
 
-export type NoteSummary = {
-  filename: string;
-  revision: number;
-  updated_at: string;
-};
-
-export type Note = NoteSummary & {
-  space_id: string;
-  content: string;
-};
-
 export type Job = {
   id: string;
-  space_id: string;
+  agent_id: string;
   author_display_name: string | null;
   schedule: string;
   prompt: string;
@@ -94,11 +135,12 @@ export type Chat = {
   id: string;
   user_id: string | null;
   author_display_name?: string | null;
-  space_id: string | null;
+  agent_id: string | null;
   title: string;
   topic: string | null;
   trigger: string;
   status: "queued" | "running" | "done" | "failed";
+  parent_chat_id?: string | null;
   sandbox_id: string | null;
   artifact: string | null;
   attention_reason: "result_available" | "blocked" | null;

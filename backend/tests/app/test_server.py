@@ -10,10 +10,13 @@ from websockets.http11 import Response
 
 import ai
 import ai.experimental_telemetry
+import ai.testing
 from hatchery import channels
 from hatchery import models
 from hatchery.app import server
 from hatchery.store import chats, events
+
+from tests.agent.conftest import repo, run  # noqa: F401  (fixtures)
 
 
 def client() -> httpx.AsyncClient:
@@ -47,7 +50,7 @@ async def test_browser_api_requires_session(monkeypatch):
 
     monkeypatch.setattr(server.auth, "current_user", current_user)
     async with client() as c:
-        protected = await c.get("/api/spaces")
+        protected = await c.get("/api/agents")
         health = await c.get("/api/health")
         identity = await c.get("/api/auth/me")
 
@@ -71,28 +74,12 @@ async def test_websocket_auth_rejects_missing_session(monkeypatch):
     assert ws.closed == (4401, "sign in required")
 
 
-async def test_legacy_chat_is_visible_without_changing_creator(monkeypatch):
-    chat = await chats.create(None, "legacy")
-
-    async def current_user(_request):
-        return {"id": "user_test", "email": "test@vercel.com"}
-
-    monkeypatch.setattr(server.auth, "current_user", current_user)
-    async with client() as c:
-        response = await c.get(f"/api/chats/{chat.id}/messages")
-
-    assert response.status_code == 200
-    unchanged = await chats.get(chat.id)
-    assert unchanged is not None and unchanged.user_id is None
-    assert unchanged.author_display_name is None
-
-
 async def test_browser_sees_unowned_channel_chat_without_claiming_it():
-    chat, _ = await chats.claim("slack:C1:1.0", "slack", None, "legacy slack", {})
+    chat, _ = await chats.claim("slack:C1:1.0", "slack", None, "slack", {})
 
     async with client() as c:
         listed = await c.get("/api/chats")
-        direct = await c.get(f"/api/chats/{chat.id}/messages")
+        direct = await c.get(f"/api/chats/{chat.id}/transcript")
 
     assert [item["id"] for item in listed.json()] == [chat.id]
     assert direct.status_code == 200
@@ -104,7 +91,7 @@ async def test_chat_routes_share_another_users_chat(monkeypatch):
 
     async with client() as c:
         listed = await c.get("/api/chats")
-        direct = await c.get(f"/api/chats/{chat.id}/messages")
+        direct = await c.get(f"/api/chats/{chat.id}/transcript")
 
     assert [item["id"] for item in listed.json()] == [chat.id]
     assert direct.status_code == 200
@@ -197,18 +184,16 @@ async def test_slack_connection_routes(monkeypatch):
     assert seen == {"authorized": "user_test", "disconnected": "user_test"}
 
 
-async def test_spaces_seed_default():
+async def test_agents_seed_default():
     async with client() as c:
-        listed = (await c.get("/api/spaces")).json()
-    assert [s["id"] for s in listed] == ["spc_hatchery"]
-    assert "goal" not in listed[0]
-    assert not listed[0]["about"].startswith("# hatchery")
+        listed = (await c.get("/api/agents")).json()
+    assert [s["id"] for s in listed] == ["hatchery"]
 
 
-async def test_space_warnings_check_main_repo_and_log(monkeypatch, caplog):
-    space = await server.spaces.create("docs")
-    space.repos = ["acme/main", "acme/secondary"]
-    await server.spaces.save(space)
+async def test_agent_warnings_check_main_repo_and_log(monkeypatch, caplog):
+    agent = await server.agents.create("docs")
+    agent.repos = ["acme/main", "acme/secondary"]
+    await server.agents.save(agent)
     checked = []
 
     async def warning(user_id, repo):
@@ -219,184 +204,133 @@ async def test_space_warnings_check_main_repo_and_log(monkeypatch, caplog):
 
     with caplog.at_level("WARNING", logger="app"):
         async with client() as c:
-            response = await c.get("/api/spaces/warnings")
+            response = await c.get("/api/agents/warnings")
 
     assert response.json() == [
         {
-            "space_id": space.id,
+            "agent_id": agent.id,
             "repo": "acme/main",
             "warning": "Install the Hatchery GitHub app on acme.",
         }
     ]
     assert checked == [("user_test", "acme/main")]
-    assert "space main repository lacks Hatchery GitHub access" in caplog.text
+    assert "agent main repository lacks Hatchery GitHub access" in caplog.text
 
 
-async def test_space_create_and_delete():
+async def test_agent_create_and_delete():
     async with client() as c:
-        created = await c.post("/api/spaces", json={"name": "  docs  "})
-        listed = (await c.get("/api/spaces")).json()
-        deleted = await c.delete(f"/api/spaces/{created.json()['id']}")
+        created = await c.post("/api/agents", json={"name": "  docs  "})
+        listed = (await c.get("/api/agents")).json()
+        deleted = await c.delete(f"/api/agents/{created.json()['id']}")
 
     assert created.status_code == 200
     assert created.json()["name"] == "docs"
-    assert created.json()["about"] == ""
-    assert created.json()["color"] in server.spaces.ACCENT_COLORS
-    assert [space["id"] for space in listed] == [created.json()["id"]]
+    assert created.json()["color"] in server.agents.ACCENT_COLORS
+    assert [agent["id"] for agent in listed] == [created.json()["id"]]
     assert deleted.status_code == 204
 
 
-async def test_space_notes_are_shared_space_scoped_markdown_files():
-    first = await server.spaces.create("first")
-    second = await server.spaces.create("second")
-
+async def test_agent_create_ids_and_rename_keeps_id():
     async with client() as c:
-        empty = await c.get(f"/api/spaces/{first.id}/notes")
-        created = await c.post(
-            f"/api/spaces/{first.id}/notes",
-            json={"filename": "reviewed_issues.md", "content": "# Reviewed\n"},
-            headers={"origin": "http://test"},
+        derived = await c.post("/api/agents", json={"name": "Release Notes"})
+        explicit = await c.post("/api/agents", json={"name": "Docs", "id": "docs-bot"})
+        taken_explicit = await c.post(
+            "/api/agents", json={"name": "Other", "id": "docs-bot"}
         )
-        await c.post(
-            f"/api/spaces/{second.id}/notes",
-            json={"filename": "reviewed_issues.md", "content": "other"},
-            headers={"origin": "http://test"},
+        taken_derived = await c.post("/api/agents", json={"name": "release notes"})
+        invalid = await c.post("/api/agents", json={"name": "Docs", "id": "Docs_Bot"})
+        underivable = await c.post("/api/agents", json={"name": "!!!"})
+        renamed = await c.patch(
+            "/api/agents/docs-bot", json={"name": "Documentation"}
         )
-        listed = await c.get(f"/api/spaces/{first.id}/notes")
-        read = await c.get(f"/api/spaces/{first.id}/notes/reviewed_issues.md")
-        updated = await c.put(
-            f"/api/spaces/{first.id}/notes/reviewed_issues.md",
-            json={"content": "Only durable context.", "expected_revision": 1},
-            headers={"origin": "http://test"},
-        )
-        conflict = await c.put(
-            f"/api/spaces/{first.id}/notes/reviewed_issues.md",
-            json={"content": "stale", "expected_revision": 1},
-            headers={"origin": "http://test"},
-        )
-        intervening = await c.put(
-            f"/api/spaces/{first.id}/notes/reviewed_issues.md",
-            json={"content": "An intervening edit.", "expected_revision": 2},
-            headers={"origin": "http://test"},
-        )
-        raced_override = await c.put(
-            f"/api/spaces/{first.id}/notes/reviewed_issues.md",
-            json={
-                "content": "Reviewed stale draft.",
-                "expected_revision": 2,
-                "override": True,
-            },
-            headers={"origin": "http://test"},
-        )
-        overridden = await c.put(
-            f"/api/spaces/{first.id}/notes/reviewed_issues.md",
-            json={
-                "content": "Reviewed stale draft.",
-                "expected_revision": 3,
-                "override": True,
-            },
-            headers={"origin": "http://test"},
-        )
-        deleted = await c.delete(
-            f"/api/spaces/{first.id}/notes/reviewed_issues.md",
-            headers={"origin": "http://test"},
-        )
-        missing_delete = await c.delete(
-            f"/api/spaces/{first.id}/notes/reviewed_issues.md",
-            headers={"origin": "http://test"},
-        )
+        listed = (await c.get("/api/agents")).json()
 
-    assert empty.json() == []
-    assert created.status_code == 201
-    assert created.json()["space_id"] == first.id
-    assert listed.json() == [
-        {
-            "filename": created.json()["filename"],
-            "revision": created.json()["revision"],
-            "updated_at": created.json()["updated_at"],
-        }
-    ]
-    assert read.json() == created.json()
-    assert updated.json()["content"] == "Only durable context."
-    assert updated.json()["revision"] == 2
-    assert conflict.status_code == 409
-    assert conflict.json()["detail"]["current"] == updated.json()
-    assert "explicitly overwrite" in conflict.json()["detail"]["message"]
-    assert intervening.json()["revision"] == 3
-    assert raced_override.status_code == 409
-    assert raced_override.json()["detail"]["current"] == intervening.json()
-    assert "changed again" in raced_override.json()["detail"]["message"]
-    assert overridden.json()["content"] == "Reviewed stale draft."
-    assert overridden.json()["revision"] == 4
-    assert deleted.status_code == 204
-    assert missing_delete.status_code == 404
-    assert (await server.notes.get(second.id, "reviewed_issues.md")).content == "other"
-
-
-async def test_space_note_routes_validate_names_conflicts_and_space():
-    space = await server.spaces.create("notes")
-    async with client() as c:
-        invalid = await c.post(
-            f"/api/spaces/{space.id}/notes",
-            json={"filename": "../secret.md"},
-            headers={"origin": "http://test"},
-        )
-        created = await c.post(
-            f"/api/spaces/{space.id}/notes",
-            json={"filename": "foo.md"},
-            headers={"origin": "http://test"},
-        )
-        duplicate = await c.post(
-            f"/api/spaces/{space.id}/notes",
-            json={"filename": "foo.md"},
-            headers={"origin": "http://test"},
-        )
-        missing_note = await c.put(
-            f"/api/spaces/{space.id}/notes/missing.md",
-            json={"content": "no", "expected_revision": 1},
-            headers={"origin": "http://test"},
-        )
-        missing_space = await c.get("/api/spaces/spc_missing/notes")
-
+    assert derived.status_code == 200
+    assert derived.json()["id"] == "release-notes"
+    assert explicit.json()["id"] == "docs-bot"
+    assert explicit.json()["name"] == "Docs"
+    assert taken_explicit.status_code == 409
+    assert taken_derived.status_code == 409
     assert invalid.status_code == 422
-    assert created.status_code == 201
-    assert duplicate.status_code == 409
-    assert missing_note.status_code == 404
-    assert missing_space.status_code == 404
+    assert underivable.status_code == 422
+    assert renamed.json()["id"] == "docs-bot"
+    assert renamed.json()["name"] == "Documentation"
+    assert [(agent["id"], agent["name"]) for agent in listed] == [
+        ("release-notes", "Release Notes"),
+        ("docs-bot", "Documentation"),
+    ]
 
 
-async def test_space_note_routes_enforce_content_limit():
-    space = await server.spaces.create("large notes")
+async def test_two_users_share_one_agent(monkeypatch):
+    users = {
+        "ada": {"id": "user_ada", "name": "Ada", "email": "test@vercel.com"},
+        "bob": {"id": "user_bob", "name": "Bob", "email": "test@vercel.com"},
+    }
+    current = {"user": users["ada"]}
+    started = []
+
+    async def current_user(_request):
+        return current["user"]
+
+    async def start_turn(chat_id, origin, task_id=None, **kwargs):
+        started.append((chat_id, kwargs["actor_user_id"]))
+        return server.turns.ActiveTurn(
+            "turn_1", "run_1", origin, task_id, 0, kwargs["actor_user_id"]
+        )
+
+    async def to_sse(_run_id, _turn_id):
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(server.auth, "current_user", current_user)
+    monkeypatch.setattr(server.supervisor, "start_turn", start_turn)
+    monkeypatch.setattr(server.agent_stream, "to_sse", to_sse)
+
+    async def chat_in(c, agent_id, text):
+        chat = (await c.post("/api/chats", json={"agent_id": agent_id})).json()
+        message = ai.ui.ai_sdk.to_ui_messages([ai.user_message(text)])[0]
+        response = await c.post(
+            "/api/chat",
+            json={"chat_id": chat["id"], "messages": [message.model_dump(mode="json")]},
+        )
+        assert response.status_code == 200
+        return chat
+
     async with client() as c:
-        accepted = await c.post(
-            f"/api/spaces/{space.id}/notes",
-            json={"filename": "large.md", "content": "x" * 32_001},
-            headers={"origin": "http://test"},
+        created = (await c.post("/api/agents", json={"name": "Release"})).json()
+        ada_chat = await chat_in(c, created["id"], "draft notes")
+
+        current["user"] = users["bob"]
+        bob_listed = (await c.get("/api/agents")).json()
+        bob_chat = await chat_in(c, created["id"], "add the fix")
+        renamed = await c.patch(
+            f"/api/agents/{created['id']}",
+            json={"name": "Release train"},
         )
-        rejected = await c.post(
-            f"/api/spaces/{space.id}/notes",
-            json={"filename": "too_large.md", "content": "x" * 1_000_001},
-            headers={"origin": "http://test"},
+
+        current["user"] = users["ada"]
+        ada_listed = (await c.get("/api/agents")).json()
+        ada_renamed = await c.patch(
+            f"/api/agents/{created['id']}",
+            json={"name": "Releases"},
         )
+        listed_chats = (await c.get("/api/chats")).json()
 
-    assert accepted.status_code == 201
-    assert len(accepted.json()["content"]) == 32_001
-    assert rejected.status_code == 422
-    assert (
-        server.CreateNoteRequest.model_json_schema()["properties"]["content"][
-            "maxLength"
-        ]
-        == 1_000_000
-    )
-    assert (
-        server.UpdateNoteRequest.model_json_schema()["properties"]["content"][
-            "maxLength"
-        ]
-        == 1_000_000
-    )
+    assert created["id"] == "release"
+    assert [agent["id"] for agent in bob_listed] == ["release"]
+    assert renamed.status_code == 200
+    assert [(agent["id"], agent["name"]) for agent in ada_listed] == [
+        ("release", "Release train")
+    ]
+    assert ada_renamed.json()["id"] == "release"
+    assert ada_renamed.json()["name"] == "Releases"
+    assert started == [(ada_chat["id"], "user_ada"), (bob_chat["id"], "user_bob")]
+    assert {chat["id"]: (chat["agent_id"], chat["user_id"]) for chat in listed_chats} == {
+        ada_chat["id"]: ("release", "user_ada"),
+        bob_chat["id"]: ("release", "user_bob"),
+    }
 
 
-async def test_space_create_accepts_only_explicit_accent_ids():
+async def test_agent_create_accepts_only_explicit_accent_ids():
     accent_colors = [
         f"{family}-{shade}"
         for family in ("blue", "red", "amber", "green", "teal", "purple", "pink")
@@ -404,19 +338,19 @@ async def test_space_create_accepts_only_explicit_accent_ids():
     ]
     async with client() as c:
         selected = [
-            await c.post("/api/spaces", json={"name": color, "color": color})
+            await c.post("/api/agents", json={"name": color, "color": color})
             for color in accent_colors
         ]
         updated = [
             await c.patch(
-                f"/api/spaces/{selected[0].json()['id']}",
-                json={"name": "updated", "about": "", "color": color},
+                f"/api/agents/{selected[0].json()['id']}",
+                json={"name": "updated", "color": color},
             )
             for color in accent_colors
         ]
-        bare = await c.post("/api/spaces", json={"name": "legacy", "color": "teal"})
+        bare = await c.post("/api/agents", json={"name": "bare", "color": "teal"})
         custom = await c.post(
-            "/api/spaces", json={"name": "legacy", "color": "#38bdf8"}
+            "/api/agents", json={"name": "custom", "color": "#38bdf8"}
         )
 
     assert [response.json()["color"] for response in selected] == accent_colors
@@ -427,49 +361,43 @@ async def test_space_create_accepts_only_explicit_accent_ids():
     assert custom.status_code == 422
 
 
-async def test_space_delete_cascades_owner_scoped_jobs():
-    space = await server.spaces.create("scheduled")
-    own = await server.jobs.create(space.id, "user_test", "0 9 * * *", "Mine")
-    other = await server.jobs.create(space.id, "user_other", "0 10 * * *", "Theirs")
-    await server.notes.create(space.id, "history.md", "done")
+async def test_agent_delete_cascades_owner_scoped_jobs():
+    agent = await server.agents.create("scheduled")
+    own = await server.jobs.create(agent.id, "user_test", "0 9 * * *", "Mine")
+    other = await server.jobs.create(agent.id, "user_other", "0 10 * * *", "Theirs")
 
     async with client() as c:
-        response = await c.delete(f"/api/spaces/{space.id}")
+        response = await c.delete(f"/api/agents/{agent.id}")
 
     assert response.status_code == 204
     assert await server.jobs.get(own.id) is None
     assert await server.jobs.get(other.id) is None
-    assert await server.notes.list_for_space(space.id) == []
 
 
-async def test_space_delete_rejects_unknown_space_and_space_with_chats():
-    space = await server.spaces.create("busy")
-    await chats.create(space.id, "chat")
+async def test_agent_delete_rejects_unknown_agent_and_agent_with_chats():
+    agent = await server.agents.create("busy")
+    await chats.create(agent.id, "chat")
 
     async with client() as c:
-        busy = await c.delete(f"/api/spaces/{space.id}")
-        missing = await c.delete("/api/spaces/spc_missing")
+        busy = await c.delete(f"/api/agents/{agent.id}")
+        missing = await c.delete("/api/agents/missing")
 
     assert busy.status_code == 409
-    assert busy.json() == {"detail": "space still has chats"}
+    assert busy.json() == {"detail": "agent still has chats"}
     assert missing.status_code == 404
 
 
-async def test_space_update():
-    original = await server.spaces.default()
+async def test_agent_update():
+    original = await server.agents.default()
     async with client() as c:
         response = await c.patch(
-            "/api/spaces/spc_hatchery",
-            json={
-                "name": "  Hatchery docs  ",
-                "about": "# Overview\n\nEdited directly.",
-            },
+            "/api/agents/hatchery",
+            json={"name": "  Hatchery docs  "},
         )
-        listed = (await c.get("/api/spaces")).json()
+        listed = (await c.get("/api/agents")).json()
 
     assert response.status_code == 200
     assert response.json()["name"] == "Hatchery docs"
-    assert response.json()["about"] == "# Overview\n\nEdited directly."
     assert response.json()["repos"] == original.repos
     assert response.json()["resources"] == [
         resource.model_dump() for resource in original.resources
@@ -479,54 +407,51 @@ async def test_space_update():
     assert listed[0] == response.json()
 
 
-async def test_space_update_changes_accent_and_preserves_legacy_when_omitted():
-    legacy = models.Space(
-        id="spc_legacy",
-        name="Legacy",
-        color="#38bdf8",
-        created_at="2026-09-08T00:00:00+00:00",
+async def test_agent_update_changes_accent_and_keeps_it_when_omitted():
+    await server.agents.save(
+        models.Agent(
+            id="teal",
+            name="Teal",
+            color="teal-700",
+            created_at="2026-09-08T00:00:00+00:00",
+        )
     )
-    await server.spaces.save(legacy)
 
     async with client() as c:
-        preserved = await c.patch(
-            "/api/spaces/spc_legacy", json={"name": "Legacy", "about": "unchanged"}
-        )
+        preserved = await c.patch("/api/agents/teal", json={"name": "Teal"})
         changed = await c.patch(
-            "/api/spaces/spc_legacy",
-            json={"name": "Legacy", "about": "changed", "color": "pink-900"},
+            "/api/agents/teal", json={"name": "Teal", "color": "pink-900"}
         )
         invalid = await c.patch(
-            "/api/spaces/spc_legacy",
-            json={"name": "Legacy", "about": "changed", "color": "#fff"},
+            "/api/agents/teal", json={"name": "Teal", "color": "#fff"}
         )
 
     assert preserved.status_code == 200
-    assert preserved.json()["color"] == "#38bdf8"
+    assert preserved.json()["color"] == "teal-700"
     assert changed.status_code == 200
     assert changed.json()["color"] == "pink-900"
     assert invalid.status_code == 422
 
 
-async def test_space_update_rejects_unknown_space_and_empty_name():
-    await server.spaces.default()
+async def test_agent_update_rejects_unknown_agent_and_empty_name():
+    await server.agents.default()
     async with client() as c:
         missing = await c.patch(
-            "/api/spaces/spc_missing", json={"name": "missing", "about": ""}
+            "/api/agents/missing", json={"name": "missing"}
         )
         invalid = await c.patch(
-            "/api/spaces/spc_hatchery", json={"name": "   ", "about": "body"}
+            "/api/agents/hatchery", json={"name": "   "}
         )
 
     assert missing.status_code == 404
     assert invalid.status_code == 422
 
 
-async def test_space_resources_update():
-    await server.spaces.default()
+async def test_agent_resources_update():
+    await server.agents.default()
     async with client() as c:
         response = await c.patch(
-            "/api/spaces/spc_hatchery/resources",
+            "/api/agents/hatchery/resources",
             json={
                 "repos": ["acme/app"],
                 "resources": [
@@ -534,7 +459,7 @@ async def test_space_resources_update():
                 ],
             },
         )
-        listed = (await c.get("/api/spaces")).json()
+        listed = (await c.get("/api/agents")).json()
 
     assert response.status_code == 200
     assert response.json()["repos"] == ["acme/app"]
@@ -544,14 +469,14 @@ async def test_space_resources_update():
     assert listed[0]["resources"] == response.json()["resources"]
 
 
-async def test_space_resources_update_rejects_unknown_space_and_invalid_repo():
-    await server.spaces.default()
+async def test_agent_resources_update_rejects_unknown_agent_and_invalid_repo():
+    await server.agents.default()
     async with client() as c:
         missing = await c.patch(
-            "/api/spaces/spc_missing/resources", json={"repos": [], "resources": []}
+            "/api/agents/missing/resources", json={"repos": [], "resources": []}
         )
         invalid = await c.patch(
-            "/api/spaces/spc_hatchery/resources",
+            "/api/agents/hatchery/resources",
             json={"repos": ["https://github.com/acme/app"], "resources": []},
         )
 
@@ -560,14 +485,14 @@ async def test_space_resources_update_rejects_unknown_space_and_invalid_repo():
 
 
 async def test_job_routes_are_owner_scoped():
-    await server.spaces.default()
+    await server.agents.default()
     async with client() as c:
         created = await c.post(
-            "/api/spaces/spc_hatchery/jobs",
+            "/api/agents/hatchery/jobs",
             json={"schedule": "0 9 * * 1-5", "prompt": "Check reports"},
             headers={"origin": "http://test"},
         )
-        listed = await c.get("/api/spaces/spc_hatchery/jobs")
+        listed = await c.get("/api/agents/hatchery/jobs")
         paused = await c.patch(
             f"/api/jobs/{created.json()['id']}/pause",
             json={"paused": True},
@@ -592,9 +517,9 @@ async def test_job_routes_are_owner_scoped():
 
 async def test_cron_heartbeat_auth_and_reconciliation(monkeypatch):
     monkeypatch.setenv("CRON_SECRET", "cron-test-secret")
-    space = await server.spaces.default()
+    agent = await server.agents.default()
     job = await server.jobs.create(
-        space.id,
+        agent.id,
         "user_test",
         "* * * * *",
         "Do work",
@@ -613,7 +538,7 @@ async def test_cron_heartbeat_auth_and_reconciliation(monkeypatch):
         await server.jobs.claim_run(turn_id, "run_1")
         return server.turns.ActiveTurn(turn_id, "run_1", origin, task_id, 0)
 
-    monkeypatch.setattr(server.durable, "start_turn", start_turn)
+    monkeypatch.setattr(server.supervisor, "start_turn", start_turn)
     async with client() as c:
         denied = await c.get("/api/cron")
         first = await c.get(
@@ -625,7 +550,7 @@ async def test_cron_heartbeat_auth_and_reconciliation(monkeypatch):
             "/api/cron", headers={"authorization": "Bearer cron-test-secret"}
         )
         visible = await c.get("/api/chats")
-        [message] = (await c.get(f"/api/chats/{starts[0][0]}/messages")).json()
+        [message] = (await c.get(f"/api/chats/{starts[0][0]}/transcript")).json()
 
     assert denied.status_code == 401
     assert first.json() == {"ok": True, "started": 1}
@@ -636,7 +561,7 @@ async def test_cron_heartbeat_auth_and_reconciliation(monkeypatch):
     assert visible.json()[0]["trigger"] == f"cron:{job.id}"
     assert visible.json()[0]["author_display_name"] == "Ada Lovelace"
     assert visible.json()[0]["topic"] == "Test request"
-    assert message["metadata"] == {"origin": "cron", "author": "Ada Lovelace"}
+    assert (message["origin"], message["author"]) == ("cron", "Ada Lovelace")
     transcript = await server._transcript(starts[0][0])
     assert [message.text for message in transcript] == ["Do work"]
 
@@ -644,8 +569,8 @@ async def test_cron_heartbeat_auth_and_reconciliation(monkeypatch):
 async def test_paused_pending_job_does_not_start(monkeypatch):
     secret = "cron-test-secret"
     monkeypatch.setenv("CRON_SECRET", secret)
-    space = await server.spaces.default()
-    job = await server.jobs.create(space.id, "user_test", "* * * * *", "Do work")
+    agent = await server.agents.default()
+    job = await server.jobs.create(agent.id, "user_test", "* * * * *", "Do work")
     now = datetime.datetime.now(datetime.UTC)
     job.next_run_at = (now - datetime.timedelta(minutes=1)).isoformat()
     server.jobs._write_job(job)
@@ -656,7 +581,7 @@ async def test_paused_pending_job_does_not_start(monkeypatch):
     async def start_turn(*args, **kwargs):
         starts.append((args, kwargs))
 
-    monkeypatch.setattr(server.durable, "start_turn", start_turn)
+    monkeypatch.setattr(server.supervisor, "start_turn", start_turn)
     async with client() as c:
         response = await c.get(
             "/api/cron", headers={"authorization": f"Bearer {secret}"}
@@ -678,7 +603,7 @@ async def test_chat_create_and_list(monkeypatch):
     monkeypatch.setattr(server.auth, "current_user", current_user)
     async with client() as c:
         created = (await c.post("/api/chats", json={})).json()
-        assert created["space_id"] is None
+        assert created["agent_id"] is None
         assert created["title"] == "new chat"
         assert created["author_display_name"] == "Ada Lovelace"
         listed = (await c.get("/api/chats")).json()
@@ -687,7 +612,7 @@ async def test_chat_create_and_list(monkeypatch):
 
 
 async def test_chat_create_retries_one_client_generated_id():
-    request = {"id": "chat_123456789abc", "space_id": None}
+    request = {"id": "chat_123456789abc", "agent_id": None}
     async with client() as c:
         first = await c.post("/api/chats", json=request)
         second = await c.post("/api/chats", json=request)
@@ -737,7 +662,7 @@ async def test_chat_archive_rejects_active_turn(monkeypatch):
     async def active_turn(_chat_id):
         return object()
 
-    monkeypatch.setattr(server.durable, "active_turn", active_turn)
+    monkeypatch.setattr(server.supervisor, "active_turn", active_turn)
     async with client() as c:
         response = await c.patch(
             f"/api/chats/{chat.id}/archive",
@@ -755,7 +680,7 @@ async def test_mark_chat_seen_clears_attention_and_notifies():
     await chats.set_attention(chat.id, "blocked")
 
     async with client() as c:
-        loaded = await c.get(f"/api/chats/{chat.id}/messages")
+        loaded = await c.get(f"/api/chats/{chat.id}/transcript")
         still_required = await chats.get(chat.id)
         response = await c.post(
             f"/api/chats/{chat.id}/seen", headers={"origin": "http://test"}
@@ -792,42 +717,174 @@ async def test_mark_chat_seen_is_shared_but_authenticated(monkeypatch):
     assert (await chats.get(chat.id)).attention_reason is None
 
 
-async def test_chat_space_assignment():
-    destination = await server.spaces.create("docs")
+async def test_chat_agent_assignment():
+    destination = await server.agents.create("docs")
     chat = await chats.create(None, "work")
 
     async with client() as c:
         response = await c.patch(
-            f"/api/chats/{chat.id}/space", json={"space_id": destination.id}
+            f"/api/chats/{chat.id}/agent", json={"agent_id": destination.id}
         )
         listed = (await c.get("/api/chats")).json()
 
     assert response.status_code == 200
-    assert response.json()["space_id"] == destination.id
-    assert listed[0]["space_id"] == destination.id
-    assert (await server._space_for_chat(chat.id)).id == destination.id
+    assert response.json()["agent_id"] == destination.id
+    assert listed[0]["agent_id"] == destination.id
+    assert (await server._agent_for_chat(chat.id)).id == destination.id
 
 
-async def test_chat_space_assignment_rejects_unknown_chat_space_and_null():
-    destination = await server.spaces.create("docs")
+async def test_chat_agent_is_fixed_once_its_thread_started():
+    destination = await server.agents.create("docs")
+    chat = await chats.create(None, "work")
+    await events.append(
+        chat.id, "thread", {"agent_id": "hatchery", "thread_id": "thread_1", "cursor": 0}
+    )
+    async with client() as c:
+        response = await c.patch(
+            f"/api/chats/{chat.id}/agent", json={"agent_id": destination.id}
+        )
+    assert response.status_code == 409
+    assert (await chats.get(chat.id)).agent_id is None
+
+
+async def test_chat_list_shows_root_chats_and_children_through_their_parent():
+    root = await chats.create("hatchery", "root")
+    child = await chats.create_once(
+        "chat_0123456789ab", "hatchery", "child task", None, trigger="task",
+        parent_chat_id=root.id,
+    )
+    async with client() as c:
+        roots = (await c.get("/api/chats")).json()
+        children = (await c.get("/api/chats", params={"parent_chat_id": root.id})).json()
+    assert [item["id"] for item in roots] == [root.id]
+    assert [item["id"] for item in children] == [child.id]
+    assert children[0]["parent_chat_id"] == root.id
+
+
+async def test_agent_create_commits_its_template(monkeypatch, tmp_path):
+    from hatchery import config, environment, templates
+    from hatchery.worker import scripted
+    from hatchery.workspace import local, repo, review
+
+    root = tmp_path / "storage"
+    (root / "wiki").mkdir(parents=True)
+    (root / "wiki" / "PROMPT.md").write_text("Team prompt\n")
+    workspaces = repo.WorkspaceRepo(await local.initialize_local(root))
+    env = environment.Environment(
+        config.Config(),
+        workspaces,
+        review.LocalReview(workspaces),
+        scripted.ScriptedSandboxProvider(),
+        ai.get_model("openai/gpt-5.6-sol"),
+    )
+    monkeypatch.setattr(server.rotor_runtime, "install", lambda: env)
+    async with client() as c:
+        created = await c.post(
+            "/api/agents", json={"name": "Docs"}
+        )
+    assert created.status_code == 200
+    _, files = await workspaces.read_main("docs")
+    assert files["self/AGENTS.md"].content == templates.load()["AGENTS.md"].content
+    assert "self/MEMORY.md" in files
+
+
+async def test_default_agent_seed_commits_the_template_once_and_retries_after_failure(
+    monkeypatch, tmp_path
+):
+    from hatchery import config, environment, templates
+    from hatchery.worker import scripted
+    from hatchery.workspace import git, local, repo, review
+
+    # A fresh storage main: no agents/ and no wiki/ yet.
+    root = tmp_path / "storage"
+    root.mkdir()
+    (root / "README.md").write_text("storage\n")
+    workspaces = repo.WorkspaceRepo(await local.initialize_local(root))
+    env = environment.Environment(
+        config.Config(),
+        workspaces,
+        review.LocalReview(workspaces),
+        scripted.ScriptedSandboxProvider(),
+        ai.get_model("openai/gpt-5.6-sol"),
+    )
+    monkeypatch.setattr(server.rotor_runtime, "install", lambda: env)
+    join = workspaces.join
+    failures = [git.GitError("push rejected")]
+
+    async def flaky_join(owner, workspace):
+        if failures:
+            raise failures.pop()
+        return await join(owner, workspace)
+
+    monkeypatch.setattr(workspaces, "join", flaky_join)
+
+    async with client() as c:
+        with pytest.raises(git.GitError):
+            await c.get("/api/agents")
+        assert await server.agents.get(server.agents.DEFAULT_ID) is None, "retryable"
+
+        listed = await c.get("/api/agents")
+        assert [agent["id"] for agent in listed.json()] == ["hatchery"]
+        revision, files = await workspaces.read_main("hatchery")
+        assert files["self/AGENTS.md"] == templates.load()["AGENTS.md"]
+
+        # Seeded once: later calls find the row and commit nothing.
+        await c.get("/api/agents")
+        assert (await workspaces.read_main("hatchery"))[0] == revision
+
+        # A commit that landed without its row is found again, not duplicated.
+        await server.agents.delete(server.agents.DEFAULT_ID)
+        listed = await c.get("/api/agents")
+        assert [agent["id"] for agent in listed.json()] == ["hatchery"]
+        assert (await workspaces.read_main("hatchery"))[0] == revision
+
+
+async def test_grant_and_thread_tree_go_to_the_agent_supervisor(monkeypatch):
+    sent = []
+
+    async def send(agent_id, msg, *, idempotency_key=None):
+        sent.append((agent_id, msg, idempotency_key))
+        return "delivered"
+
+    async def roster(agent_id):
+        return {"agent_id": agent_id, "threads": [], "budget": {"remaining": 5}}
+
+    monkeypatch.setattr(server.supervisor, "send", send)
+    monkeypatch.setattr(server.supervisor, "roster", roster)
+    await server.agents.default()
+    async with client() as c:
+        granted = await c.post(
+            "/api/agents/hatchery/grants", json={"request_id": "g1", "amount": 500}
+        )
+        tree = await c.get("/api/agents/hatchery/threads")
+        missing = await c.get("/api/chats/chat_missing/thread")
+    assert granted.status_code == 202
+    assert sent[0][0] == "hatchery" and sent[0][2] == "grant:g1"
+    assert (sent[0][1].id, sent[0][1].amount) == ("g1", 500)
+    assert tree.json()["budget"] == {"remaining": 5}
+    assert missing.status_code == 404
+
+
+async def test_chat_agent_assignment_rejects_unknown_chat_agent_and_null():
+    destination = await server.agents.create("docs")
     chat = await chats.create(destination.id, "work")
     async with client() as c:
         missing_chat = await c.patch(
-            "/api/chats/chat_missing/space", json={"space_id": destination.id}
+            "/api/chats/chat_missing/agent", json={"agent_id": destination.id}
         )
-        missing_space = await c.patch(
-            "/api/chats/chat_missing/space", json={"space_id": "spc_missing"}
+        missing_agent = await c.patch(
+            "/api/chats/chat_missing/agent", json={"agent_id": "missing"}
         )
-        null_space = await c.patch(
-            f"/api/chats/{chat.id}/space", json={"space_id": None}
+        null_agent = await c.patch(
+            f"/api/chats/{chat.id}/agent", json={"agent_id": None}
         )
 
     assert missing_chat.status_code == 404
     assert missing_chat.json() == {"detail": "unknown chat"}
-    assert missing_space.status_code == 404
-    assert missing_space.json() == {"detail": "unknown space"}
-    assert null_space.status_code == 422
-    assert (await chats.get(chat.id)).space_id == destination.id
+    assert missing_agent.status_code == 404
+    assert missing_agent.json() == {"detail": "unknown agent"}
+    assert null_agent.status_code == 422
+    assert (await chats.get(chat.id)).agent_id == destination.id
 
 
 async def test_name_chat_generates_and_persists_topic(monkeypatch):
@@ -851,27 +908,9 @@ async def test_name_chat_generates_and_persists_topic(monkeypatch):
     assert await events.read(chat.id, "ui") == [(0, {"type": "chat.changed"})]
 
 
-async def test_chat_list_cleans_legacy_slack_title():
-    space = await server.spaces.default()
-    chat, _ = await chats.claim(
-        "slack:C1:1.0",
-        "slack",
-        space.id,
-        "<@UBOT> old &lt;-&gt; title",
-        {},
-        user_id="user_test",
-    )
-
-    async with client() as c:
-        [listed] = (await c.get("/api/chats")).json()
-
-    assert listed["id"] == chat.id
-    assert listed["title"] == "slack: old <-> title"
-
-
 async def test_chat_events_replay_after_cursor():
-    space = await server.spaces.default()
-    chat = await chats.create(space.id, "events")
+    agent = await server.agents.default()
+    chat = await chats.create(agent.id, "events")
     await events.append(chat.id, "ui", {"type": "old"})
     await events.append(chat.id, "ui", {"type": "messages.changed"})
 
@@ -883,61 +922,55 @@ async def test_chat_events_replay_after_cursor():
     assert chunk == 'id: 1\ndata: {"type":"messages.changed"}\n\n'
 
 
-async def test_chat_messages_from_store():
+async def test_chat_transcript_from_store():
     chat = await chats.create(None, "messages", user_id="user_test")
     for message in (ai.user_message("hi"), ai.assistant_message("hello")):
         await events.append(chat.id, "messages", message.model_dump(mode="json"))
     async with client() as c:
-        ui = (await c.get(f"/api/chats/{chat.id}/messages")).json()
-        missing = await c.get("/api/chats/chat_missing/messages")
+        ui = (await c.get(f"/api/chats/{chat.id}/transcript")).json()
+        missing = await c.get("/api/chats/chat_missing/transcript")
     assert [m["role"] for m in ui] == ["user", "assistant"]
     assert ui[0]["parts"][0]["text"] == "hi"
     assert missing.status_code == 404
     assert missing.json() == {"detail": "unknown chat"}
 
 
-async def test_chat_messages_hide_slack_envelope_and_mark_origin():
+async def test_chat_transcript_unwraps_channel_text_and_keeps_author_and_task_source():
     chat = await chats.create(None, "slack message", user_id="user_test")
-    text = (
-        '<slack_message channel="C1" thread_ts="1.0" ts="1.1" sender="U1" team="T1">\n'
-        "hello &lt;-&gt; slack\n</slack_message>"
+    slack = ai.user_message(
+        '<slack_message channel="C1" ts="1.1">\nhello &lt;-&gt; slack\n</slack_message>'
     )
+    slack.provider_metadata = {"hatchery": {"author": "Ada"}}
+    report = ai.user_message("Child finished the audit")
+    await events.append(chat.id, "messages", slack.model_dump(mode="json"))
     await events.append(
-        chat.id, "messages", ai.user_message(text).model_dump(mode="json")
+        chat.id,
+        "messages",
+        {
+            **report.model_dump(mode="json"),
+            "timestamp": 5.0,
+            "source": "task",
+            "task_handle": "task-1",
+            "task_event": "completion",
+        },
     )
-
     async with client() as c:
-        [message] = (await c.get(f"/api/chats/{chat.id}/messages")).json()
-
-    assert message["parts"][0]["text"] == "hello <-> slack"
-    assert message["metadata"]["origin"] == "slack"
-    stored = await events.read(chat.id, "messages")
-    assert ai.messages.Message.model_validate(stored[0][1]).text == text
-
-
-def test_dedupe_tool_history_repairs_old_ui_duplicates():
-    call = ai.messages.ToolCallPart(
-        tool_call_id="call_1", tool_name="create_subagent", tool_args='{"task":"x"}'
+        first, second = (await c.get(f"/api/chats/{chat.id}/transcript")).json()
+        missing = await c.get("/api/chats/chat_missing/transcript")
+    assert first["parts"][0]["text"] == "hello <-> slack"
+    assert (first["origin"], first["author"]) == ("slack", "Ada")
+    assert (second["source"], second["task_handle"], second["timestamp"]) == (
+        "task",
+        "task-1",
+        5.0,
     )
-    result = ai.messages.ToolResultPart(
-        tool_call_id="call_1", tool_name="create_subagent", result="accepted"
-    )
-    history = [
-        ai.assistant_message(call),
-        ai.tool_message(result),
-        ai.assistant_message(call.model_copy(update={"id": "part_duplicate"})),
-        ai.tool_message(result.model_copy(update={"id": "part_duplicate_result"})),
-    ]
-    repaired = server._dedupe_tool_history(history)
-    assert len(repaired) == 2
-    assert repaired[0].tool_calls[0].tool_call_id == "call_1"
-    assert repaired[1].tool_results[0].tool_call_id == "call_1"
+    assert missing.status_code == 404
 
 
 async def test_ui_post_uses_actor_in_another_users_chat(monkeypatch):
-    space = await server.spaces.default()
+    agent = await server.agents.default()
     chat = await chats.create(
-        space.id, "shared", user_id="user_other", author_display_name="Creator"
+        agent.id, "shared", user_id="user_other", author_display_name="Creator"
     )
     await chats.set_topic(chat.id, "shared work")
     message = ai.ui.ai_sdk.to_ui_messages([ai.user_message("continue")])[0]
@@ -951,7 +984,7 @@ async def test_ui_post_uses_actor_in_another_users_chat(monkeypatch):
     async def to_sse(_run_id, _turn_id):
         yield "data: [DONE]\n\n"
 
-    monkeypatch.setattr(server.durable, "start_turn", start_turn)
+    monkeypatch.setattr(server.supervisor, "start_turn", start_turn)
     monkeypatch.setattr(server.agent_stream, "to_sse", to_sse)
     async with client() as c:
         response = await c.post(
@@ -982,7 +1015,7 @@ async def test_archived_chat_rejects_ui_post_before_persisting(monkeypatch):
     async def start_turn(*args, **kwargs):
         started.append(args)
 
-    monkeypatch.setattr(server.durable, "start_turn", start_turn)
+    monkeypatch.setattr(server.supervisor, "start_turn", start_turn)
     message = ai.user_message("should not be stored")
     ui_message = ai.ui.ai_sdk.to_ui_messages([message])[0]
     async with client() as c:
@@ -1016,7 +1049,7 @@ async def test_archived_chat_rejects_inbound_with_explanation(monkeypatch):
 
     monkeypatch.setattr(server.classifier, "classify", classify)
     monkeypatch.setattr(server, "_deliver", deliver)
-    monkeypatch.setattr(server.durable, "start_turn", start_turn)
+    monkeypatch.setattr(server.supervisor, "start_turn", start_turn)
     inbound = channels.Inbound(
         token="C1:1.0",
         text="first",
@@ -1047,49 +1080,6 @@ async def test_archived_chat_rejects_inbound_with_explanation(monkeypatch):
     ]
 
 
-async def test_draft_sandbox_suggestion_needs_no_chat(monkeypatch):
-    space = await server.spaces.create("draft")
-    seen = []
-
-    async def suggest(selected):
-        seen.append(selected.id)
-        return server.sandbox.Launch(title="draft sandbox")
-
-    monkeypatch.setattr(server.sandbox, "suggest", suggest)
-    async with client() as c:
-        response = await c.get(
-            "/api/sandboxes/suggestion", params={"space_id": space.id}
-        )
-
-    assert response.status_code == 200
-    assert response.json()["title"] == "draft sandbox"
-    assert seen == [space.id]
-    assert await chats.list_all() == []
-
-
-async def test_archived_chat_rejects_manual_sandbox(monkeypatch):
-    chat = await chats.create(None, "archived", user_id="user_test")
-    await chats.set_archived(chat.id, True)
-    created = []
-
-    async def create(*args):
-        created.append(args)
-
-    monkeypatch.setattr(server.sandbox, "create", create)
-    async with client() as c:
-        response = await c.post(
-            f"/api/chats/{chat.id}/sandboxes",
-            json={},
-            headers={"origin": "http://test"},
-        )
-
-    assert response.status_code == 409
-    assert response.json() == {
-        "detail": "chat is archived; unarchive it before creating a sandbox"
-    }
-    assert created == []
-
-
 async def test_hub_lands_inbound_in_one_chat(monkeypatch):
     async def classify(prompt, metadata, candidates):
         return candidates[0]
@@ -1105,7 +1095,7 @@ async def test_hub_lands_inbound_in_one_chat(monkeypatch):
         delivered.append((chat_id, event.type))
         return []
 
-    monkeypatch.setattr(server.durable, "start_turn", start_turn)
+    monkeypatch.setattr(server.supervisor, "start_turn", start_turn)
     monkeypatch.setattr(server.classifier, "classify", classify)
     monkeypatch.setattr(server, "_emit", emit)
 
@@ -1135,8 +1125,8 @@ async def test_hub_lands_inbound_in_one_chat(monkeypatch):
     assert len(stored) == 2
     assert delivered == [
         (chat.id, channels.protocol.MESSAGE_RECEIVED),
-        (chat.id, channels.protocol.SPACE_ASSIGNING),
-        (chat.id, channels.protocol.SPACE_ASSIGNED),
+        (chat.id, channels.protocol.AGENT_ASSIGNING),
+        (chat.id, channels.protocol.AGENT_ASSIGNED),
         (chat.id, channels.protocol.MESSAGE_RECEIVED),
     ]
     assert started == [
@@ -1179,16 +1169,16 @@ async def test_slack_threads_are_scoped_by_workspace(monkeypatch):
     assert len(runs) == 2
 
 
-async def test_slack_legacy_binding_accepts_allowed_participant(monkeypatch):
+async def test_slack_binding_accepts_allowed_participant(monkeypatch):
     async def classify(_prompt, _metadata, candidates):
         return candidates[0]
 
     monkeypatch.setattr(server.classifier, "classify", classify)
-    legacy, _ = await chats.claim(
-        "slack:C1:1.0",
+    first, _ = await chats.claim(
+        "slack:T1:C1:1.0",
         "slack",
         None,
-        "legacy",
+        "first",
         {"team_id": "T1", "user_id": "U1"},
     )
 
@@ -1211,10 +1201,10 @@ async def test_slack_legacy_binding_accepts_allowed_participant(monkeypatch):
         ),
     )
 
-    assert (await chats.get(legacy.id)).user_id is None
-    assert len(await events.read(legacy.id, "messages")) == 1
-    assert runs == [legacy.id]
-    [binding] = await chats.bindings(legacy.id)
+    assert (await chats.get(first.id)).user_id is None
+    assert len(await events.read(first.id, "messages")) == 1
+    assert runs == [first.id]
+    [binding] = await chats.bindings(first.id)
     assert binding.token == "slack:T1:C1:1.0"
 
 
@@ -1357,7 +1347,7 @@ async def test_linked_message_syncs_to_other_channel_and_ui(monkeypatch):
         return {"id": "user_2", "name": "John Business", "email": "test@vercel.com"}
 
     async def run(_chat_id):
-        raise AssertionError("an unaddressed follow-up must not invoke the dispatcher")
+        raise AssertionError("an unaddressed follow-up must not invoke the thread")
 
     monkeypatch.setattr(server.connections.auth_store, "slack_user", slack_user)
     monkeypatch.setattr(server.connections.auth_store, "get_user", get_user)
@@ -1367,8 +1357,8 @@ async def test_linked_message_syncs_to_other_channel_and_ui(monkeypatch):
     monkeypatch.setitem(server.bot.channels, "slack", slack_channel)
     monkeypatch.setitem(server.bot.channels, "github", github_channel)
 
-    space = await server.spaces.default()
-    chat = await chats.create(space.id, "shared", user_id="user_1")
+    agent = await server.agents.default()
+    chat = await chats.create(agent.id, "shared", user_id="user_1")
     await chats.bind(
         "slack:T1:C1:1.0",
         chat.id,
@@ -1455,12 +1445,12 @@ async def test_hub_can_store_without_invoking_then_wake_without_persisting(monke
 
 
 async def test_ambiguous_repo_classifies_then_runs_original_request(monkeypatch):
-    first = await server.spaces.create("docs")
+    first = await server.agents.create("docs")
     first.repos = ["vercel/repo"]
-    await server.spaces.save(first)
-    second = await server.spaces.create("release")
+    await server.agents.save(first)
+    second = await server.agents.create("release")
     second.repos = ["vercel/repo"]
-    await server.spaces.save(second)
+    await server.agents.save(second)
     emitted = []
     runs = []
     classified = []
@@ -1470,7 +1460,7 @@ async def test_ambiguous_repo_classifies_then_runs_original_request(monkeypatch)
         return []
 
     async def classify(prompt, metadata, candidates):
-        classified.append((prompt, metadata, [space.id for space in candidates]))
+        classified.append((prompt, metadata, [agent.id for agent in candidates]))
         return second
 
     async def run(chat_id, actor_user_id=None):
@@ -1490,7 +1480,7 @@ async def test_ambiguous_repo_classifies_then_runs_original_request(monkeypatch)
     )
 
     [chat] = await chats.list_all()
-    assert chat.space_id == second.id
+    assert chat.agent_id == second.id
     assert classified == [
         (
             "fix the docs",
@@ -1509,33 +1499,33 @@ async def test_ambiguous_repo_classifies_then_runs_original_request(monkeypatch)
     ]
     assert [event.type for _, event in emitted] == [
         channels.protocol.MESSAGE_RECEIVED,
-        channels.protocol.SPACE_ASSIGNING,
-        channels.protocol.SPACE_ASSIGNED,
+        channels.protocol.AGENT_ASSIGNING,
+        channels.protocol.AGENT_ASSIGNED,
     ]
-    assert emitted[-1][1].data["space"]["name"] == "release"
+    assert emitted[-1][1].data["agent"]["name"] == "release"
     assert len(await events.read(chat.id, "messages")) == 1
     assert runs == [chat.id]
 
 
-async def test_inbound_turn_starts_rotor_dispatcher(monkeypatch):
+async def test_inbound_turn_starts_rotor_thread(monkeypatch):
     started = []
 
     async def start_turn(chat_id, origin, task_id=None, actor_user_id=None):
         started.append((chat_id, origin, task_id))
         return "run_1"
 
-    monkeypatch.setattr(server.durable, "start_turn", start_turn)
+    monkeypatch.setattr(server.supervisor, "start_turn", start_turn)
     await server._run_inbound_turn("chat_x")
 
     assert started == [("chat_x", "channel", None)]
 
 
-async def test_inbound_turn_surfaces_dispatcher_start_failure(monkeypatch):
+async def test_inbound_turn_surfaces_thread_start_failure(monkeypatch):
     async def start_turn(chat_id, origin, task_id=None, actor_user_id=None):
-        raise RuntimeError("dispatcher unavailable")
+        raise RuntimeError("thread unavailable")
 
-    monkeypatch.setattr(server.durable, "start_turn", start_turn)
-    with pytest.raises(RuntimeError, match="dispatcher unavailable"):
+    monkeypatch.setattr(server.supervisor, "start_turn", start_turn)
+    with pytest.raises(RuntimeError, match="thread unavailable"):
         await server._run_inbound_turn("chat_x")
 
 
@@ -1545,7 +1535,7 @@ async def test_hub_dedupe_is_durable():
     assert await hub.dedupe("slack:ev1") is False
 
 
-async def test_slack_webhook_starts_durable_dispatcher_turn(monkeypatch):
+async def test_slack_webhook_starts_agent_thread_turn(monkeypatch):
     slack_channel = server.bot.channels["slack"]
     delivered = []
     started = []
@@ -1564,7 +1554,7 @@ async def test_slack_webhook_starts_durable_dispatcher_turn(monkeypatch):
         delivered.append((event, state))
 
     monkeypatch.setattr(server.slack.connect, "verify_connect_webhook", verify)
-    monkeypatch.setattr(server.durable, "start_turn", start_turn)
+    monkeypatch.setattr(server.supervisor, "start_turn", start_turn)
     monkeypatch.setattr(server.classifier, "classify", classify)
     monkeypatch.setattr(slack_channel, "on_event", on_event)
 
@@ -1601,14 +1591,14 @@ async def test_slack_webhook_starts_durable_dispatcher_turn(monkeypatch):
     assert {span.trace_id for span in unified} == {root.trace_id}
     assert started == [(chat.id, "channel", None)]
     assert [event.type for event, _ in delivered] == [
-        channels.protocol.SPACE_ASSIGNING,
-        channels.protocol.SPACE_ASSIGNED,
+        channels.protocol.AGENT_ASSIGNING,
+        channels.protocol.AGENT_ASSIGNED,
     ]
 
 
 async def test_resume_chat_stream_is_idle_without_active_turn():
-    space = await server.spaces.default()
-    chat = await chats.create(space.id, "idle")
+    agent = await server.agents.default()
+    chat = await chats.create(agent.id, "idle")
 
     async with client() as c:
         response = await c.get(f"/api/chat/{chat.id}/stream")
@@ -1617,8 +1607,8 @@ async def test_resume_chat_stream_is_idle_without_active_turn():
 
 
 async def test_resume_chat_stream_uses_registered_process(monkeypatch):
-    space = await server.spaces.default()
-    chat = await chats.create(space.id, "active")
+    agent = await server.agents.default()
+    chat = await chats.create(agent.id, "active")
     await events.append(
         chat.id,
         "turns",
@@ -1641,7 +1631,7 @@ async def test_resume_chat_stream_uses_registered_process(monkeypatch):
         seen.append((process_id, turn_id))
         yield "data: [DONE]\n\n"
 
-    monkeypatch.setattr(server.durable, "active_turn", active_turn)
+    monkeypatch.setattr(server.supervisor, "active_turn", active_turn)
     monkeypatch.setattr(server.agent_stream, "to_sse", to_sse)
     async with client() as c:
         response = await c.get(f"/api/chat/{chat.id}/stream")
@@ -1651,15 +1641,15 @@ async def test_resume_chat_stream_uses_registered_process(monkeypatch):
     assert seen == [("process_1", "turn_1")]
 
 
-async def test_first_ui_prompt_classifies_before_dispatcher(monkeypatch):
-    docs = await server.spaces.create("docs")
+async def test_first_ui_prompt_classifies_before_thread(monkeypatch):
+    docs = await server.agents.create("docs")
     docs.repos = ["vercel/docs"]
-    await server.spaces.save(docs)
+    await server.agents.save(docs)
     chat = await chats.create(None, "new chat")
     seen = {}
 
     async def classify(prompt, metadata, candidates):
-        seen["classification"] = (prompt, metadata, [space.id for space in candidates])
+        seen["classification"] = (prompt, metadata, [agent.id for agent in candidates])
         return docs
 
     async def start_turn(
@@ -1675,7 +1665,7 @@ async def test_first_ui_prompt_classifies_before_dispatcher(monkeypatch):
         yield 'data: {"type":"finish"}\n\n'
 
     monkeypatch.setattr(server.classifier, "classify", classify)
-    monkeypatch.setattr(server.durable, "start_turn", start_turn)
+    monkeypatch.setattr(server.supervisor, "start_turn", start_turn)
     monkeypatch.setattr(server.agent_stream, "to_sse", durable_sse)
     ui = ai.ui.ai_sdk.to_ui_messages([ai.user_message("fix the docs")])
     async with client() as c:
@@ -1693,7 +1683,7 @@ async def test_first_ui_prompt_classifies_before_dispatcher(monkeypatch):
         {"origin": "ui", "author": "current user"},
         [docs.id],
     )
-    assert (await chats.get(chat.id)).space_id == docs.id
+    assert (await chats.get(chat.id)).agent_id == docs.id
     assert seen["started"][:3] == (chat.id, "ui", None)
     assert seen["started"][3].startswith("turn_")
     assert seen["started"][4] == "user_test"
@@ -1735,14 +1725,14 @@ async def test_ui_turn_is_mirrored_to_bound_channel(monkeypatch):
     async def durable_sse(_run_id, _turn_id):
         yield 'data: {"type":"finish"}\n\n'
 
-    monkeypatch.setattr(server.durable, "start_turn", start_turn)
+    monkeypatch.setattr(server.supervisor, "start_turn", start_turn)
     monkeypatch.setattr(server.agent_stream, "to_sse", durable_sse)
     try:
-        space = await server.spaces.default()
+        agent = await server.agents.default()
         chat, _ = await chats.claim(
             "fake:thread",
             "fake",
-            space.id,
+            agent.id,
             "thread",
             {"thread": "1"},
             user_id="user_creator",
@@ -1811,8 +1801,8 @@ def test_spawn_uses_wait_until_on_vercel(monkeypatch):
 
 
 async def test_sandbox_routes_use_chat_scoped_control_plane(monkeypatch):
-    space = await server.spaces.default()
-    chat = await chats.create(space.id, "task")
+    agent = await server.agents.default()
+    chat = await chats.create(agent.id, "task")
     seen = {}
 
     class Record:
@@ -1832,10 +1822,6 @@ async def test_sandbox_routes_use_chat_scoped_control_plane(monkeypatch):
         seen["listed"] = chat_id
         return [Record()]
 
-    async def create(chat_id, launch, actor_user_id=None):
-        seen["created"] = (chat_id, launch, actor_user_id)
-        return Record()
-
     async def is_live(name):
         seen["liveness"] = name
         return True
@@ -1853,58 +1839,26 @@ async def test_sandbox_routes_use_chat_scoped_control_plane(monkeypatch):
     )
     await server.worker.store.save_task(task)
     monkeypatch.setattr(server.sandbox, "list_all", list_all)
-    monkeypatch.setattr(server.sandbox, "create", create)
     monkeypatch.setattr(server.worker.sandbox, "is_live", is_live)
 
     async with client() as c:
         listed = await c.get(f"/api/chats/{chat.id}/sandboxes")
-        created = await c.post(
-            f"/api/chats/{chat.id}/sandboxes",
-            json={
-                "title": "sandbox",
-                "repos": [],
-                "setup_script": None,
-                "ports": [],
-                "branch": None,
-                "git_sha": None,
-            },
-        )
-        invalid_size = await c.post(
-            f"/api/chats/{chat.id}/sandboxes",
-            json={
-                "title": "sandbox",
-                "repos": [],
-                "setup_script": None,
-                "ports": [],
-                "branch": None,
-                "git_sha": None,
-                "size": "medium",
-            },
-        )
-        old = await c.get(f"/api/chats/{chat.id}/devboxes")
 
     assert listed.status_code == 200
-    assert created.status_code == 200
-    assert invalid_size.status_code == 422
     assert listed.json()[0]["id"] == "wrk_1"
     assert listed.json()[0]["status"] == "running"
     assert listed.json()[0]["live"] is True
     assert listed.json()[0]["subagents"][0]["task_id"] == "task_1"
     assert listed.json()[0]["subagents"][0]["fx_session_id"] == "fx_1"
-    assert created.json()["id"] == "wrk_1"
     assert seen["listed"] == chat.id
     assert seen["liveness"] == "hatchery-wrk_1"
-    assert seen["created"][0] == chat.id
-    assert seen["created"][1].size == "small"
-    assert seen["created"][2] == "user_test"
-    assert old.status_code == 404
 
 
-async def test_worker_completion_wakes_dispatcher_with_hidden_persisted_result(
+async def test_worker_completion_wakes_thread_with_hidden_persisted_result(
     monkeypatch,
 ):
-    space = await server.spaces.default()
-    chat = await chats.create(space.id, "task")
+    agent = await server.agents.default()
+    chat = await chats.create(agent.id, "task")
     task = server.worker.Task(
         id="task_1",
         chat_id=chat.id,
@@ -1932,7 +1886,7 @@ async def test_worker_completion_wakes_dispatcher_with_hidden_persisted_result(
             turn_id, "process_1", origin, task_id, 0, actor_user_id
         )
 
-    monkeypatch.setattr(server.durable, "start_turn", start_turn)
+    monkeypatch.setattr(server.supervisor, "start_turn", start_turn)
     await server.complete_worker_task(task)
     await server.complete_worker_task(task)
 
@@ -1957,13 +1911,13 @@ async def test_worker_completion_wakes_dispatcher_with_hidden_persisted_result(
     assert current.completion_delivered is False
 
     async with client() as c:
-        visible = (await c.get(f"/api/chats/{chat.id}/messages")).json()
+        visible = (await c.get(f"/api/chats/{chat.id}/transcript")).json()
     assert visible == []
 
 
 async def test_worker_completion_reuses_stable_rotor_turn_id(monkeypatch):
-    space = await server.spaces.default()
-    chat = await chats.create(space.id, "task")
+    agent = await server.agents.default()
+    chat = await chats.create(agent.id, "task")
     task = server.worker.Task(
         id="task_1",
         chat_id=chat.id,
@@ -1985,7 +1939,7 @@ async def test_worker_completion_reuses_stable_rotor_turn_id(monkeypatch):
         starts.append((args, kwargs))
         return "process_1"
 
-    monkeypatch.setattr(server.durable, "start_turn", start_turn)
+    monkeypatch.setattr(server.supervisor, "start_turn", start_turn)
     await server.complete_worker_task(task)
     await server.complete_worker_task(task)
 
@@ -2082,6 +2036,23 @@ async def test_task_readiness_requires_actual_daemon_session(monkeypatch):
     assert readiness["session_ready"] is True
 
 
+async def _save_worker(worker_id: str, chat_id: str) -> None:
+    await server.worker.store.save(
+        server.worker.Worker(
+            id=worker_id,
+            chat_id=chat_id,
+            sandbox_name=f"hatchery-{worker_id}",
+            command_topic=f"hatchery-worker-{worker_id}-commands-v1",
+            title="worker",
+            status="running",
+            spec=server.worker.WorkerSpec(),
+            daemon_token="token",
+            created_at="2026-08-31T00:00:00+00:00",
+            updated_at="2026-08-31T00:00:00+00:00",
+        )
+    )
+
+
 async def test_worker_event_continues_and_closes_agent_run(monkeypatch):
     seen = []
 
@@ -2104,6 +2075,7 @@ async def test_worker_event_continues_and_closes_agent_run(monkeypatch):
         updated_at="2026-08-31T00:00:00+00:00",
     )
     await server.worker.store.save_task(task)
+    await _save_worker(task.worker_id, task.chat_id)
 
     async def complete(task):
         pass
@@ -2231,6 +2203,7 @@ async def test_worker_event_pushes_late_transcript_without_extending_run(monkeyp
         updated_at="2026-08-31T00:00:03+00:00",
     )
     await server.worker.store.save_task(task)
+    await _save_worker(task.worker_id, task.chat_id)
     try:
         await server.worker_event(
             server.worker_protocol.Event(
@@ -2267,6 +2240,8 @@ async def test_worker_event_rejects_event_from_another_worker(monkeypatch):
         updated_at="2026-09-14T00:00:00+00:00",
     )
     await server.worker.store.save_task(task)
+    await _save_worker("wrk_1", task.chat_id)
+    await _save_worker("wrk_2", "chat_2")
 
     async def ingest(event):
         raise AssertionError("wrong-worker event reached ingestion")
@@ -2286,6 +2261,43 @@ async def test_worker_event_rejects_event_from_another_worker(monkeypatch):
     )
 
     assert await server.worker.store.get_task(task.id) == task
+
+
+async def test_worker_event_rejects_old_daemon_whose_worker_is_unknown(monkeypatch):
+    # A sandbox started before the cutover: its task row is still in the shared
+    # task table, but its worker record is not in the new worker table.
+    task = server.worker.Task(
+        id="task_old",
+        chat_id="chat_old",
+        worker_id="wrk_old",
+        title="fix",
+        prompt="fix it",
+        model="openai/test",
+        created_at="2026-09-14T00:00:00+00:00",
+        updated_at="2026-09-14T00:00:00+00:00",
+    )
+    await server.worker.store.save_task(task)
+    started = []
+
+    async def start_turn(*args, **kwargs):
+        started.append((args, kwargs))
+
+    monkeypatch.setattr(server.supervisor, "start_turn", start_turn)
+
+    await server.worker_event(
+        server.worker_protocol.Event(
+            id="evt_old",
+            worker_id=task.worker_id,
+            task_id=task.id,
+            sequence=0,
+            type="task.completed",
+            created_at="2026-09-14T00:00:01+00:00",
+            payload={"summary": "done"},
+        )
+    )
+
+    assert await server.worker.store.get_task(task.id) == task
+    assert started == []
 
 
 def test_worker_event_subscriber_is_serialized():
@@ -2645,8 +2657,8 @@ async def test_explicit_rotor_activation_requires_release_secret(monkeypatch):
 
 
 async def test_ui_retry_reuses_turn_identity(monkeypatch):
-    space = await server.spaces.default()
-    chat = await chats.create(space.id, "retry")
+    agent = await server.agents.default()
+    chat = await chats.create(agent.id, "retry")
     ui = ai.ui.ai_sdk.to_ui_messages([ai.user_message("once")])
     turns = []
 
@@ -2659,7 +2671,7 @@ async def test_ui_retry_reuses_turn_identity(monkeypatch):
     async def to_sse(_process_id, _turn_id):
         yield "data: [DONE]\n\n"
 
-    monkeypatch.setattr(server.durable, "start_turn", start_turn)
+    monkeypatch.setattr(server.supervisor, "start_turn", start_turn)
     monkeypatch.setattr(server.agent_stream, "to_sse", to_sse)
     payload = {
         "chat_id": chat.id,
@@ -2671,3 +2683,116 @@ async def test_ui_retry_reuses_turn_identity(monkeypatch):
 
     assert len(turns) == 2
     assert turns[0] == turns[1]
+
+
+async def test_repository_and_thread_files_read_git_and_the_live_sandbox(run, repo):
+    """Ported from agentmesh test_gateway repository and sandbox filesystem tests."""
+    from hatchery.agent import tools
+    from tests.agent import conftest
+
+    call = ai.testing.tool_call
+    script = [
+        ai.user_message("Refine your persona"),
+        ai.assistant_message(
+            "Updating AGENTS.md.",
+            call(tools.bash, command="edit-agents", description="edit persona"),
+            call(tools.idle, note="persona refined"),
+        ),
+    ]
+    commands = {"edit-agents": conftest.edit("self/AGENTS.md", "Be brief.\n")}
+    async with run(script, commands=commands) as app:
+        chat_id = await app.chat("Refine your persona")
+        details = await app.details(chat_id)
+        app.sandbox(details).inspection_files["repos/acme/untracked.log"] = b"not in Git\n"
+        async with client() as c:
+            main = await c.get("/api/repository")
+            persona = await c.get(
+                "/api/repository", params={"path": "agents/hatchery/AGENTS.md"}
+            )
+            edits = await c.get(
+                "/api/repository",
+                params={"chat_id": chat_id, "revision": details["checkpoint_sha"]},
+            )
+            diff = await c.get(
+                "/api/repository",
+                params={"chat_id": chat_id, "path": "agents/hatchery/AGENTS.md"},
+            )
+            proposal = await c.get(
+                "/api/repository",
+                params={"chat_id": chat_id, "proposal": details["proposals"][0]["branch"]},
+            )
+            rejected = [
+                await c.get("/api/repository", params=params)
+                for params in (
+                    {"proposal": "main"},
+                    {"comparison": "latest"},
+                    {"comparison": "unknown"},
+                    {"path": "../.env.local"},
+                    {"chat_id": chat_id, "proposal": "consolidations/x/wiki/" + "0" * 64},
+                )
+            ]
+            unknown_chat = await c.get("/api/repository", params={"chat_id": "chat_missing"})
+            root = await c.get(f"/api/chats/{chat_id}/thread/filesystem")
+            untracked = await c.get(
+                f"/api/chats/{chat_id}/thread/filesystem/file",
+                params={"path": "repos/acme/untracked.log"},
+            )
+            escape = await c.get(
+                f"/api/chats/{chat_id}/thread/filesystem/file",
+                params={"path": "../etc/passwd"},
+            )
+            tree = await c.get("/api/agents/hatchery/threads")
+            detail = await c.get(f"/api/chats/{chat_id}/thread")
+            transcript = await c.get(f"/api/chats/{chat_id}/transcript")
+
+    assert main.status_code == 200
+    assert "agents/hatchery/AGENTS.md" in [f["path"] for f in main.json()["files"]]
+    assert main.json()["local_review"] is True
+    # Ordinary workspace edits auto-merge at idle.
+    assert persona.json()["after"]["text"] == "Be brief.\n"
+    assert [(c["path"], c["status"]) for c in edits.json()["changes"]] == [
+        ("agents/hatchery/AGENTS.md", "modified")
+    ]
+    assert diff.json()["before"]["text"] == "Be precise and preserve memory.\n"
+    assert "+Be brief." in diff.json()["diff"]
+    assert proposal.status_code == 200 and proposal.json()["merged"] is True
+    assert [r.status_code for r in rejected] == [422, 422, 422, 422, 404]
+    assert unknown_chat.status_code == 404
+    assert {e["name"] for e in root.json()["entries"]} >= {"repos", "self"}
+    assert untracked.json()["text"] == "not in Git\n"
+    assert untracked.json()["notice"] is None
+    assert escape.status_code == 422
+    listed = tree.json()
+    assert listed["local_review"] is True
+    assert listed["threads"][0]["activity"]["phase"] == "idle"
+    assert listed["threads"][0]["proposals"][0]["merged"] is True
+    assert detail.json()["activity"]["mailbox_depth"] == 0
+    # The console transcript keeps each step as its own message with its stored time.
+    roles = [m["role"] for m in transcript.json()]
+    assert roles[:3] == ["user", "assistant", "tool"]
+    assistant = transcript.json()[1]
+    assert isinstance(assistant["timestamp"], float) and assistant["turn"] == 1
+    assert [p["kind"] for p in assistant["parts"]] == ["text", "tool_call", "tool_call"]
+    assert "provider_metadata" not in assistant
+
+
+# Operator API (ported from agentmesh tests/integration/test_gateway.py).
+
+
+async def test_grant_is_durable_and_deduplicated(run):
+    body = {"amount": 377, "request_id": "extra-allowance-9"}
+    async with run() as app:
+        async with client() as c:
+            assert (await c.post("/api/agents/hatchery/grants", json=body)).status_code == 202
+            assert (await c.post("/api/agents/hatchery/grants", json=body)).status_code == 202
+            await app.rt.drain()
+            assert (await c.post("/api/agents/hatchery/grants", json=body)).status_code == 202
+            await app.rt.drain()
+            budget = (await c.get("/api/agents/hatchery/threads")).json()["budget"]
+            invalid = await c.post(
+                "/api/agents/hatchery/grants", json={"amount": 0, "request_id": "b"}
+            )
+
+    assert budget["granted"] == 377
+    assert budget["limit"] == 1000 + 377
+    assert invalid.status_code == 422

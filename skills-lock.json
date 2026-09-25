@@ -7,11 +7,29 @@
       "skillPath": "skills/ai/SKILL.md",
       "computedHash": "a77a7d7af28717e2d2f00a9987f1ad66523d9cd939f90163493cfd6bedc2fc6f"
     },
+    "auth": {
+      "source": "vercel/vercel-plugin",
+      "sourceType": "github",
+      "skillPath": "skills/auth/SKILL.md",
+      "computedHash": "14baec195a6ad88aff5fc192d491d62a0607690a5f6ad64df2fbd153f911388a"
+    },
     "cdn-caching": {
       "source": "vercel/vercel-plugin",
       "sourceType": "github",
       "skillPath": "skills/cdn-caching/SKILL.md",
       "computedHash": "a60689f16a714b75d6695e5fe4c721f89e2eeb47256682ee67fa63b9884b4b2b"
+    },
+    "create-a-backend": {
+      "source": "vercel/vercel-plugin",
+      "sourceType": "github",
+      "skillPath": "skills/create-a-backend/SKILL.md",
+      "computedHash": "bd46faf739d7f3253b040ad7df676f351d4ac1b3295bddf824d97ce91446c3f3"
+    },
+    "marketplace": {
+      "source": "vercel/vercel-plugin",
+      "sourceType": "github",
+      "skillPath": "skills/marketplace/SKILL.md",
+      "computedHash": "06545fe3c7d80767aeb191f5f37dbe20d2f6d6c5e730f514d86ce22e8564c87f"
     },
     "neon": {
       "source": "neondatabase/agent-skills",
@@ -25,11 +43,29 @@
       "skillPath": "skills/neon-postgres/SKILL.md",
       "computedHash": "9386efb7f97bd96f01d0c84f467e8e6e41be54f73cc1ece9c92f4f1dbd76f10f"
     },
+    "queues": {
+      "source": "vercel/vercel-plugin",
+      "sourceType": "github",
+      "skillPath": "skills/queues/SKILL.md",
+      "computedHash": "792e9642d53f3800ef31356e93ab4a14ccb5284c92b0d893b0fe65fe688110d4"
+    },
     "shadcn": {
       "source": "vercel/vercel-plugin",
       "sourceType": "github",
       "skillPath": "skills/shadcn/SKILL.md",
       "computedHash": "540c21ccbc3f47aeab596b7d8cb26c00ab19581bd00da7d5865b1036a544cfce"
+    },
+    "vercel-cli": {
+      "source": "vercel/vercel-plugin",
+      "sourceType": "github",
+      "skillPath": "skills/vercel-cli/SKILL.md",
+      "computedHash": "af9674acc5f91625e5fd64a40e08c1df963f0df36bb1af4c1a0e702d5bb9d0ce"
+    },
+    "vercel-connect": {
+      "source": "vercel/vercel-plugin",
+      "sourceType": "github",
+      "skillPath": "skills/vercel-connect/SKILL.md",
+      "computedHash": "ee60766461feb8ee579f07e10cc2490696faa05a3dbe9ca15b9459324e468f73"
     },
     "vercel-services": {
       "source": "vercel/vercel-plugin",

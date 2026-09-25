@@ -13,9 +13,9 @@ from hatchery import models
 from hatchery import store
 
 _SCHEMA = """\
-CREATE TABLE IF NOT EXISTS hatchery_jobs (
+CREATE TABLE IF NOT EXISTS hatchery_jobs_v2 (
     id                  TEXT PRIMARY KEY,
-    space_id            TEXT NOT NULL,
+    agent_id            TEXT NOT NULL,
     owner_id            TEXT NOT NULL,
     author_display_name TEXT,
     schedule            TEXT NOT NULL,
@@ -24,10 +24,9 @@ CREATE TABLE IF NOT EXISTS hatchery_jobs (
     next_run_at         TIMESTAMPTZ NOT NULL,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-ALTER TABLE hatchery_jobs ADD COLUMN IF NOT EXISTS author_display_name TEXT;
-CREATE INDEX IF NOT EXISTS hatchery_jobs_due ON hatchery_jobs (next_run_at) WHERE NOT paused;
+CREATE INDEX IF NOT EXISTS hatchery_jobs_v2_due ON hatchery_jobs_v2 (next_run_at) WHERE NOT paused;
 
-CREATE TABLE IF NOT EXISTS hatchery_job_executions (
+CREATE TABLE IF NOT EXISTS hatchery_job_executions_v2 (
     job_id              TEXT NOT NULL,
     scheduled_for       TIMESTAMPTZ NOT NULL,
     chat_id             TEXT NOT NULL UNIQUE,
@@ -40,9 +39,6 @@ CREATE TABLE IF NOT EXISTS hatchery_job_executions (
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (job_id, scheduled_for)
 );
-ALTER TABLE hatchery_job_executions ADD COLUMN IF NOT EXISTS author_display_name TEXT;
-ALTER TABLE hatchery_job_executions ADD COLUMN IF NOT EXISTS lease_token TEXT;
-ALTER TABLE hatchery_job_executions ADD COLUMN IF NOT EXISTS lease_until TIMESTAMPTZ;
 """
 
 _RETENTION = datetime.timedelta(days=30)
@@ -90,7 +86,7 @@ async def ensure_ready() -> None:
 
 
 async def create(
-    space_id: str,
+    agent_id: str,
     owner_id: str,
     schedule: str,
     prompt: str,
@@ -99,7 +95,7 @@ async def create(
     now = datetime.datetime.now(datetime.UTC)
     job = models.Job(
         id=f"job_{uuid.uuid4().hex[:12]}",
-        space_id=space_id,
+        agent_id=agent_id,
         owner_id=owner_id,
         author_display_name=author_display_name,
         schedule=validate_schedule(schedule),
@@ -112,10 +108,10 @@ async def create(
         from hatchery.store import db
 
         await (await db.pool()).execute(
-            "INSERT INTO hatchery_jobs "
-            "(id, space_id, owner_id, author_display_name, schedule, prompt, paused, next_run_at, created_at) "
+            "INSERT INTO hatchery_jobs_v2 "
+            "(id, agent_id, owner_id, author_display_name, schedule, prompt, paused, next_run_at, created_at) "
             "VALUES ($1, $2, $3, $4, $5, $6, FALSE, $7, $8)",
-            job.id, job.space_id, job.owner_id, job.author_display_name, job.schedule, job.prompt,
+            job.id, job.agent_id, job.owner_id, job.author_display_name, job.schedule, job.prompt,
             datetime.datetime.fromisoformat(job.next_run_at), datetime.datetime.fromisoformat(job.created_at),
         )
     else:
@@ -128,69 +124,69 @@ async def get(job_id: str) -> models.Job | None:
     if store.use_postgres():
         from hatchery.store import db
 
-        row = await (await db.pool()).fetchrow("SELECT * FROM hatchery_jobs WHERE id = $1", job_id)
+        row = await (await db.pool()).fetchrow("SELECT * FROM hatchery_jobs_v2 WHERE id = $1", job_id)
         return _job(row) if row else None
     with _lock:
         return _read_job(job_id)
 
 
-async def exists_for_space(space_id: str) -> bool:
+async def exists_for_agent(agent_id: str) -> bool:
     if store.use_postgres():
         from hatchery.store import db
 
         return bool(
             await (await db.pool()).fetchval(
-                "SELECT EXISTS(SELECT 1 FROM hatchery_jobs WHERE space_id = $1)",
-                space_id,
+                "SELECT EXISTS(SELECT 1 FROM hatchery_jobs_v2 WHERE agent_id = $1)",
+                agent_id,
             )
         )
     with _lock:
         return any(
-            (job := _read_job_path(path)) is not None and job.space_id == space_id
+            (job := _read_job_path(path)) is not None and job.agent_id == agent_id
             for path in (store.data_dir() / "jobs").glob("*.json")
         )
 
 
-async def delete_for_space(space_id: str) -> None:
-    """Delete all jobs for a globally deletable space and their pending outbox rows."""
+async def delete_for_agent(agent_id: str) -> None:
+    """Delete all jobs for a globally deletable agent and their pending outbox rows."""
     if store.use_postgres():
         from hatchery.store import db
 
         pool = await db.pool()
         async with pool.acquire() as conn, conn.transaction():
             pending = await conn.fetch(
-                "DELETE FROM hatchery_job_executions e USING hatchery_jobs j "
-                "WHERE e.job_id = j.id AND j.space_id = $1 AND e.run_id IS NULL "
+                "DELETE FROM hatchery_job_executions_v2 e USING hatchery_jobs_v2 j "
+                "WHERE e.job_id = j.id AND j.agent_id = $1 AND e.run_id IS NULL "
                 "RETURNING e.chat_id",
-                space_id,
+                agent_id,
             )
             await _delete_pending_chats(conn, [row["chat_id"] for row in pending])
-            await conn.execute("DELETE FROM hatchery_jobs WHERE space_id = $1", space_id)
+            await conn.execute("DELETE FROM hatchery_jobs_v2 WHERE agent_id = $1", agent_id)
         return
     with _lock:
         job_ids = {
             job.id
             for path in (store.data_dir() / "jobs").glob("*.json")
-            if (job := _read_job_path(path)) is not None and job.space_id == space_id
+            if (job := _read_job_path(path)) is not None and job.agent_id == agent_id
         }
         for job_id in job_ids:
             _path(job_id).unlink()
             _delete_pending_executions(job_id)
 
 
-async def list_for_space(space_id: str, owner_id: str) -> list[models.Job]:
+async def list_for_agent(agent_id: str, owner_id: str) -> list[models.Job]:
     if store.use_postgres():
         from hatchery.store import db
 
         rows = await (await db.pool()).fetch(
-            "SELECT * FROM hatchery_jobs WHERE space_id = $1 AND owner_id = $2 ORDER BY created_at",
-            space_id, owner_id,
+            "SELECT * FROM hatchery_jobs_v2 WHERE agent_id = $1 AND owner_id = $2 ORDER BY created_at",
+            agent_id, owner_id,
         )
         return [_job(row) for row in rows]
     with _lock:
         found = [_read_job_path(path) for path in (store.data_dir() / "jobs").glob("*.json")]
         return sorted(
-            [job for job in found if job and job.space_id == space_id and job.owner_id == owner_id],
+            [job for job in found if job and job.agent_id == agent_id and job.owner_id == owner_id],
             key=lambda job: job.created_at,
         )
 
@@ -202,7 +198,7 @@ async def update(job_id: str, schedule: str, prompt: str) -> models.Job | None:
         from hatchery.store import db
 
         row = await (await db.pool()).fetchrow(
-            "UPDATE hatchery_jobs SET schedule = $2, prompt = $3, next_run_at = $4 "
+            "UPDATE hatchery_jobs_v2 SET schedule = $2, prompt = $3, next_run_at = $4 "
             "WHERE id = $1 RETURNING *", job_id, schedule, prompt, next_at,
         )
         return _job(row) if row else None
@@ -225,20 +221,20 @@ async def set_paused(job_id: str, paused: bool) -> models.Job | None:
         pool = await db.pool()
         async with pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
-                "UPDATE hatchery_jobs SET paused = $2, next_run_at = CASE WHEN $2 THEN next_run_at "
+                "UPDATE hatchery_jobs_v2 SET paused = $2, next_run_at = CASE WHEN $2 THEN next_run_at "
                 "ELSE $3 END WHERE id = $1 RETURNING *", job_id, paused, next_at,
             )
             job = _job(row) if row else None
             if paused:
                 pending = await conn.fetch(
-                    "DELETE FROM hatchery_job_executions WHERE job_id = $1 AND run_id IS NULL "
+                    "DELETE FROM hatchery_job_executions_v2 WHERE job_id = $1 AND run_id IS NULL "
                     "RETURNING chat_id",
                     job_id,
                 )
                 await _delete_pending_chats(conn, [row["chat_id"] for row in pending])
             elif job is not None:
                 await conn.execute(
-                    "UPDATE hatchery_jobs SET next_run_at = $2 WHERE id = $1",
+                    "UPDATE hatchery_jobs_v2 SET next_run_at = $2 WHERE id = $1",
                     job.id, next_run(job.schedule, next_at),
                 )
                 job.next_run_at = next_run(job.schedule, next_at).isoformat()
@@ -263,9 +259,9 @@ async def delete(job_id: str) -> bool:
 
         pool = await db.pool()
         async with pool.acquire() as conn, conn.transaction():
-            result = await conn.execute("DELETE FROM hatchery_jobs WHERE id = $1", job_id)
+            result = await conn.execute("DELETE FROM hatchery_jobs_v2 WHERE id = $1", job_id)
             pending = await conn.fetch(
-                "DELETE FROM hatchery_job_executions WHERE job_id = $1 AND run_id IS NULL "
+                "DELETE FROM hatchery_job_executions_v2 WHERE job_id = $1 AND run_id IS NULL "
                 "RETURNING chat_id",
                 job_id,
             )
@@ -290,7 +286,7 @@ async def claim_due(now: datetime.datetime | None = None) -> list[Execution]:
         pool = await db.pool()
         async with pool.acquire() as conn, conn.transaction():
             rows = await conn.fetch(
-                "SELECT * FROM hatchery_jobs WHERE NOT paused AND next_run_at <= $1 "
+                "SELECT * FROM hatchery_jobs_v2 WHERE NOT paused AND next_run_at <= $1 "
                 "ORDER BY next_run_at FOR UPDATE SKIP LOCKED", now,
             )
             for row in rows:
@@ -303,7 +299,7 @@ async def claim_due(now: datetime.datetime | None = None) -> list[Execution]:
                     author_display_name=job.author_display_name,
                 )
                 inserted = await conn.fetchrow(
-                    "INSERT INTO hatchery_job_executions "
+                    "INSERT INTO hatchery_job_executions_v2 "
                     "(job_id, scheduled_for, chat_id, turn_id, prompt, author_display_name) "
                     "VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING RETURNING chat_id",
                     execution.job_id, execution.scheduled_for, execution.chat_id, execution.turn_id,
@@ -311,8 +307,8 @@ async def claim_due(now: datetime.datetime | None = None) -> list[Execution]:
                 )
                 if inserted:
                     await conn.execute(
-                        "INSERT INTO hatchery_chats (id, space_id, data) VALUES ($1, $2, $3::jsonb)",
-                        chat.id, chat.space_id, chat.model_dump_json(),
+                        "INSERT INTO hatchery_chats_v2 (id, agent_id, data) VALUES ($1, $2, $3::jsonb)",
+                        chat.id, chat.agent_id, chat.model_dump_json(),
                     )
                     prompt = _prompt_message(execution)
                     await conn.execute(
@@ -327,7 +323,7 @@ async def claim_due(now: datetime.datetime | None = None) -> list[Execution]:
                     )
                     claimed.append(execution)
                 await conn.execute(
-                    "UPDATE hatchery_jobs SET next_run_at = $2 WHERE id = $1",
+                    "UPDATE hatchery_jobs_v2 SET next_run_at = $2 WHERE id = $1",
                     job.id, next_run(job.schedule, now),
                 )
         return claimed
@@ -369,15 +365,15 @@ async def lease_pending(now: datetime.datetime | None = None) -> list[Execution]
         pool = await db.pool()
         async with pool.acquire() as conn, conn.transaction():
             rows = await conn.fetch(
-                "SELECT e.* FROM hatchery_job_executions e "
-                "JOIN hatchery_jobs j ON j.id = e.job_id "
+                "SELECT e.* FROM hatchery_job_executions_v2 e "
+                "JOIN hatchery_jobs_v2 j ON j.id = e.job_id "
                 "WHERE e.run_id IS NULL AND (e.lease_until IS NULL OR e.lease_until <= $1) "
                 "ORDER BY e.created_at FOR UPDATE OF e SKIP LOCKED",
                 now,
             )
             for row in rows:
                 await conn.execute(
-                    "UPDATE hatchery_job_executions SET lease_token = $3, lease_until = $4 "
+                    "UPDATE hatchery_job_executions_v2 SET lease_token = $3, lease_until = $4 "
                     "WHERE job_id = $1 AND scheduled_for = $2",
                     row["job_id"], row["scheduled_for"], token, until,
                 )
@@ -409,7 +405,7 @@ async def mark_started(execution: Execution, run_id: str) -> bool:
         from hatchery.store import db
 
         result = await (await db.pool()).execute(
-            "UPDATE hatchery_job_executions SET run_id = $4, lease_token = NULL, lease_until = NULL "
+            "UPDATE hatchery_job_executions_v2 SET run_id = $4, lease_token = NULL, lease_until = NULL "
             "WHERE job_id = $1 AND scheduled_for = $2 AND lease_token = $3 AND run_id IS NULL",
             execution.job_id, execution.scheduled_for, execution.lease_token, run_id,
         )
@@ -436,8 +432,8 @@ async def claim_run(turn_id: str, run_id: str) -> bool:
         from hatchery.store import db
 
         row = await (await db.pool()).fetchrow(
-            "UPDATE hatchery_job_executions e SET run_id = $2, lease_token = NULL, lease_until = NULL "
-            "FROM hatchery_jobs j WHERE e.turn_id = $1 AND e.job_id = j.id "
+            "UPDATE hatchery_job_executions_v2 e SET run_id = $2, lease_token = NULL, lease_until = NULL "
+            "FROM hatchery_jobs_v2 j WHERE e.turn_id = $1 AND e.job_id = j.id "
             "AND NOT j.paused AND (e.run_id IS NULL OR e.run_id = $2) RETURNING e.run_id",
             turn_id, run_id,
         )
@@ -466,7 +462,7 @@ async def started_run(turn_id: str) -> str | None:
         from hatchery.store import db
 
         return await (await db.pool()).fetchval(
-            "SELECT run_id FROM hatchery_job_executions WHERE turn_id = $1", turn_id
+            "SELECT run_id FROM hatchery_job_executions_v2 WHERE turn_id = $1", turn_id
         )
     with _lock:
         for path in (store.data_dir() / "jobs").glob("execution-*.json"):
@@ -483,7 +479,7 @@ async def cleanup(now: datetime.datetime | None = None) -> int:
         from hatchery.store import db
 
         result = await (await db.pool()).execute(
-            "DELETE FROM hatchery_job_executions WHERE run_id IS NOT NULL AND created_at < $1",
+            "DELETE FROM hatchery_job_executions_v2 WHERE run_id IS NOT NULL AND created_at < $1",
             cutoff,
         )
         return int(result.split()[-1])
@@ -505,14 +501,14 @@ def _chat_for(job: models.Job, scheduled_for: datetime.datetime) -> models.Chat:
     title = f"scheduled run · {scheduled_for.astimezone(datetime.UTC):%Y-%m-%d %H:%M} UTC"
     return models.Chat(
         id=f"chat_{uuid.uuid4().hex[:12]}", user_id=job.owner_id,
-        author_display_name=job.author_display_name, space_id=job.space_id,
+        author_display_name=job.author_display_name, agent_id=job.agent_id,
         title=title, trigger=f"cron:{job.id}", created_at=datetime.datetime.now(datetime.UTC).isoformat(),
     )
 
 
 def _job(row) -> models.Job:
     return models.Job(
-        id=row["id"], space_id=row["space_id"], owner_id=row["owner_id"],
+        id=row["id"], agent_id=row["agent_id"], owner_id=row["owner_id"],
         author_display_name=row["author_display_name"],
         schedule=row["schedule"], prompt=row["prompt"], paused=row["paused"],
         next_run_at=row["next_run_at"].isoformat(), created_at=row["created_at"].isoformat(),
@@ -552,7 +548,7 @@ async def _delete_pending_chats(conn, chat_ids: list[str]) -> None:
         return
     await conn.execute("DELETE FROM hatchery_events WHERE stream_id = ANY($1::text[])", chat_ids)
     await conn.execute("DELETE FROM hatchery_streams WHERE stream_id = ANY($1::text[])", chat_ids)
-    await conn.execute("DELETE FROM hatchery_chats WHERE id = ANY($1::text[])", chat_ids)
+    await conn.execute("DELETE FROM hatchery_chats_v2 WHERE id = ANY($1::text[])", chat_ids)
 
 
 def _delete_pending_executions(job_id: str) -> None:

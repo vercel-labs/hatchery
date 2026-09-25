@@ -1,4 +1,4 @@
-"""Short chat locks and UI projections for Rotor dispatcher turns."""
+"""Short chat locks and UI projections for Rotor thread turns."""
 
 import asyncio
 import contextlib
