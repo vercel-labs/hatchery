@@ -2575,19 +2575,16 @@ async def test_channel_delivery_key_skips_completed_binding_on_retry():
 
 
 @pytest.mark.parametrize(
-    ("branches", "expected"),
+    ("bound_to", "expected"),
     [
-        # Neon preview branch copied from production: the copy is the preview's.
-        (("br-preview", "br-production"), [True]),
-        # Same branch Rotor was taken on: the database is shared with production.
-        (("br-production", "br-production"), []),
-        # Not Neon, or production never recorded its branch: cannot tell, keep out.
-        ((None, "br-production"), []),
-        (("br-preview", None), []),
+        # Fresh or preview-bound database: the preview takes it over.
+        ("prj_test/preview", [True]),
+        # Database bound to production: never take it.
+        ("prj_test/production", []),
     ],
 )
-async def test_preview_takes_rotor_only_from_a_database_copy(
-    monkeypatch, branches, expected
+async def test_preview_takes_rotor_only_from_a_preview_database(
+    monkeypatch, bound_to, expected
 ):
     activated = []
     store = server.rotor_runtime.worker.backends.store
@@ -2596,13 +2593,11 @@ async def test_preview_takes_rotor_only_from_a_database_copy(
         return None
 
     async def active_deployment():
-        return "dpl_production"
+        return "dpl_other"
 
-    async def bind_runtime(_namespace):
-        raise server.rotor.errors.ConfigurationError("bound to production")
-
-    async def neon_branches():
-        return branches
+    async def bind_runtime(namespace):
+        if namespace != bound_to:
+            raise server.rotor.errors.ConfigurationError("bound elsewhere")
 
     async def activate(_worker):
         activated.append(True)
@@ -2613,7 +2608,6 @@ async def test_preview_takes_rotor_only_from_a_database_copy(
     monkeypatch.setattr(store, "setup", setup)
     monkeypatch.setattr(store, "active_deployment", active_deployment)
     monkeypatch.setattr(store, "bind_runtime", bind_runtime)
-    monkeypatch.setattr(server, "_neon_branches", neon_branches)
     monkeypatch.setattr(server.rotor_runtime.platform, "activate", activate)
     request = server.fastapi.Request(
         {
