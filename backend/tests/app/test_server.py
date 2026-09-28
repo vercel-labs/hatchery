@@ -2574,15 +2574,46 @@ async def test_channel_delivery_key_skips_completed_binding_on_retry():
     assert len(await events.read(chat.id, "deliveries")) == 1
 
 
-async def test_preview_http_does_not_activate_rotor(monkeypatch):
+@pytest.mark.parametrize(
+    ("branches", "expected"),
+    [
+        # Neon preview branch copied from production: the copy is the preview's.
+        (("br-preview", "br-production"), [True]),
+        # Same branch Rotor was taken on: the database is shared with production.
+        (("br-production", "br-production"), []),
+        # Not Neon, or production never recorded its branch: cannot tell, keep out.
+        ((None, "br-production"), []),
+        (("br-preview", None), []),
+    ],
+)
+async def test_preview_takes_rotor_only_from_a_database_copy(
+    monkeypatch, branches, expected
+):
     activated = []
+    store = server.rotor_runtime.worker.backends.store
+
+    async def setup():
+        return None
+
+    async def active_deployment():
+        return "dpl_production"
+
+    async def bind_runtime(_namespace):
+        raise server.rotor.errors.ConfigurationError("bound to production")
+
+    async def neon_branches():
+        return branches
 
     async def activate(_worker):
         activated.append(True)
 
     monkeypatch.setenv("VERCEL_ENV", "preview")
     monkeypatch.setenv("VERCEL_DEPLOYMENT_ID", "dpl_preview")
-    monkeypatch.setenv("HATCHERY_PUBLIC_URL", "https://preview.example")
+    monkeypatch.setenv("VERCEL_PROJECT_ID", "prj_test")
+    monkeypatch.setattr(store, "setup", setup)
+    monkeypatch.setattr(store, "active_deployment", active_deployment)
+    monkeypatch.setattr(store, "bind_runtime", bind_runtime)
+    monkeypatch.setattr(server, "_neon_branches", neon_branches)
     monkeypatch.setattr(server.rotor_runtime.platform, "activate", activate)
     request = server.fastapi.Request(
         {
@@ -2597,7 +2628,7 @@ async def test_preview_http_does_not_activate_rotor(monkeypatch):
 
     await server._ensure_rotor_deployment(request)
 
-    assert activated == []
+    assert activated == expected
 
 
 async def test_production_canonical_request_activates_rotor(monkeypatch):

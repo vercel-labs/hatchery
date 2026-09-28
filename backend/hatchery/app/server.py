@@ -32,6 +32,7 @@ import fastapi.middleware.cors
 import fastapi.responses
 import pydantic
 import rotor
+import rotor.errors
 import rotor.stores.base
 import websockets.asyncio.client
 
@@ -54,7 +55,7 @@ from hatchery.worker import protocol as worker_protocol
 from hatchery.channels import github, slack
 from hatchery import config
 from hatchery.serve import api as serve_api, app as serve_app, host as serve_host
-from hatchery.store import agents, chats, events, jobs, turns
+from hatchery.store import agents, chats, db, events, jobs, turns
 from hatchery.workspace import browser as workspace_browser
 from hatchery.workspace import git as workspace_git
 from hatchery.workspace import review as workspace_review
@@ -341,26 +342,84 @@ def _configured_host(value: str | None) -> str | None:
     return parsed.hostname
 
 
-async def _ensure_rotor_deployment(request: fastapi.Request) -> None:
-    """Activate only the deployment reached through a promoted app URL."""
-    deployment = os.environ.get("VERCEL_DEPLOYMENT_ID")
-    if not deployment or os.environ.get("VERCEL_ENV") != "production":
+_ROTOR_BRANCH_TABLE = """
+CREATE TABLE IF NOT EXISTS hatchery_rotor_branch (
+  id INTEGER PRIMARY KEY,
+  branch_id TEXT
+)
+"""
+
+
+async def _activate_rotor() -> None:
+    """Take Rotor for this deployment and record the Neon branch it was taken on.
+
+    A Neon preview branch copies this row, so a preview can later tell a copy
+    (different branch) from a database it shares with production (same branch).
+    """
+    await rotor_runtime.platform.activate(rotor_runtime.worker)
+    if not store.use_postgres():
         return
-    allowed = {
-        host
-        for host in (
-            _configured_host(os.environ.get("HATCHERY_PUBLIC_URL")),
-            _configured_host(os.environ.get("VERCEL_PROJECT_PRODUCTION_URL")),
+    async with (await db.pool()).acquire() as conn:
+        await conn.execute(_ROTOR_BRANCH_TABLE)
+        await conn.execute(
+            "INSERT INTO hatchery_rotor_branch (id, branch_id) "
+            "VALUES (1, current_setting('neon.branch_id', true)) "
+            "ON CONFLICT (id) DO UPDATE SET branch_id = EXCLUDED.branch_id"
         )
-        if host is not None
-    }
-    if request.url.hostname not in allowed:
+
+
+async def _neon_branches() -> tuple[str | None, str | None]:
+    """This database's Neon branch, and the branch Rotor was last taken on."""
+    if not store.use_postgres():
+        return None, None
+    async with (await db.pool()).acquire() as conn:
+        await conn.execute(_ROTOR_BRANCH_TABLE)
+        current = await conn.fetchval("SELECT current_setting('neon.branch_id', true)")
+        taken = await conn.fetchval("SELECT branch_id FROM hatchery_rotor_branch WHERE id = 1")
+    return current or None, taken or None
+
+
+async def _ensure_rotor_deployment(request: fastapi.Request) -> None:
+    """Give Rotor to the deployment that should run background work.
+
+    Production takes it only through a promoted app URL, so old deployments
+    cannot take it back. A preview takes it when the database is its own: fresh,
+    held by another preview, or a Neon branch copied from production. A preview
+    never takes a database it shares with production.
+    """
+    deployment = os.environ.get("VERCEL_DEPLOYMENT_ID")
+    environment = os.environ.get("VERCEL_ENV")
+    if not deployment or environment not in ("production", "preview"):
         return
+    if environment == "production":
+        allowed = {
+            host
+            for host in (
+                _configured_host(os.environ.get("HATCHERY_PUBLIC_URL")),
+                _configured_host(os.environ.get("VERCEL_PROJECT_PRODUCTION_URL")),
+            )
+            if host is not None
+        }
+        if request.url.hostname not in allowed:
+            return
     async with _rotor_promotion_lock:
-        store = rotor_runtime.worker.backends.store
-        await store.setup()
-        if await store.active_deployment() != deployment:
-            await rotor_runtime.platform.activate(rotor_runtime.worker)
+        rotor_store = rotor_runtime.worker.backends.store
+        await rotor_store.setup()
+        if await rotor_store.active_deployment() == deployment:
+            return
+        if environment == "preview":
+            namespace = rotor_runtime.backends.runtime_namespace()
+            try:
+                await rotor_store.bind_runtime(namespace)
+            except rotor.errors.ConfigurationError:
+                current, taken = await _neon_branches()
+                if current is None or taken is None or current == taken:
+                    log.warning(
+                        "preview shares its Rotor database with another environment; "
+                        "enable Neon preview branching"
+                    )
+                    return
+        await _activate_rotor()
 
 
 @app.middleware("http")
@@ -423,7 +482,7 @@ async def activate_rotor(request: fastapi.Request) -> dict[str, bool]:
     authorization = request.headers.get("authorization", "")
     if not secret or not hmac.compare_digest(authorization, f"Bearer {secret}"):
         raise fastapi.HTTPException(401, "invalid release authorization")
-    await rotor_runtime.platform.activate(rotor_runtime.worker)
+    await _activate_rotor()
     return {"ok": True}
 
 
