@@ -1,4 +1,4 @@
-"""Local development storage: a working main and an ignored bare remote."""
+"""On-disk test storage: a working main and an ignored bare remote."""
 
 import os
 import pathlib

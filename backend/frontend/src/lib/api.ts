@@ -2,18 +2,9 @@
 
 import type { AccentColor } from "@/lib/agent-colors";
 
-// Production is same-origin. Vite development dials FastAPI directly so SSE
-// and WebSocket connections do not pass through a development proxy.
-const BACKEND_ORIGIN =
-  import.meta.env.VITE_BACKEND_ORIGIN ??
-  (import.meta.env.DEV ? "http://127.0.0.1:8000" : "");
-
-export function apiBase(): string {
-  return BACKEND_ORIGIN;
-}
-
+// The API is same-origin: FastAPI serves this app.
 export function apiFetch(path: string, init?: RequestInit): Promise<Response> {
-  return fetch(`${BACKEND_ORIGIN}${path}`, { credentials: "include", ...init });
+  return fetch(path, { credentials: "include", ...init });
 }
 
 function errorDetail(value: unknown): string | null {
@@ -68,7 +59,6 @@ export async function api<T>(
 }
 
 export function wsBase(): string {
-  if (BACKEND_ORIGIN) return BACKEND_ORIGIN.replace(/^http/, "ws");
   return (
     (window.location.protocol === "https:" ? "wss://" : "ws://") +
     window.location.host

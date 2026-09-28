@@ -76,9 +76,9 @@ def test_github_environment_is_ignored_for_a_local_remote(
 def test_storage_remote_comes_from_the_environment(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("HATCHERY_STORAGE_REPO", "vercel-internal-playground/hatchery-storage")
+    monkeypatch.setenv("HATCHERY_STORAGE_REPO", "acme/agent-storage")
     assert workspace_connect.storage_remote() == (
-        "https://github.com/vercel-internal-playground/hatchery-storage.git"
+        "https://github.com/acme/agent-storage.git"
     )
 
     monkeypatch.setenv("HATCHERY_STORAGE_REPO", tmp_path.as_uri())

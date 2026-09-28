@@ -1,12 +1,5 @@
 # I don't know where to put this
 
-## From `docs/arch/sandbox.md`
-
-### Maybe bugs
-
-- With Vercel CLI 59.10.0 and `vercel-queue` 0.7.3, the local Queue broker can return a message ID from `queue.send()` while an immediate `queue.poll()` of the same fresh topic returns no messages.
-- The issue reproduces when both calls run in one process with the `VERCEL_QUEUE_BASE_URL`, `VERCEL_QUEUE_TOKEN`, and `VERCEL_REGION` supplied by `vercel dev`.
-
 ## From `agent-browser.md`
 
 # Agent Browser live dispatcher experiment
@@ -19,7 +12,7 @@ Use agent-browser against the protected live Hatchery deployment to submit one d
 
 The corrected 2026-08-31 run completed successfully with `agent-browser 0.35.2`.
 
-- Deployment: `https://hatchery-prod.playground-vercel.tools`
+- Deployment: `<production url>`
 - Marker: `ab-e2e-1788218092`
 - Chat: `chat_bf624b59f109`
 - Sandbox: `wrk_2524a9d0ab1e`
@@ -38,7 +31,7 @@ A dedicated persistent profile was created with a headed browser:
 npx --yes agent-browser \
   --headed \
   --profile ~/.agent-browser/hatchery-vercel \
-  open https://hatchery-1rx25zkvo.playground-vercel.tools
+  open <deployment url>
 ```
 
 Vercel login was completed manually. Credentials, cookies, and tokens were not passed through the agent or written to the repository.
@@ -117,7 +110,7 @@ Open one persistent shell, export the profile and generated session once, then r
 ```sh
 export AGENT_BROWSER_SESSION="$(agent-browser session id --scope worktree --prefix hatchery-dx)"
 export AGENT_BROWSER_PROFILE="$HOME/.agent-browser/hatchery-vercel"
-agent-browser open https://hatchery-prod.playground-vercel.tools
+agent-browser open <production url>
 ```
 
 Prefer semantic locators for important controls instead of carrying snapshot refs across commands:
@@ -155,7 +148,7 @@ Use browser automation against the live Vercel production deployment to submit o
 
 The run completed successfully.
 
-- Deployment: `https://hatchery-prod.playground-vercel.tools`
+- Deployment: `<production url>`
 - Deployment ID: `dpl_81UFKza7DrYYbojnTXxzYVbrDcAd`
 - Marker: `pw-e2e-1788216095110`
 - Chat: `chat_9c893c92d289`
@@ -184,7 +177,7 @@ It was not printed, placed in a URL, or written to the repository.
 
 ## Braintrust verification
 
-- Project: `braintrust-coffee-flame`
+- Project: `<braintrust project>`
 - Root trace: `d22aaf8ac10fece617a7521149481289`
 - Root span: `hatchery.turn`
 - Deployment commit: `d5e47dbfc29426524bc0ca10b7181cb9b1820bfe`
@@ -211,7 +204,6 @@ The trace contained the expected chain:
 
 ## Gaps and friction
 
-- `README.md` points toward local `vercel dev` and a public reverse proxy. That was misleading for a live-deployment browser test.
 - Live deployment authentication and the Keychain-backed automation bypass are not documented in `docs/`.
 - Playwright is not installed in the project.
 - `pnpm dlx playwright` exposes the CLI but does not make `@playwright/test` importable by a temporary script. The runner had to be installed in a temporary directory.
@@ -239,7 +231,7 @@ install uv in the sandbox
 main repo is in `/vercel/hatchery`, link it with
 
 ```bash
-vercel link --yes --project hatchery --scope vercel-internal-playground
+vercel link --yes --project hatchery --scope <team>
 ```
 
 install agent-browser for subagents to verify their work:

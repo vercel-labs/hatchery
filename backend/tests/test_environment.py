@@ -29,14 +29,14 @@ def test_from_env_builds_a_local_deployment_without_io(monkeypatch, tmp_path):
 
 
 def test_from_env_reviews_github_storage_on_github(monkeypatch):
-    monkeypatch.setenv("HATCHERY_STORAGE_REPO", "vercel-internal-playground/hatchery-storage")
+    monkeypatch.setenv("HATCHERY_STORAGE_REPO", "acme/agent-storage")
     monkeypatch.setenv("GITHUB_TOKEN", "static-token")
     sandboxes = scripted.ScriptedSandboxProvider()
 
     env = environment.Environment.from_env(sandboxes=sandboxes)
 
     assert env.workspaces.remote == (
-        "https://github.com/vercel-internal-playground/hatchery-storage.git"
+        "https://github.com/acme/agent-storage.git"
     )
     assert env.workspaces.has_credentials
     assert isinstance(env.review, review.GitHubReview)

@@ -605,17 +605,8 @@ def _daemon_env(
             env[name] = value
     if deployment := os.environ.get("VERCEL_DEPLOYMENT_ID"):
         env["HATCHERY_EVENT_DEPLOYMENT"] = deployment
-    if os.environ.get("VERCEL_QUEUE_TOKEN") == "vc-dev-token":
-        env["VERCEL_QUEUE_TOKEN"] = "vc-dev-token"
     if region and "VERCEL_REGION" not in env:
         env["VERCEL_REGION"] = region
-    if env.get("VERCEL_QUEUE_TOKEN") == "vc-dev-token":
-        public_url = os.environ.get("HATCHERY_PUBLIC_URL", "").rstrip("/")
-        if not public_url:
-            raise RuntimeError(
-                "HATCHERY_PUBLIC_URL is required to connect a sandbox to vercel dev"
-            )
-        env["VERCEL_QUEUE_BASE_URL"] = f"{public_url}/_svc/_queues"
     return env
 
 

@@ -13,7 +13,5 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: ["./vitest.setup.ts"],
     include: ["src/**/*.test.tsx"],
-    // Same-origin API paths, as in production.
-    env: { VITE_BACKEND_ORIGIN: "" },
   },
 });

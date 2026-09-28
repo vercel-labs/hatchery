@@ -1,4 +1,4 @@
-"""Seed a local workspace repository and its ignored bare remote for development."""
+"""Seed a workspace repository and its ignored bare remote on disk, for tests."""
 
 import asyncio
 import contextlib

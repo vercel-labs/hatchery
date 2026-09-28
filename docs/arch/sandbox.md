@@ -5,7 +5,7 @@
 - An idle thread's sandbox stays warm for `HATCHERY_THREAD_SANDBOX_IDLE_SECONDS`, then stops without being destroyed. It is not stopped while an fx subagent or a terminal still uses it. A lost sandbox is rebuilt from Git.
 - A thread can create extra sandboxes with the `create_sandbox` tool, for example for fx subagents that need other repositories or a bigger machine. There is no manual create flow.
 - Serving uses one more sandbox per agent, without a daemon or worker record (see `serving.md`).
-- Each sandbox has a stable Hatchery worker record stored in Postgres, or in local JSON files when `DATABASE_URL` is absent.
+- Each sandbox has a stable Hatchery worker record stored in Postgres (JSON files in tests).
 - Sandbox creation can clone a primary GitHub repository, clone additional repositories, select a branch or commit, run a setup script, expose ports, and set CPU and memory limits.
 - Hatchery stores the sandbox name, declared routes, daemon token, specification, status, and timestamps.
 - Each sandbox exposes its declared application ports through Vercel Sandbox routes.
@@ -19,7 +19,6 @@
 - Sandbox events use one shared Vercel Queue topic consumed by the backend.
 - Queue messages use stable IDs, sequence numbers, and idempotency keys because delivery is at least once.
 - Hosted Queue access uses Vercel deployment OIDC.
-- Local development exposes the `vercel dev` Queue broker through a public reverse proxy while keeping the same Queue protocol.
 - Interactive processes run in real Linux PTYs with input, output, resize, signals, exit status, bounded replay, and byte offsets for reconnects.
 - Multiple viewers can attach to the same PTY without owning or stopping its process.
 - The frontend reaches PTYs through a backend WebSocket bridge to the authenticated daemon route.

@@ -5,7 +5,7 @@ Code: `backend/hatchery/serve/`, `backend/hatchery/sdk/`, `backend/hatchery/vaul
 ## Serving
 
 - `backend/hatchery/serve/host.py` sits in front of the one FastAPI app. A request for exactly `<agent>.<HATCHERY_SERVE_DOMAIN>` goes to the agent's routes; every other host gets the normal app. Bad or nested agent hosts get 400/421. On preview deployments the `X-Hatchery-Agent` header can name the agent instead.
-- The project needs the wildcard domain `*.<HATCHERY_SERVE_DOMAIN>`. `vercel.json` already sends every path to the app.
+- The project needs the wildcard domain `*.<HATCHERY_SERVE_DOMAIN>`. The wrapper repo's `vercel.json` already sends every path to the app.
 - Routes are `agents/<id>/api/<route>/route.py` on `main`, with `GET`/`POST`/`PUT`/`PATCH`/`DELETE` functions and `[param]` or `[...rest]` path parts. Routes are found by parsing the files; user code is never imported to find them.
 - Each request reads the agent's folder at current `main` (cached 15 s) and runs in the agent's one serve sandbox, redeploying it when `main` moved. So a reviewed route goes live without a Hatchery deploy; thread branches are never served. One request runs at a time per agent (busy: 429). Handlers work in `/workspace/data`.
 - A handler can call `prompt()` (from `hatchery.sdk`) to start a normal turn of the same agent. The effect key makes retries safe.

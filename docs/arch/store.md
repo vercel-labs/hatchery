@@ -2,7 +2,7 @@
 
 Hatchery keeps two kinds of data:
 
-- **Database** (`backend/hatchery/store/`, `backend/hatchery/worker/store.py`): users, sessions, connections, agents, chats, channel bindings, event streams, prompt jobs, and sandbox records. Neon Postgres when `DATABASE_URL` is set, or JSONL/JSON files under `backend/.data` otherwise. Tests always use files.
+- **Database** (`backend/hatchery/store/`, `backend/hatchery/worker/store.py`): users, sessions, connections, agents, chats, channel bindings, event streams, prompt jobs, and sandbox records. Neon Postgres (`DATABASE_URL`). Tests use JSONL/JSON files instead.
 - **Git** (`backend/hatchery/workspace/`): each agent's files under `agents/<id>/` and the shared `wiki/` in the storage repo (`HATCHERY_STORAGE_REPO`). The canonical branch is `main`; threads work on their own branches and merge back.
 
 Rotor keeps its own state (thread tree, budgets, secrets, schedules) in the same database, in its `rotor_*` tables.

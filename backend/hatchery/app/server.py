@@ -1,12 +1,12 @@
-"""Vercel entrypoint (see [tool.vercel] in pyproject.toml).
+"""The FastAPI app, exported by the deploying wrapper repo's `app.py`.
 
 Health check, channel webhooks, and the thread chat:
 - /channels/v1/slack   needs SLACK_CONNECTOR (connect uid, e.g. "slack/hatchery")
 - /channels/v1/github  needs GITHUB_CONNECTOR + GITHUB_APP_SLUG
 - /api/chat            thread turn, AI SDK UI message stream (SSE)
 
-Application projections live in the store (Postgres via DATABASE_URL, local
-files without). Rotor checkpoints the canonical thread conversation; the
+Application projections live in the store (Postgres via DATABASE_URL; tests
+use files). Rotor checkpoints the canonical thread conversation; the
 (chat_id, "messages") stream feeds the UI and bootstraps existing chats.
 Slack/GitHub inbound lands in its chat through _StoreHub, then enters the
 chat's Rotor mailbox.
@@ -28,7 +28,6 @@ import typing
 import urllib.parse
 
 import fastapi
-import fastapi.middleware.cors
 import fastapi.responses
 import pydantic
 import rotor
@@ -411,15 +410,6 @@ async def browser_session(request: fastapi.Request, call_next):
     return await call_next(request)
 
 
-# Local development keeps streams and WebSockets direct to :8000 while Vite
-# serves the UI on :3000.
-app.add_middleware(
-    fastapi.middleware.cors.CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-    allow_credentials=True,
-)
 # Outermost: `<agent>.<HATCHERY_SERVE_DOMAIN>` goes to the agent's published routes
 # before session auth; malformed agent hosts fail closed.
 app.add_middleware(
