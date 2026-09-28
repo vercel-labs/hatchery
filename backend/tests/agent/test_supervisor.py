@@ -9,9 +9,9 @@ import ai
 import ai.testing
 import rotor
 
-from hatchery import config, messages
+from hatchery import config, environment, messages
 from hatchery.agent import supervisor, thread, tools
-from hatchery.store import chats, turns
+from hatchery.store import chats, events, turns
 from hatchery.workspace import git as workspace_git
 
 from tests.agent import conftest
@@ -229,6 +229,31 @@ async def test_delegation_depth_and_fanout_are_bounded(run: conftest.Run) -> Non
         await app.chat("Split the work")
         roster = await app.roster()
         assert len(roster["threads"]) == 2
+        assert not app.model.unused
+
+
+async def test_supervisor_whose_start_failed_fails_the_turn_then_recovers(
+    run: conftest.Run, monkeypatch
+) -> None:
+    # A deployment without its Environment: the supervisor's start fails (Rotor never
+    # redelivers `Start`) and so does the turn it was started for.
+    async with run(
+        [ai.user_message("hi"), ai.assistant_message("hello")], strict=False
+    ) as app:
+        with monkeypatch.context() as missing:
+            missing.setattr(environment, "_current", None)
+            broken = await app.chat("hi")
+        failed = [data for _, data in await events.read(broken, "turns")][-1]
+        assert failed["type"] == "turn.failed"
+        assert "no Environment installed" in failed["error"]
+        assert await turns.active(broken) is None
+
+        # The Environment is back: the next turn heals the supervisor and runs.
+        chat_id = await app.chat("hi")
+        assert (await app.details(chat_id))["result"] == "hello"
+        roster = await app.roster()
+        assert roster["agent_id"] == conftest.AGENT
+        assert roster["budget"]["limit"] == conftest.CONFIG.budget.tokens_per_day
         assert not app.model.unused
 
 

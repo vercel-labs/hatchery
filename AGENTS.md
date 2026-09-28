@@ -35,7 +35,7 @@ do not overcomplicate. this is a test application, it should prioritize clarity.
 - vercel project `hatchery`, team `vercel-internal-playground`. production: https://hatchery.playground-vercel.tools (also `hatchery-prod.playground-vercel.tools`).
 - wrapper repo: `vercel-internal-playground/hatchery-storage` (internal). the project is git-connected to it; a push to its `main` deploys production. it is also the storage repo (`HATCHERY_STORAGE_REPO`).
 - databases (neon, vercel-managed): `hatchery-db` for production, `hatchery-preview-db` for preview, shared by all previews and empty at start. no neon preview branching, no development environment.
-- `HATCHERY_STORAGE_REPO`, `CRON_SECRET`, `HATCHERY_APP_ORIGIN` are production only.
+- `CRON_SECRET`, `HATCHERY_APP_ORIGIN` are production only. `HATCHERY_STORAGE_REPO` is set for production and preview: agents cannot run a turn without it.
 
 rules:
 

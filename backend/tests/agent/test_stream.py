@@ -3,11 +3,12 @@ import asyncio
 import ai
 import rotor
 
+from hatchery import environment
 from hatchery.agent import stream
 from hatchery.store import events
 
 
-async def _never_terminal(_process_id, _turn_id):
+async def _never_terminal(_chat_id, _process_id, _turn_id):
     await asyncio.Event().wait()
 
 
@@ -62,7 +63,7 @@ async def test_to_sse_replays_rotor_chunks_and_stops_at_terminal(monkeypatch):
 
     monkeypatch.setattr(stream, "get_readable", readable)
     monkeypatch.setattr(stream, "get_terminal", _never_terminal)
-    body = "".join([chunk async for chunk in stream.to_sse("process_1", turn_id)])
+    body = "".join([chunk async for chunk in stream.to_sse("chat_1", "process_1", turn_id)])
 
     assert '"type": "start"' in body
     assert '"delta": "hello"' in body
@@ -93,7 +94,7 @@ async def test_to_sse_ignores_another_turn(monkeypatch):
 
     monkeypatch.setattr(stream, "get_readable", readable)
     monkeypatch.setattr(stream, "get_terminal", _never_terminal)
-    body = "".join([chunk async for chunk in stream.to_sse("process_1", "turn_1")])
+    body = "".join([chunk async for chunk in stream.to_sse("chat_1", "process_1", "turn_1")])
 
     assert "wrong" not in body
     assert body == "data: [DONE]\n\n"
@@ -120,7 +121,7 @@ async def test_to_sse_emits_reload_marker_for_discarded_activation(monkeypatch):
 
     monkeypatch.setattr(stream, "get_readable", readable)
     monkeypatch.setattr(stream, "get_terminal", _never_terminal)
-    body = "".join([chunk async for chunk in stream.to_sse("process_1", "turn_1")])
+    body = "".join([chunk async for chunk in stream.to_sse("chat_1", "process_1", "turn_1")])
 
     assert '"type": "data-reload"' in body
 
@@ -129,7 +130,21 @@ async def test_to_sse_finishes_from_the_thread_record_after_live_spool_settles(r
     async with run([ai.user_message("fast"), ai.assistant_message("done")]) as app:
         chat_id = await app.chat("fast", turn_id="turn_fast")
         thread_id = await app.thread_id(chat_id)
-        body = "".join([chunk async for chunk in stream.to_sse(thread_id, "turn_fast")])
+        body = "".join([chunk async for chunk in stream.to_sse(chat_id, thread_id, "turn_fast")])
+
+    assert '"type": "data-reload"' in body
+    assert body.endswith("data: [DONE]\n\n")
+
+
+async def test_to_sse_ends_when_the_turn_failed_before_its_thread_ran(run, monkeypatch):
+    async with run(strict=False) as app:
+        with monkeypatch.context() as missing:
+            missing.setattr(environment, "_current", None)
+            chat_id = await app.chat("hi", turn_id="turn_rejected")
+        thread_id = await app.thread_id(chat_id)
+        body = "".join(
+            [chunk async for chunk in stream.to_sse(chat_id, thread_id, "turn_rejected")]
+        )
 
     assert '"type": "data-reload"' in body
     assert body.endswith("data: [DONE]\n\n")

@@ -278,7 +278,7 @@ async def test_two_users_share_one_agent(monkeypatch):
             "turn_1", "run_1", origin, task_id, 0, kwargs["actor_user_id"]
         )
 
-    async def to_sse(_run_id, _turn_id):
+    async def to_sse(_chat_id, _run_id, _turn_id):
         yield "data: [DONE]\n\n"
 
     monkeypatch.setattr(server.auth, "current_user", current_user)
@@ -981,7 +981,7 @@ async def test_ui_post_uses_actor_in_another_users_chat(monkeypatch):
             "turn_1", "run_1", origin, task_id, 0, "user_test"
         )
 
-    async def to_sse(_run_id, _turn_id):
+    async def to_sse(_chat_id, _run_id, _turn_id):
         yield "data: [DONE]\n\n"
 
     monkeypatch.setattr(server.supervisor, "start_turn", start_turn)
@@ -1627,7 +1627,7 @@ async def test_resume_chat_stream_uses_registered_process(monkeypatch):
             "turn_1", "process_1", "worker", "task_1", 0
         )
 
-    async def to_sse(process_id, turn_id):
+    async def to_sse(_chat_id, process_id, turn_id):
         seen.append((process_id, turn_id))
         yield "data: [DONE]\n\n"
 
@@ -1660,7 +1660,7 @@ async def test_first_ui_prompt_classifies_before_thread(monkeypatch):
             turn_id, "run_1", origin, task_id, 0, actor_user_id
         )
 
-    async def durable_sse(run_id, turn_id):
+    async def durable_sse(_chat_id, run_id, turn_id):
         seen["stream"] = (run_id, turn_id)
         yield 'data: {"type":"finish"}\n\n'
 
@@ -1722,7 +1722,7 @@ async def test_ui_turn_is_mirrored_to_bound_channel(monkeypatch):
             turn_id, "run_1", origin, task_id, 0, actor_user_id
         )
 
-    async def durable_sse(_run_id, _turn_id):
+    async def durable_sse(_chat_id, _run_id, _turn_id):
         yield 'data: {"type":"finish"}\n\n'
 
     monkeypatch.setattr(server.supervisor, "start_turn", start_turn)
@@ -2693,7 +2693,7 @@ async def test_ui_retry_reuses_turn_identity(monkeypatch):
         turns.append(turn_id)
         return server.turns.ActiveTurn(turn_id, "process_1", origin, task_id, 0)
 
-    async def to_sse(_process_id, _turn_id):
+    async def to_sse(_chat_id, _process_id, _turn_id):
         yield "data: [DONE]\n\n"
 
     monkeypatch.setattr(server.supervisor, "start_turn", start_turn)

@@ -30,12 +30,13 @@ Push the branch here, then build a wheel from it, pin that wheel in a copy of th
 - The first request to a preview makes it the Rotor owner. If previews share one database, the last preview used runs all background work in it, including work started from other previews.
 - A preview never takes a database that production owns. If it is pointed at one, it logs `preview database is bound to another environment` and chat routes fail. Production is not affected.
 - `POST /api/rotor/activate` with `Authorization: Bearer $ROTOR_RELEASE_SECRET` forces a takeover. Only use it on a preview database.
+- A turn the agent cannot take fails in the chat with the error, and the agent recovers on its next turn once the cause is fixed. If branches with incompatible Rotor state leave the preview database stuck anyway, reset `hatchery-preview-db` from the Neon dashboard. It holds nothing worth keeping.
 
 ## Limits of previews
 
 - Vercel runs crons only in production, so the heartbeat, schedules, and prompt jobs don't run on previews.
 - Connect triggers for Slack and GitHub target a Git branch or a custom environment. A preview deployed from the CLI has no Git branch, so it doesn't receive their events.
-- Without `HATCHERY_STORAGE_REPO`, agents have no Git files.
+- Previews need `HATCHERY_STORAGE_REPO` too. Without it, every turn fails with `no Environment installed`. Previews share the storage repo with production, so their thread branches land there.
 
 ## Don't
 

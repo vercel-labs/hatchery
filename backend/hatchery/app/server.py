@@ -1411,7 +1411,7 @@ async def chat(
             actor_user_id=user["id"],
         )
     return fastapi.responses.StreamingResponse(
-        agent_stream.to_sse(turn.run_id, turn.turn_id),
+        agent_stream.to_sse(request.chat_id, turn.run_id, turn.turn_id),
         headers=ai.ui.ai_sdk.UI_MESSAGE_STREAM_HEADERS,
     )
 
@@ -1425,7 +1425,7 @@ async def resume_chat_stream(chat_id: str):
     if turn is None:
         return fastapi.Response(status_code=204)
     return fastapi.responses.StreamingResponse(
-        agent_stream.to_sse(turn.run_id, turn.turn_id),
+        agent_stream.to_sse(chat_id, turn.run_id, turn.turn_id),
         headers=ai.ui.ai_sdk.UI_MESSAGE_STREAM_HEADERS,
     )
 

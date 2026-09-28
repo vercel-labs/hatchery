@@ -29,6 +29,7 @@ class TurnInput:
     linked: bool = False
     task_id: str | None = None
     actor_user_id: str | None = None
+    agent_id: str = ""  # lets a supervisor whose start failed recover its agent id
 
 
 @rotor.message
