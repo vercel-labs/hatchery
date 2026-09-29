@@ -1,6 +1,5 @@
-import { useDeferredValue, useMemo, useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { GitBranch, RefreshCw } from "lucide-react";
 import type { Repository, RepositoryFile } from "@/lib/api-types";
 import { useApi } from "@/hooks/use-api";
@@ -33,8 +32,6 @@ export default function RepositoryPanel({
   compact = false,
   loadingFallback,
 }: Props) {
-  const [filter, setFilter] = useState("");
-  const search = useDeferredValue(filter.toLowerCase());
   const [chosen, setChosen] = useState("");
   const [comparison, setComparison] = useState<"full" | "latest">("full");
   const [mode, setMode] = useState<"file" | "diff">(chatId ? "diff" : "file");
@@ -69,13 +66,8 @@ export default function RepositoryPanel({
             ...changes.keys(),
           ]),
         );
-    return all
-      .filter(
-        (path) =>
-          path.startsWith(prefix) && path.toLowerCase().includes(search),
-      )
-      .sort();
-  }, [data?.files, changes, changesOnly, prefix, search]);
+    return all.filter((path) => path.startsWith(prefix)).sort();
+  }, [data?.files, changes, changesOnly, prefix]);
   const tree = useMemo(() => fileTree(paths, changes), [paths, changes]);
   const selected = paths.includes(chosen)
     ? chosen
@@ -233,14 +225,8 @@ export default function RepositoryPanel({
               className="flex min-h-0 min-w-0 flex-col border-b md:border-r md:border-b-0"
               aria-label="File tree"
             >
-              <div className="shrink-0 space-y-3 border-b bg-background p-3">
-                <Input
-                  aria-label="Filter files"
-                  placeholder="Find a file…"
-                  value={filter}
-                  onChange={(event) => setFilter(event.target.value)}
-                />
-                {chatId ? (
+              {chatId ? (
+                <div className="shrink-0 border-b bg-background p-3">
                   <label className="flex items-center gap-2 text-xs text-muted-foreground">
                     <input
                       type="checkbox"
@@ -249,8 +235,8 @@ export default function RepositoryPanel({
                     />
                     Changed files only
                   </label>
-                ) : null}
-              </div>
+                </div>
+              ) : null}
               <div
                 className="min-h-0 flex-1 overflow-auto overscroll-contain p-3 [scrollbar-gutter:stable] [scrollbar-width:thin]"
                 role="region"
@@ -264,11 +250,9 @@ export default function RepositoryPanel({
                 />
                 {!paths.length ? (
                   <p className="p-3 text-xs text-muted-foreground">
-                    {search
-                      ? "No matching files."
-                      : changesOnly
-                        ? "No checkpointed changes yet."
-                        : "No files in this section yet."}
+                    {changesOnly
+                      ? "No checkpointed changes yet."
+                      : "No files in this section yet."}
                   </p>
                 ) : null}
               </div>

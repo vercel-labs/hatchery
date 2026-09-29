@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, it, vi } from "vitest";
 import { ThreadNavigation } from "@/features/threads/thread-navigation";
@@ -190,54 +190,6 @@ it("expands the selected chat's subagents as one-line rows", async () => {
     screen.getByRole("button", { name: "Collapse subagents for Active root" }),
   );
   expect(screen.queryByText("Active child")).toBeNull();
-});
-
-// agentmesh: [[subagents#Console]]
-it("keeps a matching thread's ancestor path visible during search", async () => {
-  navigation([
-    rosterThread("Root plan"),
-    rosterThread("Implementation", "Root plan"),
-    rosterThread("Needle investigation", "Implementation", { depth: 2 }),
-    rosterThread("Unrelated one"),
-    rosterThread("Unrelated two"),
-    rosterThread("Unrelated three"),
-  ]);
-
-  await userEvent.type(screen.getByLabelText("Search threads"), "needle");
-
-  await waitFor(() =>
-    expect(threadRows().map((row) => row.dataset.threadDepth)).toEqual([
-      "0",
-      "1",
-      "2",
-    ]),
-  );
-  expect(screen.getByText("Root plan")).toBeTruthy();
-  expect(screen.getByText("Implementation")).toBeTruthy();
-  expect(screen.getByText("Needle investigation")).toBeTruthy();
-  expect(screen.queryByText("Unrelated one")).toBeNull();
-});
-
-// agentmesh: [[subagents#Console]]
-it("does not retain an unrelated selected thread during search", async () => {
-  navigation(
-    [
-      rosterThread("Selected root"),
-      rosterThread("First"),
-      rosterThread("Second"),
-      rosterThread("Third"),
-      rosterThread("Fourth"),
-      rosterThread("Fifth"),
-    ],
-    "Selected root",
-  );
-
-  await userEvent.type(screen.getByLabelText("Search threads"), "absent");
-
-  await waitFor(() =>
-    expect(screen.getByText("No matching threads.")).toBeTruthy(),
-  );
-  expect(screen.queryByText("Selected root")).toBeNull();
 });
 
 // agentmesh: [[subagents#Console]]

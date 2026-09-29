@@ -1,5 +1,5 @@
-import { useDeferredValue, useState } from "react";
-import { Plus, Search } from "lucide-react";
+import { useState } from "react";
+import { Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ChatOriginIcon } from "@/components/chat-origin-icon";
 import { chatAttentionLabel } from "@/lib/chat-sidebar";
@@ -32,15 +32,13 @@ export function ThreadNavigation({
   optimisticallyAwake?: ReadonlySet<string>;
   onSelect: (id: string) => void;
 }) {
-  const [filter, setFilter] = useState("");
   const [expanded, setExpanded] = useState<Map<string, boolean>>(
     () => new Map(),
   );
   function toggle(id: string, open: boolean) {
     setExpanded((current) => new Map(current).set(id, !open));
   }
-  const search = useDeferredValue(filter.trim().toLowerCase());
-  const logical = logicalThreads(threads, selected, search);
+  const logical = logicalThreads(threads, selected);
   const recent: TreeThread[] = [];
   let hiddenBelow: number | null = null;
   for (const item of logical) {
@@ -48,9 +46,8 @@ export function ThreadNavigation({
     hiddenBelow = null;
     recent.push(item);
     const open =
-      search ||
-      (expanded.get(item.thread.thread_id) ??
-        (item.forceExpanded || item.thread.thread_id === selected));
+      expanded.get(item.thread.thread_id) ??
+      (item.forceExpanded || item.thread.thread_id === selected);
     if (item.hasChildren && !open) hiddenBelow = item.depth;
   }
   const branches = threadTreeBranches(recent);
@@ -59,17 +56,7 @@ export function ThreadNavigation({
       className="flex min-h-0 min-w-0 flex-1 flex-col"
       aria-label="Threads"
     >
-      <div className="flex shrink-0 items-center gap-1 px-3 pb-2">
-        <label className="flex min-w-0 flex-1 items-center gap-2 rounded-lg bg-muted/70 px-2.5">
-          <Search className="size-3.5 text-muted-foreground" />
-          <input
-            aria-label="Search threads"
-            placeholder="Search"
-            value={filter}
-            onChange={(event) => setFilter(event.target.value)}
-            className="h-8 min-w-0 flex-1 bg-transparent text-xs outline-none"
-          />
-        </label>
+      <div className="flex shrink-0 items-center justify-end gap-1 px-3 pb-2">
         <Button
           size="icon-sm"
           variant="ghost"
@@ -158,9 +145,8 @@ export function ThreadNavigation({
           const statusLabel = badge?.label ?? activity.label;
           const open = Boolean(
             hasChildren &&
-            (search ||
-              (expanded.get(thread.thread_id) ??
-                (forceExpanded || thread.thread_id === selected))),
+            (expanded.get(thread.thread_id) ??
+              (forceExpanded || thread.thread_id === selected)),
           );
           // A subagent without its own subagents is a one-line row.
           const compact = depth > 0 && !hasChildren;
@@ -264,7 +250,7 @@ export function ThreadNavigation({
         })}
         {!recent.length ? (
           <p className="px-2 py-4 text-xs text-muted-foreground">
-            {search ? "No matching threads." : "No conversations yet."}
+            No conversations yet.
           </p>
         ) : null}
       </div>
