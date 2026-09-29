@@ -97,7 +97,7 @@ it("shows available routes, route failures, and secret inventory metadata", asyn
 
   render(
     <SWRConfig value={{ provider: () => new Map(), shouldRetryOnError: false }}>
-      <AgentApiView agentId="mira" agentName="Mira" />
+      <AgentApiView agentId="mira" />
     </SWRConfig>,
   );
 
@@ -175,7 +175,7 @@ it("sets a requested secret without retaining its value in the form", async () =
   const user = userEvent.setup();
   render(
     <SWRConfig value={{ provider: () => new Map(), shouldRetryOnError: false }}>
-      <AgentApiView agentId="mira" agentName="Mira" />
+      <AgentApiView agentId="mira" />
     </SWRConfig>,
   );
   const input = await screen.findByLabelText<HTMLInputElement>(
@@ -248,7 +248,7 @@ it("reveals locally, hides immediately, and requires inline delete confirmation"
   const user = userEvent.setup();
   render(
     <SWRConfig value={{ provider: () => new Map(), shouldRetryOnError: false }}>
-      <AgentApiView agentId="mira" agentName="Mira" />
+      <AgentApiView agentId="mira" />
     </SWRConfig>,
   );
 

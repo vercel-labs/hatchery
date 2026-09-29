@@ -161,6 +161,39 @@ function mount(props: Partial<ComponentProps<typeof Conversation>> = {}) {
 
 const messages = () => within(screen.getByRole("region", { name: "Messages" }));
 
+// Hatchery: the chat context has a tab per subagent; extra ones go in a menu.
+it("opens subagents from their tabs and keeps extra subagents in a menu", async () => {
+  const subagents = Array.from({ length: 6 }, (_, index) => ({
+    ...saved,
+    thread_id: `sub-${index + 1}`,
+    chat_id: `chat_sub_${index + 1}`,
+    parent_thread_id: "thread-one",
+    depth: 1,
+    title: `Sub ${index + 1}`,
+  }));
+  const onThread = vi.fn();
+  serve();
+  mount({ roster: { ...roster, threads: [saved, ...subagents] }, onThread });
+  const user = userEvent.setup();
+  const tabs = await screen.findByRole("tablist", { name: "Chat" });
+  await waitFor(() =>
+    expect(within(tabs).getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
+      "Chat",
+      "Sub 1",
+      "Sub 2",
+      "Sub 3",
+      "Sub 4",
+      "Workspace",
+      "State",
+    ]),
+  );
+  await user.click(within(tabs).getByRole("tab", { name: "Sub 2" }));
+  expect(onThread).toHaveBeenLastCalledWith("sub-2");
+  await user.click(within(tabs).getByRole("button", { name: "2 more" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Sub 6" }));
+  expect(onThread).toHaveBeenLastCalledWith("sub-6");
+});
+
 describe("conversation", () => {
   it("allows an idle thread to receive another message on the same route", async () => {
     const posted: Array<{ chat_id: string; messages: Array<Record<string, unknown>> }> = [];
@@ -177,6 +210,7 @@ describe("conversation", () => {
     await screen.findByText("Hello Mira!");
     await waitFor(() =>
       expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
+        "Chat",
         "Workspace",
         "State",
       ]),
@@ -389,7 +423,7 @@ describe("conversation", () => {
   });
 });
 
-it("keeps the reply and draft visible while reviewing multiple files and proposals", async () => {
+it("keeps the reply and draft while switching to review tabs for multiple files and proposals", async () => {
   const proposal = {
     section: "wiki",
     branch: "consolidations/mira/wiki/proposal",
@@ -429,26 +463,24 @@ it("keeps the reply and draft visible while reviewing multiple files and proposa
   const user = userEvent.setup();
   await screen.findByRole("tab", { name: "Changes" });
   expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
+    "Chat",
     "Workspace",
     "Changes",
     "State",
   ]);
-  expect(screen.getByRole("tab", { name: "Workspace" }).getAttribute("aria-selected")).toBe(
+  expect(screen.getByRole("tab", { name: "Chat" }).getAttribute("aria-selected")).toBe(
     "true",
   );
-  await user.click(screen.getByRole("tab", { name: "Changes" }));
-  await screen.findByText("+Changed wiki/procedure.md");
   const composer = screen.getByRole<HTMLTextAreaElement>("textbox", {
     name: "Message agent",
   });
   await user.type(composer, "Keep this draft while I review");
+  await user.click(screen.getByRole("tab", { name: "Changes" }));
+  await screen.findByText("+Changed wiki/procedure.md");
   await user.click(screen.getByRole("tab", { name: "State" }));
   expect(screen.getByRole("tabpanel", { name: "State" })).toBeTruthy();
-  expect(composer.value).toBe("Keep this draft while I review");
   await user.keyboard("{Home}");
-  expect(screen.getByRole("tab", { name: "Workspace" }).getAttribute("aria-selected")).toBe(
-    "true",
-  );
+  expect(document.activeElement).toBe(screen.getByRole("tab", { name: "Chat" }));
   await user.click(screen.getByRole("tab", { name: "Changes" }));
   await screen.findByText("+Changed agents/mira/notes.md");
   expect(screen.getAllByLabelText("File diff")).toHaveLength(2);
@@ -458,9 +490,11 @@ it("keeps the reply and draft visible while reviewing multiple files and proposa
   await screen.findByText("Full file contents");
   await user.click(screen.getByRole("button", { name: "Wiki proposal" }));
   await screen.findByText("+Curated wiki/procedure.md");
-  expect(screen.getByText("Hello Mira!")).toBeTruthy();
+  await user.click(screen.getByRole("tab", { name: "Chat" }));
+  expect(screen.getByText("Hello Mira!").closest('[style*="display: none"]')).toBeNull();
   expect(screen.getByRole("textbox", { name: "Message agent" })).toBe(composer);
   expect(composer.value).toBe("Keep this draft while I review");
+  await user.click(screen.getByRole("tab", { name: "Changes" }));
   await user.click(screen.getByRole("button", { name: "Approve & merge" }));
   await waitFor(() => expect(posted).toHaveLength(1));
   expect(posted[0].path).toBe("/api/chats/chat_one/thread/approve");

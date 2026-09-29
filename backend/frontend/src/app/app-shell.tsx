@@ -2,14 +2,11 @@ import { useLocation, useNavigate } from "@tanstack/react-router";
 import { Activity, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArchiveIcon,
-  Braces,
   CheckIcon,
-  FolderGit2,
-  FolderOpen,
+  ChevronsUpDown,
   GitBranchIcon,
   LogOutIcon,
   MessageSquareIcon,
-  Settings2,
   XIcon,
 } from "lucide-react";
 
@@ -23,7 +20,6 @@ import {
 import type { AgentThreads } from "@/lib/api-types";
 import { chatSidebarText, sidebarThreads } from "@/lib/chat-sidebar";
 import { type AccentColor } from "@/lib/agent-colors";
-import { number } from "@/lib/format";
 import { useApi } from "@/hooks/use-api";
 import { AgentSwitcher } from "@/app/agent-switcher";
 import { ConsoleLayoutSkeleton } from "@/app/console-layout-skeleton";
@@ -35,14 +31,16 @@ import {
 } from "@/components/new-chat-state";
 import { AgentColorPicker } from "@/components/agent-color-picker";
 import { ChatOriginIcon } from "@/components/chat-origin-icon";
+import { ContextTabs } from "@/components/context-tabs";
 import { ResizeHandle } from "@/components/resize-handle";
 import { AgentApiView } from "@/features/agents/agent-api-view";
 import { AgentPage } from "@/features/agents/agent-page";
 import { BudgetHoldNotice } from "@/features/agents/budget-hold-notice";
 import { RepositoryView } from "@/features/repository/repository-view";
-import { Conversation } from "@/features/threads/conversation";
+import { chatViews, Conversation, type ChatView } from "@/features/threads/conversation";
 import { ThreadNavigation } from "@/features/threads/thread-navigation";
 import { threadsWithObjectives } from "@/features/threads/thread-tree";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -51,6 +49,15 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Empty,
   EmptyDescription,
@@ -63,9 +70,7 @@ import {
   SidebarContent,
   SidebarFooter,
   SidebarGroup,
-  SidebarGroupAction,
   SidebarGroupContent,
-  SidebarGroupLabel,
   SidebarHeader,
   SidebarInset,
   SidebarMenu,
@@ -77,20 +82,36 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 
+// The main pane shows one context: an agent or a chat, each with its tabs.
+type AgentView = "workspace" | "files" | "api";
 type Selection =
-  | { kind: "agent" | "api"; id: string }
-  | { kind: "chat"; id: string }
+  | { kind: "agent"; id: string; view: AgentView }
+  | { kind: "chat"; id: string; view: ChatView }
   | { kind: "repository" }
   | null;
 
 const AGENT_KEY = "hatchery:agent";
+const agentTabs = [
+  { view: "workspace", label: "Workspace", to: "/agents/$agentId" },
+  { view: "files", label: "Files", to: "/agents/$agentId/files" },
+  { view: "api", label: "API", to: "/agents/$agentId/api" },
+] as const;
 
-export function parseSelection(pathname: string): Selection {
-  const agent = pathname.match(/^\/agents\/([^/]+)(\/api)?$/);
+function parseSelection(pathname: string): Selection {
+  const agent = pathname.match(/^\/agents\/([^/]+)(?:\/(files|api))?$/);
   if (agent)
-    return { kind: agent[2] ? "api" : "agent", id: decodeURIComponent(agent[1]) };
-  const chat = pathname.match(/^\/chats\/([^/]+)$/);
-  if (chat) return { kind: "chat", id: decodeURIComponent(chat[1]) };
+    return {
+      kind: "agent",
+      id: decodeURIComponent(agent[1]),
+      view: (agent[2] as AgentView | undefined) ?? "workspace",
+    };
+  const chat = pathname.match(/^\/chats\/([^/]+)(?:\/([^/]+))?$/);
+  if (chat)
+    return {
+      kind: "chat",
+      id: decodeURIComponent(chat[1]),
+      view: chatViews.find((view) => view === chat[2]) ?? "chat",
+    };
   if (pathname === "/repository") return { kind: "repository" };
   return null;
 }
@@ -160,7 +181,7 @@ export function AppShell() {
   const [failed, setFailed] = useState(false);
   const [agentName, setAgentName] = useState("");
   const [agentColor, setAgentColor] = useState<AccentColor | null>(null);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [addingAgent, setAddingAgent] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [preferredAgent, setPreferredAgent] = useState<string | null>(() =>
     typeof localStorage === "undefined" ? null : localStorage.getItem(AGENT_KEY),
@@ -187,7 +208,7 @@ export function AppShell() {
       ? (allChats.find((chat) => chat.id === selection.id) ?? null)
       : null;
   const agentId =
-    selection?.kind === "agent" || selection?.kind === "api"
+    selection?.kind === "agent"
       ? selection.id
       : (routedChat?.agent_id ??
         (agents?.some((agent) => agent.id === preferredAgent)
@@ -357,7 +378,7 @@ export function AppShell() {
     setAgents((current) => [...(current ?? []), created]);
     setAgentName("");
     setAgentColor(null);
-    setSettingsOpen(false);
+    setAddingAgent(false);
     openNewChat(created.id);
   };
 
@@ -497,6 +518,7 @@ export function AppShell() {
   }
 
   const leading = <SidebarTrigger />;
+  const userName = user?.name ?? user?.username ?? user?.email ?? "hatchery";
   const draftSelected =
     selection === null || (selection.kind === "chat" && selection.id === draft.chatId);
   const onConversation = !failed && (draftSelected || routedChat !== null);
@@ -536,23 +558,36 @@ export function AppShell() {
       </AllRosters>
     ) : null;
   } else if (selection?.kind === "agent" && agent) {
+    const view = selection.view;
     content = (
-      <AgentPage
-        key={agent.id}
-        agent={agent}
-        roster={roster?.agent_id === agent.id ? roster : undefined}
-        warning={selectedWarning}
-        leading={leading}
-        refreshRoster={refreshRoster}
-        onChange={(updated) =>
-          setAgents((current) => current?.map((item) => (item.id === updated.id ? updated : item)) ?? null)
-        }
-        onRemove={() => void deleteAgent(agent)}
-      />
-    );
-  } else if (selection?.kind === "api" && agent) {
-    content = (
-      <AgentApiView key={agent.id} agentId={agent.id} agentName={agent.name} leading={leading} />
+      <section className="flex min-h-0 min-w-0 flex-1 flex-col" aria-label={agent.name}>
+        <ContextTabs
+          label={`${agent.name} agent`}
+          leading={leading}
+          tabs={agentTabs.map((tab) => ({
+            key: tab.view,
+            label: tab.label,
+            selected: tab.view === view,
+            onSelect: () => void navigate({ to: tab.to, params: { agentId: agent.id } }),
+          }))}
+        />
+        {view === "api" ? (
+          <AgentApiView key={agent.id} agentId={agent.id} />
+        ) : (
+          <AgentPage
+            key={agent.id}
+            agent={agent}
+            view={view === "files" ? "files" : "overview"}
+            roster={roster?.agent_id === agent.id ? roster : undefined}
+            warning={selectedWarning}
+            refreshRoster={refreshRoster}
+            onChange={(updated) =>
+              setAgents((current) => current?.map((item) => (item.id === updated.id ? updated : item)) ?? null)
+            }
+            onRemove={() => void deleteAgent(agent)}
+          />
+        )}
+      </section>
     );
   } else if (onConversation) {
     content = null;
@@ -581,6 +616,11 @@ export function AppShell() {
           roster={roster?.agent_id === (shownChat?.agent_id ?? draftAgent) ? roster : undefined}
           warning={selectedWarning}
           leading={leading}
+          view={selection?.kind === "chat" ? selection.view : "chat"}
+          onViewChange={(view) => {
+            if (view === "chat") void navigate({ to: "/chats/$chatId", params: { chatId: shownId } });
+            else void navigate({ to: "/chats/$chatId/$view", params: { chatId: shownId, view } });
+          }}
           composerRef={composerRef}
           onPersist={persistDraftChat}
           refreshRoster={refreshRoster}
@@ -607,7 +647,7 @@ export function AppShell() {
   return (
     <SidebarProvider ref={layoutRef} className="h-svh overflow-hidden">
       <Sidebar ref={navigationRef} aria-label="Console navigation">
-        <SidebarHeader className="gap-1 p-2">
+        <SidebarHeader className="gap-2 p-2">
           {agent && agents ? (
             <AgentSwitcher
               agents={agents}
@@ -622,50 +662,79 @@ export function AppShell() {
                 if (latest) void navigate({ to: "/chats/$chatId", params: { chatId: latest.id } });
                 else openNewChat(id);
               }}
+              onOpen={(view) =>
+                void navigate({
+                  to: view === "api" ? "/agents/$agentId/api" : "/agents/$agentId",
+                  params: { agentId: agent.id },
+                })
+              }
+              onAdd={() => setAddingAgent(true)}
             />
           ) : null}
-          <nav aria-label="Views" className="flex flex-col gap-0.5">
-            {agent ? (
-              <>
-                <Button
-                  className="h-9 justify-start px-3 text-muted-foreground"
-                  variant={selection?.kind === "agent" ? "secondary" : "ghost"}
-                  aria-current={selection?.kind === "agent" ? "page" : undefined}
-                  onClick={() => void navigate({ to: "/agents/$agentId", params: { agentId: agent.id } })}
-                >
-                  <FolderOpen />
-                  Workspace
-                </Button>
-                <Button
-                  className="h-9 justify-start px-3 text-muted-foreground"
-                  variant={selection?.kind === "api" ? "secondary" : "ghost"}
-                  aria-current={selection?.kind === "api" ? "page" : undefined}
-                  onClick={() => void navigate({ to: "/agents/$agentId/api", params: { agentId: agent.id } })}
-                >
-                  <Braces />
-                  API
-                </Button>
-              </>
-            ) : null}
-            <Button
-              className="h-9 justify-start px-3 text-muted-foreground"
-              variant={selection?.kind === "repository" ? "secondary" : "ghost"}
-              aria-current={selection?.kind === "repository" ? "page" : undefined}
-              onClick={() => void navigate({ to: "/repository" })}
+          {addingAgent || (agents !== null && !agents.length) ? (
+            <form
+              className="flex flex-col gap-2 rounded-xl border p-2"
+              aria-label="New agent"
+              onSubmit={createAgent}
             >
-              <FolderGit2 />
-              Repository
-            </Button>
-          </nav>
+              <div className="flex gap-1">
+                <Input
+                  autoFocus
+                  value={agentName}
+                  onChange={(event) => setAgentName(event.target.value)}
+                  placeholder="New agent name"
+                  aria-label="Agent name"
+                  className="h-7"
+                />
+                <Button type="submit" size="icon-xs" disabled={!agentName.trim()}>
+                  <CheckIcon />
+                  <span className="sr-only">Add agent</span>
+                </Button>
+                {agents?.length ? (
+                  <Button
+                    type="button"
+                    size="icon-xs"
+                    variant="ghost"
+                    onClick={() => {
+                      setAddingAgent(false);
+                      setAgentName("");
+                      setAgentColor(null);
+                    }}
+                  >
+                    <XIcon />
+                    <span className="sr-only">Cancel</span>
+                  </Button>
+                ) : null}
+              </div>
+              <AgentColorPicker value={agentColor} onValueChange={setAgentColor} allowUnselected />
+            </form>
+          ) : null}
+          <div role="group" aria-label="Chat list" className="grid grid-cols-2 gap-0.5 rounded-lg bg-sidebar-accent p-0.5">
+            {[false, true].map((archive) => (
+              <Button
+                key={String(archive)}
+                size="sm"
+                variant="ghost"
+                aria-pressed={archiveOpen === archive}
+                className={
+                  archiveOpen === archive
+                    ? "bg-background shadow-xs hover:bg-background"
+                    : "text-muted-foreground"
+                }
+                onClick={() => setArchiveOpen(archive)}
+              >
+                {archive ? "Archive" : "Chats"}
+                {archive && archivedChats.length ? (
+                  <span className="tabular-nums text-muted-foreground">{archivedChats.length}</span>
+                ) : null}
+              </Button>
+            ))}
+          </div>
         </SidebarHeader>
 
         <SidebarContent className="gap-0">
           {archiveOpen ? (
             <SidebarGroup aria-label="Archived chats">
-              <SidebarGroupLabel>Archive</SidebarGroupLabel>
-              <SidebarGroupAction title="Close archive" aria-label="Close archive" onClick={() => setArchiveOpen(false)}>
-                <XIcon />
-              </SidebarGroupAction>
               <SidebarGroupContent>
                 <SidebarMenu>
                   {archivedChats.length ? (
@@ -724,111 +793,57 @@ export function AppShell() {
           )}
         </SidebarContent>
 
-        <SidebarFooter className="border-t border-sidebar-border">
-          <SidebarMenu>
-            <SidebarMenuItem>
-              <SidebarMenuButton
-                aria-label={`Open archive, ${archivedChats.length} chats`}
-                onClick={() => setArchiveOpen(!archiveOpen)}
-                tooltip="Archive"
-              >
-                <ArchiveIcon />
-                <span>Archive</span>
-                {archivedChats.length > 0 && <span className="ml-auto tabular-nums">{archivedChats.length}</span>}
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-          </SidebarMenu>
-          <details
-            className="group px-1"
-            open={settingsOpen || (agents !== null && !agents.length)}
-            onToggle={(event) => setSettingsOpen(event.currentTarget.open)}
-          >
-            <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-1 py-2 text-xs text-muted-foreground hover:text-foreground">
-              <Settings2 className="size-3.5" />
-              <span className="min-w-0 flex-1 truncate">
-                {user?.name ?? user?.username ?? user?.email ?? "hatchery"}
-              </span>
-            </summary>
-            <div className="flex flex-col gap-3 pt-2 pb-1">
-              <form className="flex flex-col gap-2" onSubmit={createAgent}>
-                <div className="flex gap-1">
-                  <Input
-                    value={agentName}
-                    onChange={(event) => setAgentName(event.target.value)}
-                    placeholder="New agent name"
-                    aria-label="Agent name"
-                    className="h-7"
-                  />
-                  <Button type="submit" size="icon-xs" disabled={!agentName.trim()}>
-                    <CheckIcon />
-                    <span className="sr-only">Add agent</span>
-                  </Button>
-                </div>
-                <AgentColorPicker value={agentColor} onValueChange={setAgentColor} allowUnselected />
-              </form>
-              {roster?.budget ? (
-                <p
-                  className={
-                    roster.budget.exhausted
-                      ? "text-xs font-medium text-amber-700 dark:text-amber-300"
-                      : "text-xs text-muted-foreground"
-                  }
-                >
-                  {roster.budget.exhausted
-                    ? "No tokens left today"
-                    : `${number(roster.budget.remaining)} tokens left today`}
-                </p>
-              ) : null}
-              <div className="flex flex-col gap-0.5">
+        <SidebarFooter className="border-t border-sidebar-border p-2">
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              className="flex h-11 w-full items-center gap-3 rounded-xl px-2 text-left outline-none transition-colors hover:bg-sidebar-accent focus-visible:ring-3 focus-visible:ring-ring/50 data-popup-open:bg-sidebar-accent"
+              aria-label={`Account: ${userName}`}
+            >
+              <Avatar size="sm">
+                {user?.picture ? <AvatarImage src={user.picture} alt="" /> : null}
+                <AvatarFallback>{userName.slice(0, 1).toUpperCase()}</AvatarFallback>
+              </Avatar>
+              <span className="min-w-0 flex-1 truncate text-sm font-medium">{userName}</span>
+              <ChevronsUpDown className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent side="top" sideOffset={6}>
+              <DropdownMenuGroup>
+                <DropdownMenuLabel>Connections</DropdownMenuLabel>
                 {user?.github ? (
-                  <Button variant="ghost" size="sm" className="justify-start text-muted-foreground" onClick={disconnectGitHub}>
+                  <DropdownMenuItem onClick={disconnectGitHub}>
                     <GitBranchIcon />
                     Disconnect GitHub (@{user.github.login})
-                  </Button>
+                  </DropdownMenuItem>
                 ) : (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="justify-start text-muted-foreground"
-                    nativeButton={false}
-                    render={<a href="/api/connections/github/authorize" />}
-                  >
+                  <DropdownMenuItem render={<a href="/api/connections/github/authorize" />}>
                     <GitBranchIcon />
                     Connect GitHub
-                  </Button>
+                  </DropdownMenuItem>
                 )}
                 {user?.slack ? (
-                  <Button variant="ghost" size="sm" className="justify-start text-muted-foreground" onClick={disconnectSlack}>
+                  <DropdownMenuItem onClick={disconnectSlack}>
                     <MessageSquareIcon />
                     Disconnect Slack ({user.slack.team ?? user.slack.team_id})
-                  </Button>
+                  </DropdownMenuItem>
                 ) : (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="justify-start text-muted-foreground"
-                    nativeButton={false}
-                    render={<a href="/api/connections/slack/authorize" />}
-                  >
+                  <DropdownMenuItem render={<a href="/api/connections/slack/authorize" />}>
                     <MessageSquareIcon />
                     Connect Slack
-                  </Button>
+                  </DropdownMenuItem>
                 )}
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="justify-start text-muted-foreground"
-                  onClick={async () => {
-                    await apiFetch("/api/auth/logout", { method: "POST" });
-                    window.location.reload();
-                  }}
-                >
-                  <LogOutIcon />
-                  Sign out
-                </Button>
-              </div>
-            </div>
-          </details>
+              </DropdownMenuGroup>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                onClick={async () => {
+                  await apiFetch("/api/auth/logout", { method: "POST" });
+                  window.location.reload();
+                }}
+              >
+                <LogOutIcon />
+                Sign out
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </SidebarFooter>
       </Sidebar>
       <SidebarResize containerRef={layoutRef} paneRef={navigationRef} />

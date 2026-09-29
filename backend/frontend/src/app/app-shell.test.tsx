@@ -10,7 +10,8 @@ import { routeTree } from "@/routeTree.gen";
 
 // Ported from agentmesh console tests/console-layout.test.tsx onto AppShell and
 // Hatchery routes: threads are chats (/chats/<id>), a new thread is the draft at
-// /, Workspace is /agents/<id>, and the API view is /agents/<id>/api.
+// /, and the main pane shows one context with its tabs: a chat
+// (/chats/<id>[/<view>]) or an agent (/agents/<id>[/files|/api]).
 
 const mira: Agent = {
   id: "mira",
@@ -195,13 +196,29 @@ it("restores a deep-linked destination and writes navigable view paths", async (
   const user = userEvent.setup();
   await screen.findByText("Plan saved.");
 
-  await user.click(screen.getByRole("button", { name: "Workspace" }));
+  // Chat context: tabs switch views of the chat.
+  const chatTabs = screen.getByRole("tablist", { name: "Chat" });
+  await user.click(within(chatTabs).getByRole("tab", { name: "Workspace" }));
+  await waitFor(() => expect(window.location.pathname).toBe("/chats/chat_closed/workspace"));
+  expect(
+    within(chatTabs).getByRole("tab", { name: "Workspace" }).getAttribute("aria-selected"),
+  ).toBe("true");
+
+  // Agent context: opened from the agent selector, with its own tabs.
+  await user.click(screen.getByRole("button", { name: "Current agent: Mira. Switch agent" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Agent workspace" }));
   await waitFor(() => expect(window.location.pathname).toBe("/agents/mira"));
-  await user.click(screen.getByRole("button", { name: "API" }));
+  const agentTabs = screen.getByRole("tablist", { name: "Mira agent" });
+  expect(within(agentTabs).getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
+    "Workspace",
+    "Files",
+    "API",
+  ]);
+  await user.click(within(agentTabs).getByRole("tab", { name: "Files" }));
+  await waitFor(() => expect(window.location.pathname).toBe("/agents/mira/files"));
+  await user.click(within(agentTabs).getByRole("tab", { name: "API" }));
   await waitFor(() => expect(window.location.pathname).toBe("/agents/mira/api"));
-  await screen.findByRole("heading", { name: "Mira / API" });
-  await user.click(screen.getByRole("button", { name: "Repository" }));
-  await waitFor(() => expect(window.location.pathname).toBe("/repository"));
+  await screen.findByRole("heading", { name: "Routes" });
 
   act(() => {
     window.history.pushState(null, "", "/chats/chat_closed");
@@ -252,7 +269,8 @@ it("opens a focused new conversation from a closed thread and preserves the draf
   await user.click(screen.getByRole("button", { name: "New thread", exact: true }));
   expect(input.value).toBe("Plan the launch");
   await waitFor(() => expect(document.activeElement).toBe(input));
-  await user.click(screen.getByRole("button", { name: "Workspace", exact: true }));
+  await user.click(screen.getByRole("button", { name: "Current agent: Mira. Switch agent" }));
+  await user.click(await screen.findByRole("menuitem", { name: "Agent workspace" }));
   await waitFor(() => expect(window.location.pathname).toBe("/agents/mira"));
   await user.click(screen.getByRole("button", { name: "New thread", exact: true }));
   await waitFor(() => expect(window.location.pathname).toBe("/"));
@@ -327,7 +345,7 @@ it("keeps the first message and follow-up draft mounted while the chat is create
   ).toBe(message);
   expect(screen.queryByRole("alert")).toBeNull();
   expect(screen.queryByRole("tab", { name: "Changes" })).toBeNull();
-  expect(screen.getByRole("tab", { name: "Workspace" }).getAttribute("aria-selected")).toBe("true");
+  expect(screen.getByRole("tab", { name: "Chat" }).getAttribute("aria-selected")).toBe("true");
 
   fireEvent.click(screen.getByRole("button", { name: "New thread", exact: true }));
   await waitFor(() => expect(window.location.pathname).toBe("/"));

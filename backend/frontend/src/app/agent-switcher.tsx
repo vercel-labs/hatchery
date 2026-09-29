@@ -1,10 +1,11 @@
-import { Bot, Check, ChevronsUpDown } from "lucide-react";
+import { Bot, Braces, Check, ChevronsUpDown, FolderOpen, Plus } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import type { Agent } from "@/lib/api";
@@ -15,16 +16,21 @@ function threadCount(count: number) {
 }
 
 // Ported from the agentmesh console; agents keep Hatchery's names and colors.
+// Besides switching, it opens the agent context and adds agents.
 export function AgentSwitcher({
   agents,
   agent,
   threadCounts,
   onSelect,
+  onOpen = () => {},
+  onAdd = () => {},
 }: {
   agents: Agent[];
   agent: Agent;
   threadCounts: Record<string, number>;
   onSelect: (agentId: string) => void;
+  onOpen?: (view: "workspace" | "api") => void;
+  onAdd?: () => void;
 }) {
   return (
     <DropdownMenu>
@@ -80,6 +86,22 @@ export function AgentSwitcher({
             </DropdownMenuItem>
           ))}
         </DropdownMenuGroup>
+        <DropdownMenuSeparator />
+        <DropdownMenuGroup>
+          <DropdownMenuItem onClick={() => onOpen("workspace")}>
+            <FolderOpen />
+            Agent workspace
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => onOpen("api")}>
+            <Braces />
+            API
+          </DropdownMenuItem>
+        </DropdownMenuGroup>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onClick={onAdd}>
+          <Plus />
+          Add agent
+        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );
