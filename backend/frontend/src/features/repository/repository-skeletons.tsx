@@ -80,11 +80,13 @@ export function RepositoryPanelSkeleton({
           {compact ? "Loading changes…" : "Loading repository…"}
         </span>
       ) : null}
-      <div className="flex shrink-0 items-center gap-2 border-b px-4 py-2.5">
-        <Skeleton className="size-3.5" />
-        <Skeleton className="h-3 w-28" />
-        <Skeleton className="ml-auto size-7 rounded-lg" />
-      </div>
+      {compact ? (
+        <div className="flex shrink-0 items-center gap-2 border-b px-4 py-2.5">
+          <Skeleton className="size-3.5" />
+          <Skeleton className="h-3 w-28" />
+          <Skeleton className="ml-auto size-7 rounded-lg" />
+        </div>
+      ) : null}
       {compact ? (
         <div className="min-h-0 flex-1 overflow-hidden">
           {[0, 1, 2].map((index) => (
@@ -94,6 +96,11 @@ export function RepositoryPanelSkeleton({
       ) : (
         <div className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[minmax(0,0.45fr)_minmax(0,1fr)] md:grid-cols-[240px_minmax(0,1fr)] md:grid-rows-[minmax(0,1fr)]">
           <aside className="flex min-h-0 flex-col border-b md:border-r md:border-b-0">
+            <div className="mx-3 mt-2 flex h-7 items-center gap-1.5">
+              <Skeleton className="size-3.5" />
+              <Skeleton className="h-3 w-16" />
+              <Skeleton className="ml-auto size-6 rounded-md" />
+            </div>
             <div className="space-y-4 p-4">
               <Skeleton className="h-3 w-24" />
               <Skeleton className="ml-3 h-3 w-32" />

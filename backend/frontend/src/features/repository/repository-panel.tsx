@@ -21,6 +21,8 @@ type Props = {
   reviewUrl?: string;
   compact?: boolean;
   loadingFallback?: ReactNode;
+  // Replaces the branch label at the top of the file tree, e.g. a version switcher.
+  branch?: ReactNode;
 };
 export default function RepositoryPanel({
   prefix = "",
@@ -28,6 +30,7 @@ export default function RepositoryPanel({
   proposal,
   revision,
   onApprove,
+  branch,
   reviewUrl,
   compact = false,
   loadingFallback,
@@ -112,98 +115,113 @@ export default function RepositoryPanel({
   const count = data.changes.filter((change) =>
     change.path.startsWith(prefix),
   ).length;
+  const label = (
+    <span
+      className="min-w-0 truncate"
+      title={
+        proposal
+          ? data.summary
+          : chatId
+            ? comparison === "full"
+              ? "Changes since this thread started. Updates after tool checkpoints."
+              : "Thread changes after its latest sync with main."
+            : data.branch
+      }
+    >
+      {proposal
+        ? data.merged
+          ? "Merged into main"
+          : "Awaiting review"
+        : chatId
+          ? `${count} changed ${count === 1 ? "file" : "files"}`
+          : "main"}
+    </span>
+  );
+  const review =
+    pending && onApprove ? (
+      <Button
+        size={compact ? "sm" : "xs"}
+        className="ml-auto"
+        disabled={approving}
+        onClick={() => void approve()}
+      >
+        {approving ? "Merging…" : "Approve & merge"}
+      </Button>
+    ) : pending && reviewUrl ? (
+      <a
+        className="ml-auto underline"
+        href={reviewUrl}
+        target="_blank"
+        rel="noreferrer"
+      >
+        Review on GitHub ↗
+      </a>
+    ) : null;
+  const refresh = (
+    <Button
+      className={
+        compact && (pending || (chatId && !proposal)) ? "" : "ml-auto"
+      }
+      size={compact ? "icon-sm" : "icon-xs"}
+      variant="ghost"
+      aria-label="Refresh files"
+      title="Refresh files"
+      disabled={isValidating}
+      onClick={() => void mutate()}
+    >
+      <RefreshCw className={isValidating ? "animate-spin" : ""} />
+    </Button>
+  );
+  const alert =
+    error || loadError ? (
+      <p role="alert" className="text-xs text-destructive">
+        {error || loadError.message}
+      </p>
+    ) : null;
   return (
     <section
       className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
       aria-label="Repository browser"
     >
-      <div className="shrink-0 space-y-2 border-b px-4 py-2.5">
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <GitBranch className="size-3.5" aria-hidden />
-          <span
-            title={
-              proposal
-                ? data.summary
-                : chatId
-                  ? comparison === "full"
-                    ? "Changes since this thread started. Updates after tool checkpoints."
-                    : "Thread changes after its latest sync with main."
-                  : data.branch
-            }
-          >
-            {proposal
-              ? data.merged
-                ? "Merged into main"
-                : "Awaiting review"
-              : chatId
-                ? `${count} changed ${count === 1 ? "file" : "files"}`
-                : "main"}
-          </span>
-          {pending && onApprove ? (
-            <Button
-              size="sm"
-              className="ml-auto"
-              disabled={approving}
-              onClick={() => void approve()}
-            >
-              {approving ? "Merging…" : "Approve & merge"}
-            </Button>
-          ) : pending && reviewUrl ? (
-            <a
-              className="ml-auto underline"
-              href={reviewUrl}
-              target="_blank"
-              rel="noreferrer"
-            >
-              Review on GitHub ↗
-            </a>
-          ) : null}
-          {chatId && !proposal ? (
-            <div
-              role="group"
-              aria-label="Diff comparison"
-              className="ml-auto flex gap-1"
-            >
-              <Button
-                size="xs"
-                variant={comparison === "full" ? "secondary" : "ghost"}
-                aria-label="Full diff"
-                aria-pressed={comparison === "full"}
-                title="Compare with the main commit where this thread started"
-                onClick={() => setComparison("full")}
+      {compact ? (
+        <div className="shrink-0 space-y-2 border-b px-4 py-2.5">
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <GitBranch className="size-3.5" aria-hidden />
+            {label}
+            {review}
+            {chatId && !proposal ? (
+              <div
+                role="group"
+                aria-label="Diff comparison"
+                className="ml-auto flex gap-1"
               >
-                Full
-              </Button>
-              <Button
-                size="xs"
-                variant={comparison === "latest" ? "secondary" : "ghost"}
-                aria-label="Latest diff"
-                aria-pressed={comparison === "latest"}
-                title="Compare with the latest main included in this thread"
-                onClick={() => setComparison("latest")}
-              >
-                Latest
-              </Button>
-            </div>
-          ) : null}
-          <Button
-            className={pending || (chatId && !proposal) ? "" : "ml-auto"}
-            size="icon-sm"
-            variant="ghost"
-            aria-label="Refresh files"
-            title="Refresh files"
-            disabled={isValidating}
-            onClick={() => void mutate()}
-          >
-            <RefreshCw className={isValidating ? "animate-spin" : ""} />
-          </Button>
+                <Button
+                  size="xs"
+                  variant={comparison === "full" ? "secondary" : "ghost"}
+                  aria-label="Full diff"
+                  aria-pressed={comparison === "full"}
+                  title="Compare with the main commit where this thread started"
+                  onClick={() => setComparison("full")}
+                >
+                  Full
+                </Button>
+                <Button
+                  size="xs"
+                  variant={comparison === "latest" ? "secondary" : "ghost"}
+                  aria-label="Latest diff"
+                  aria-pressed={comparison === "latest"}
+                  title="Compare with the latest main included in this thread"
+                  onClick={() => setComparison("latest")}
+                >
+                  Latest
+                </Button>
+              </div>
+            ) : null}
+            {refresh}
+          </div>
+          {alert}
         </div>
-        {error || loadError ? (
-          <p role="alert" className="text-xs text-destructive">
-            {error || loadError.message}
-          </p>
-        ) : null}
-      </div>
+      ) : null}
       {compact && paths.length ? (
         <ChangesList
           paths={paths}
@@ -225,9 +243,24 @@ export default function RepositoryPanel({
               className="flex min-h-0 min-w-0 flex-col border-b md:border-r md:border-b-0"
               aria-label="File tree"
             >
-              {chatId ? (
-                <div className="shrink-0 border-b bg-background p-3">
-                  <label className="flex items-center gap-2 text-xs text-muted-foreground">
+              <div className="shrink-0 space-y-1.5 px-3 pt-2 text-xs text-muted-foreground">
+                <div className="flex h-7 items-center gap-1.5">
+                  {branch ?? (
+                    <>
+                      <GitBranch className="size-3.5 shrink-0" aria-hidden />
+                      {label}
+                    </>
+                  )}
+                  {refresh}
+                </div>
+                {proposal && (branch || review) ? (
+                  <div className="flex items-center gap-2">
+                    {branch ? label : null}
+                    {review}
+                  </div>
+                ) : null}
+                {chatId ? (
+                  <label className="flex items-center gap-2">
                     <input
                       type="checkbox"
                       checked={changesOnly}
@@ -235,8 +268,9 @@ export default function RepositoryPanel({
                     />
                     Changed files only
                   </label>
-                </div>
-              ) : null}
+                ) : null}
+                {alert}
+              </div>
               <div
                 className="min-h-0 flex-1 overflow-auto overscroll-contain p-3 [scrollbar-gutter:stable] [scrollbar-width:thin]"
                 role="region"

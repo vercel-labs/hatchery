@@ -27,29 +27,23 @@ export function RepositoryVersionSwitcher({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
-        className="group flex h-9 min-w-28 max-w-[65%] items-center gap-2 rounded-lg bg-muted/60 px-3 text-xs outline-none transition-colors hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50 data-popup-open:bg-muted"
+        className="group -ms-1.5 flex h-7 min-w-0 items-center gap-1.5 rounded-md px-1.5 text-xs text-muted-foreground outline-none transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50 data-popup-open:bg-muted"
         aria-label={`Repository version: ${label}. Switch version`}
       >
         {selected ? (
-          <GitPullRequest
-            className="size-3.5 shrink-0 text-muted-foreground"
-            aria-hidden
-          />
+          <GitPullRequest className="size-3.5 shrink-0" aria-hidden />
         ) : (
-          <GitBranch
-            className="size-3.5 shrink-0 text-muted-foreground"
-            aria-hidden
-          />
+          <GitBranch className="size-3.5 shrink-0" aria-hidden />
         )}
-        <span className="min-w-0 flex-1 truncate text-left font-medium">
+        <span className="min-w-0 truncate text-left">
           {label}
         </span>
         <ChevronDown
-          className="size-3.5 shrink-0 text-muted-foreground transition-transform group-data-popup-open:rotate-180"
+          className="size-3 shrink-0 transition-transform group-data-popup-open:rotate-180"
           aria-hidden
         />
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" sideOffset={6} className="min-w-56">
+      <DropdownMenuContent align="start" sideOffset={6} className="min-w-56">
         <DropdownMenuGroup>
           <DropdownMenuLabel>Repository version</DropdownMenuLabel>
           <DropdownMenuItem

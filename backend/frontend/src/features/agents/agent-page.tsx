@@ -67,7 +67,6 @@ export function AgentPage({
           rosters={roster ? [roster] : []}
           refresh={refreshRoster}
           agentId={agent.id}
-          title={`agents/${agent.id}`}
         />
       </div>
     );

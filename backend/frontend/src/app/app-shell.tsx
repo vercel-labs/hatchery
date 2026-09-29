@@ -552,7 +552,6 @@ export function AppShell() {
           <RepositoryView
             rosters={rosters}
             refresh={refresh}
-            title={undefined}
           />
         )}
       </AllRosters>

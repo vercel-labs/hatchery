@@ -11,12 +11,10 @@ export function RepositoryView({
   rosters,
   refresh,
   agentId,
-  title,
 }: {
   rosters: AgentThreads[];
   refresh: () => Promise<unknown>;
   agentId?: string;
-  title?: string;
 }) {
   const [selection, setSelection] = useState("");
   const proposals = rosters.flatMap((roster) =>
@@ -48,33 +46,28 @@ export function RepositoryView({
     await refresh();
   }
   return (
-    <>
-      <header className="flex h-14 shrink-0 items-center justify-between gap-4 border-b px-5">
-        <h2 className="truncate text-sm font-medium">
-          {title ?? (agentId ? `${agentId} / Workspace` : "Repository")}
-        </h2>
-        {proposals.length ? (
-          <RepositoryVersionSwitcher
-            proposals={proposals}
-            selected={proposed}
-            onSelect={setSelection}
-          />
-        ) : null}
-      </header>
-      <Suspense
-        fallback={
-          <RepositoryPanelSkeleton showModeToggle={Boolean(proposed?.chatId)} />
+    <Suspense
+      fallback={
+        <RepositoryPanelSkeleton showModeToggle={Boolean(proposed?.chatId)} />
+      }
+    >
+      <RepositoryPanel
+        key={proposed?.branch ?? "main"}
+        prefix={agentId ? `agents/${agentId}/` : ""}
+        chatId={proposed?.chatId}
+        proposal={proposed?.branch}
+        onApprove={proposed?.localReview ? approve : undefined}
+        reviewUrl={proposed?.url}
+        branch={
+          proposals.length ? (
+            <RepositoryVersionSwitcher
+              proposals={proposals}
+              selected={proposed}
+              onSelect={setSelection}
+            />
+          ) : undefined
         }
-      >
-        <RepositoryPanel
-          key={proposed?.branch ?? "main"}
-          prefix={agentId ? `agents/${agentId}/` : ""}
-          chatId={proposed?.chatId}
-          proposal={proposed?.branch}
-          onApprove={proposed?.localReview ? approve : undefined}
-          reviewUrl={proposed?.url}
-        />
-      </Suspense>
-    </>
+      />
+    </Suspense>
   );
 }
