@@ -217,17 +217,15 @@ async def test_agent_warnings_check_main_repo_and_log(monkeypatch, caplog):
     assert "agent main repository lacks Hatchery GitHub access" in caplog.text
 
 
-async def test_agent_create_and_delete():
+async def test_agent_create():
     async with client() as c:
         created = await c.post("/api/agents", json={"name": "  docs  "})
         listed = (await c.get("/api/agents")).json()
-        deleted = await c.delete(f"/api/agents/{created.json()['id']}")
 
     assert created.status_code == 200
     assert created.json()["name"] == "docs"
     assert created.json()["color"] in server.agents.ACCENT_COLORS
     assert [agent["id"] for agent in listed] == [created.json()["id"]]
-    assert deleted.status_code == 204
 
 
 async def test_agent_create_ids_and_rename_keeps_id():
@@ -361,7 +359,12 @@ async def test_agent_create_accepts_only_explicit_accent_ids():
     assert custom.status_code == 422
 
 
-async def test_agent_delete_cascades_owner_scoped_jobs():
+async def test_agent_delete_cascades_owner_scoped_jobs(monkeypatch):
+    async def send(agent_id, msg, *, idempotency_key=None):
+        return "delivered"
+
+    monkeypatch.setattr(server.supervisor, "send", send)
+    await server.agents.default()
     agent = await server.agents.create("scheduled")
     own = await server.jobs.create(agent.id, "user_test", "0 9 * * *", "Mine")
     other = await server.jobs.create(agent.id, "user_other", "0 10 * * *", "Theirs")
@@ -374,16 +377,38 @@ async def test_agent_delete_cascades_owner_scoped_jobs():
     assert await server.jobs.get(other.id) is None
 
 
-async def test_agent_delete_rejects_unknown_agent_and_agent_with_chats():
+async def test_agent_delete_retires_archives_chats_and_hides_the_agent(monkeypatch):
+    sent = []
+
+    async def send(agent_id, msg, *, idempotency_key=None):
+        sent.append((agent_id, type(msg).__name__))
+        return "delivered"
+
+    monkeypatch.setattr(server.supervisor, "send", send)
+    await server.agents.default()
     agent = await server.agents.create("busy")
-    await chats.create(agent.id, "chat")
+    chat = await chats.create(agent.id, "chat")
 
     async with client() as c:
-        busy = await c.delete(f"/api/agents/{agent.id}")
+        deleted = await c.delete(f"/api/agents/{agent.id}")
+        listed = (await c.get("/api/agents")).json()
+        again = await c.delete(f"/api/agents/{agent.id}")
+        assign = await c.patch(f"/api/chats/{chat.id}/agent", json={"agent_id": agent.id})
+        new_chat = await c.post("/api/chats", json={"agent_id": agent.id})
+        last = await c.delete("/api/agents/hatchery")
         missing = await c.delete("/api/agents/missing")
 
-    assert busy.status_code == 409
-    assert busy.json() == {"detail": "agent still has chats"}
+    assert deleted.status_code == 204
+    assert sent == [(agent.id, "Retire")]
+    assert (await chats.get(chat.id)).archived_at is not None
+    assert [item["id"] for item in listed] == ["hatchery"]
+    # Archived chats still resolve their agent.
+    assert (await server.agents.get(agent.id)).deleted_at is not None
+    assert again.status_code == 404
+    assert assign.status_code == 404
+    assert new_chat.status_code == 404
+    assert last.status_code == 409
+    assert last.json() == {"detail": "cannot delete the last agent"}
     assert missing.status_code == 404
 
 

@@ -155,19 +155,20 @@ async def get(agent_id: str) -> models.Agent | None:
 
 
 async def list_all() -> list[models.Agent]:
-    """All agents, oldest first (a stable sidebar order)."""
+    """All agents that are not deleted, oldest first (a stable sidebar order)."""
     if store.use_postgres():
         from hatchery.store import db
 
         rows = await (await db.pool()).fetch("SELECT data FROM hatchery_agents ORDER BY created_at")
-        return [models.Agent.model_validate_json(_json(row["data"])) for row in rows]
-    found = []
-    for path in sorted((store.data_dir() / "agents").glob("*.json")):
-        agent = await get(urllib.parse.unquote(path.stem))
-        if agent is not None:
-            found.append(agent)
-    found.sort(key=lambda s: s.created_at)
-    return found
+        found = [models.Agent.model_validate_json(_json(row["data"])) for row in rows]
+    else:
+        found = []
+        for path in sorted((store.data_dir() / "agents").glob("*.json")):
+            agent = await get(urllib.parse.unquote(path.stem))
+            if agent is not None:
+                found.append(agent)
+        found.sort(key=lambda s: s.created_at)
+    return [agent for agent in found if agent.deleted_at is None]
 
 
 async def default() -> models.Agent:

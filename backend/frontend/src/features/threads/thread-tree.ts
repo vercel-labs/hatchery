@@ -10,7 +10,6 @@ export type TreeThread = {
 export function logicalThreads(
   threads: Thread[],
   selected: string | null,
-  search: string,
 ): TreeThread[] {
   const roster: Thread[] = [];
   const byId = new Map<string, Thread>();
@@ -23,21 +22,14 @@ export function logicalThreads(
   const included = new Set<string>();
   const forced = new Set<string>();
   for (const thread of roster) {
-    if (
-      (!search && thread.thread_id === selected) ||
-      (!thread.archived &&
-        (!search ||
-          `${threadTitle(thread)} ${thread.summary}`
-            .toLowerCase()
-            .includes(search)))
-    ) {
+    if (thread.thread_id === selected || !thread.archived) {
       included.add(thread.thread_id);
     }
   }
 
   for (const thread of roster) {
     if (!included.has(thread.thread_id)) continue;
-    const revealPath = Boolean(search) || thread.thread_id === selected;
+    const revealPath = thread.thread_id === selected;
     const path = new Set<string>();
     let current: Thread | undefined = thread;
     while (current && !path.has(current.thread_id)) {

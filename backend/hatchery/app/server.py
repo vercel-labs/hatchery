@@ -626,12 +626,26 @@ async def _agents() -> list[models.Agent]:
 
 @app.delete("/api/agents/{agent_id}", status_code=204)
 async def delete_agent(agent_id: str) -> None:
-    if any(chat.agent_id == agent_id for chat in await chats.list_all()):
-        raise fastapi.HTTPException(409, "agent still has chats")
-    if await agents.get(agent_id) is None:
+    """Retire the agent, archive its chats, and hide it from the agent list.
+
+    The row stays so archived chats still open, and its id stays taken.
+    """
+    agent = await agents.get(agent_id)
+    if agent is None or agent.deleted_at is not None:
         raise fastapi.HTTPException(404, "unknown agent")
+    if len(await agents.list_all()) <= 1:
+        raise fastapi.HTTPException(409, "cannot delete the last agent")
     await jobs.delete_for_agent(agent_id)
-    await agents.delete(agent_id)
+    await serve_api.retire(agent_id, f"delete:{agent_id}")
+    await supervisor.send(
+        agent_id, messages.Retire(reason="agent deleted"), idempotency_key=f"delete:{agent_id}"
+    )
+    for chat in await chats.list_all():
+        if chat.agent_id == agent_id and chat.archived_at is None:
+            await chats.set_archived(chat.id, True)
+            await events.append(chat.id, "ui", {"type": "chat.changed"})
+    agent.deleted_at = datetime.datetime.now(datetime.UTC).isoformat()
+    await agents.save(agent)
 
 
 class UpdateAgentRequest(pydantic.BaseModel):
@@ -917,7 +931,8 @@ async def mark_chat_seen(chat_id: str) -> models.Chat:
 async def assign_chat_agent(
     chat_id: str, request: AssignChatAgentRequest
 ) -> models.Chat:
-    if await agents.get(request.agent_id) is None:
+    agent = await agents.get(request.agent_id)
+    if agent is None or agent.deleted_at is not None:
         raise fastapi.HTTPException(404, "unknown agent")
     if await chats.get(chat_id) is None:
         raise fastapi.HTTPException(404, "unknown chat")

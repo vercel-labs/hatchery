@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, it, vi } from "vitest";
 import { ThreadNavigation } from "@/features/threads/thread-navigation";
@@ -148,62 +148,48 @@ it("labels idle delegated outcomes instead of asking for a reply", async () => {
   await userEvent.click(
     screen.getByRole("button", { name: "Expand subagents for Lifecycle root" }),
   );
-  expect(screen.getAllByText("Completed")).toHaveLength(1);
+  expect(
+    screen.getByRole("button", { name: /Finished child/ }).title,
+  ).toBe("Finished child · Completed");
   expect(screen.getByRole("img", { name: "Completed badge" })).toBeTruthy();
   expect(
     screen
       .getByRole("img", { name: "Completed" })
       .classList.contains("bg-zinc-200"),
   ).toBe(true);
-  expect(screen.getByText("Waiting for input")).toBeTruthy();
+  expect(
+    screen.getByRole("button", { name: /Working child/ }).title,
+  ).toBe("Working child · Waiting for input");
 });
 
-// agentmesh: [[subagents#Console]]
-it("keeps a matching thread's ancestor path visible during search", async () => {
-  navigation([
-    rosterThread("Root plan"),
-    rosterThread("Implementation", "Root plan"),
-    rosterThread("Needle investigation", "Implementation", { depth: 2 }),
-    rosterThread("Unrelated one"),
-    rosterThread("Unrelated two"),
-    rosterThread("Unrelated three"),
-  ]);
-
-  await userEvent.type(screen.getByLabelText("Search threads"), "needle");
-
-  await waitFor(() =>
-    expect(threadRows().map((row) => row.dataset.threadDepth)).toEqual([
-      "0",
-      "1",
-      "2",
-    ]),
-  );
-  expect(screen.getByText("Root plan")).toBeTruthy();
-  expect(screen.getByText("Implementation")).toBeTruthy();
-  expect(screen.getByText("Needle investigation")).toBeTruthy();
-  expect(screen.queryByText("Unrelated one")).toBeNull();
-});
-
-// agentmesh: [[subagents#Console]]
-it("does not retain an unrelated selected thread during search", async () => {
+// Hatchery: the active chat lists its subagents as one-line rows; other chats
+// keep them folded into the status stack.
+it("expands the selected chat's subagents as one-line rows", async () => {
   navigation(
     [
-      rosterThread("Selected root"),
-      rosterThread("First"),
-      rosterThread("Second"),
-      rosterThread("Third"),
-      rosterThread("Fourth"),
-      rosterThread("Fifth"),
+      rosterThread("Active root"),
+      rosterThread("Active child", "Active root"),
+      rosterThread("Other root"),
+      rosterThread("Other child", "Other root"),
     ],
-    "Selected root",
+    "Active root",
   );
 
-  await userEvent.type(screen.getByLabelText("Search threads"), "absent");
+  const rows = threadRows();
+  expect(rows.map((row) => row.textContent)).toEqual([
+    expect.stringContaining("Other root"),
+    expect.stringContaining("Active root"),
+    expect.stringContaining("Active child"),
+  ]);
+  expect(rows[2].querySelector("[data-thread-meta]")).toBeNull();
+  expect(
+    screen.getByRole("button", { name: "Expand subagents for Other root" }),
+  ).toBeTruthy();
 
-  await waitFor(() =>
-    expect(screen.getByText("No matching threads.")).toBeTruthy(),
+  await userEvent.click(
+    screen.getByRole("button", { name: "Collapse subagents for Active root" }),
   );
-  expect(screen.queryByText("Selected root")).toBeNull();
+  expect(screen.queryByText("Active child")).toBeNull();
 });
 
 // agentmesh: [[subagents#Console]]

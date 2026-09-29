@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState } from "react";
 import {
   BookMarkedIcon,
   CheckIcon,
@@ -32,7 +32,6 @@ import {
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { RepositoryView } from "@/features/repository/repository-view";
 import { MarkdownText } from "@/features/threads/markdown-text";
@@ -46,50 +45,40 @@ import { reasonMessage } from "@/lib/format";
 // directory in the storage repo (agentmesh's Workspace view).
 export function AgentPage({
   agent,
+  view,
   roster,
   warning,
-  leading,
   refreshRoster,
   onChange,
   onRemove,
 }: {
   agent: Agent;
+  view: "overview" | "files";
   roster?: AgentThreads;
   warning?: string;
-  leading?: ReactNode;
   refreshRoster: () => Promise<unknown>;
   onChange: (agent: Agent) => void;
   onRemove: () => void;
 }) {
-  return (
-    <Tabs defaultValue="overview" className="flex min-h-0 flex-1 flex-col gap-0">
-      <header className="flex h-14 shrink-0 items-center gap-3 border-b px-4">
-        {leading}
-        <h2 className="min-w-0 flex-1 truncate text-sm font-medium">
-          {agent.name} / Workspace
-        </h2>
-        <TabsList>
-          <TabsTrigger value="overview">Overview</TabsTrigger>
-          <TabsTrigger value="files">Files</TabsTrigger>
-        </TabsList>
-      </header>
-      <TabsContent value="overview" className="min-h-0 flex-1 overflow-y-auto p-6 md:p-10">
-        <AgentPane
-          agent={agent}
-          warning={warning}
-          onChange={onChange}
-          onRemove={onRemove}
-        />
-      </TabsContent>
-      <TabsContent value="files" className="flex min-h-0 flex-1 flex-col">
+  if (view === "files")
+    return (
+      <div className="flex min-h-0 flex-1 flex-col">
         <RepositoryView
           rosters={roster ? [roster] : []}
           refresh={refreshRoster}
           agentId={agent.id}
-          title={`agents/${agent.id}`}
         />
-      </TabsContent>
-    </Tabs>
+      </div>
+    );
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto p-6 md:p-10">
+      <AgentPane
+        agent={agent}
+        warning={warning}
+        onChange={onChange}
+        onRemove={onRemove}
+      />
+    </div>
   );
 }
 
@@ -128,7 +117,7 @@ function AgentsDocument({ agentId }: { agentId: string }) {
 }
 
 // Retire cancels every thread (each sandbox is checkpointed and stopped);
-// removing deletes the agent record once it has no chats.
+// deleting also archives the agent's chats and hides the agent.
 function RetireAgent({
   agentId,
   onRemove,
@@ -160,7 +149,7 @@ function RetireAgent({
       </Button>
       <Button variant="ghost" size="sm" onClick={onRemove}>
         <Trash2Icon />
-        Remove agent
+        Delete agent
       </Button>
       {status ? (
         <p role="status" className="w-full text-xs text-muted-foreground">

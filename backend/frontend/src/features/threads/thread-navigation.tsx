@@ -1,5 +1,4 @@
-import { useDeferredValue, useState } from "react";
-import { Plus, Search } from "lucide-react";
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { ChatOriginIcon } from "@/components/chat-origin-icon";
 import { chatAttentionLabel } from "@/lib/chat-sidebar";
@@ -32,15 +31,13 @@ export function ThreadNavigation({
   optimisticallyAwake?: ReadonlySet<string>;
   onSelect: (id: string) => void;
 }) {
-  const [filter, setFilter] = useState("");
   const [expanded, setExpanded] = useState<Map<string, boolean>>(
     () => new Map(),
   );
   function toggle(id: string, open: boolean) {
     setExpanded((current) => new Map(current).set(id, !open));
   }
-  const search = useDeferredValue(filter.trim().toLowerCase());
-  const logical = logicalThreads(threads, selected, search);
+  const logical = logicalThreads(threads, selected);
   const recent: TreeThread[] = [];
   let hiddenBelow: number | null = null;
   for (const item of logical) {
@@ -48,7 +45,8 @@ export function ThreadNavigation({
     hiddenBelow = null;
     recent.push(item);
     const open =
-      search || (expanded.get(item.thread.thread_id) ?? item.forceExpanded);
+      expanded.get(item.thread.thread_id) ??
+      (item.forceExpanded || item.thread.thread_id === selected);
     if (item.hasChildren && !open) hiddenBelow = item.depth;
   }
   const branches = threadTreeBranches(recent);
@@ -57,28 +55,6 @@ export function ThreadNavigation({
       className="flex min-h-0 min-w-0 flex-1 flex-col"
       aria-label="Threads"
     >
-      <div className="flex shrink-0 items-center justify-between px-5 pb-2">
-        <h2 className="text-xs font-medium text-muted-foreground">Threads</h2>
-        <Button
-          size="icon-sm"
-          variant="ghost"
-          aria-label="New thread"
-          title="New thread"
-          onClick={() => onSelect("")}
-        >
-          <Plus />
-        </Button>
-      </div>
-      <label className="mx-4 mb-2 flex shrink-0 items-center gap-2 rounded-lg bg-muted/70 px-2.5">
-        <Search className="size-3.5 text-muted-foreground" />
-        <input
-          aria-label="Search threads"
-          placeholder="Search threads"
-          value={filter}
-          onChange={(event) => setFilter(event.target.value)}
-          className="h-8 min-w-0 flex-1 bg-transparent text-xs outline-none"
-        />
-      </label>
       <div
         className="scrollbar-thin flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto overscroll-contain px-3 pb-4"
         role="tree"
@@ -157,8 +133,11 @@ export function ThreadNavigation({
           const statusLabel = badge?.label ?? activity.label;
           const open = Boolean(
             hasChildren &&
-            (search || (expanded.get(thread.thread_id) ?? forceExpanded)),
+            (expanded.get(thread.thread_id) ??
+              (forceExpanded || thread.thread_id === selected)),
           );
+          // A subagent without its own subagents is a one-line row.
+          const compact = depth > 0 && !hasChildren;
           return (
             <div
               key={thread.thread_id}
@@ -176,11 +155,12 @@ export function ThreadNavigation({
               }
             >
               <ThreadTreeGuides branches={branches[index]} />
-              <div className="relative h-16">
+              <div className={compact ? "relative h-9" : "relative h-16"}>
                 <Button
                   className={
-                    "h-16 w-full min-w-0 justify-start gap-3 overflow-hidden rounded-xl py-3 text-left " +
-                    "px-3" +
+                    (compact
+                      ? "h-9 w-full min-w-0 justify-start gap-2 overflow-hidden rounded-lg px-3 text-left"
+                      : "h-16 w-full min-w-0 justify-start gap-3 overflow-hidden rounded-xl px-3 py-3 text-left") +
                     (sleeping ? " opacity-85" : "")
                   }
                   variant={
@@ -194,13 +174,14 @@ export function ThreadNavigation({
                   data-thread-state={
                     sleeping ? "sleeping" : thread.live ? "awake" : "finished"
                   }
-                  title={title}
+                  title={compact ? `${title} · ${statusLabel}` : title}
                   onClick={() => onSelect(thread.thread_id)}
                 >
                   <span className="relative inline-flex shrink-0">
                     <ThreadStatusIndicator
                       thread={thread}
                       forceAwake={optimisticAwake}
+                      size={compact ? "sm" : "md"}
                     />
                     {badge ? <ThreadStatusBadge badge={badge} /> : null}
                   </span>
@@ -219,21 +200,25 @@ export function ThreadNavigation({
                           <ChatOriginIcon trigger={thread.trigger} />
                         </span>
                       ) : null}
-                      <strong className="min-w-0 flex-1 truncate text-sm font-medium">
+                      <strong
+                        className={`min-w-0 flex-1 truncate text-sm ${compact ? "font-normal" : "font-medium"}`}
+                      >
                         {title}
                       </strong>
                       <ThreadActivityChips thread={thread} />
                     </span>
-                    <span
-                      className="mt-1 flex h-4 min-w-0 items-center gap-1.5 text-xs font-normal text-muted-foreground"
-                      data-thread-meta
-                    >
-                      {!hasChildren ? (
-                        <span className="min-w-0 truncate whitespace-nowrap">
-                          {statusLabel}
-                        </span>
-                      ) : null}
-                    </span>
+                    {compact ? null : (
+                      <span
+                        className="mt-1 flex h-4 min-w-0 items-center gap-1.5 text-xs font-normal text-muted-foreground"
+                        data-thread-meta
+                      >
+                        {!hasChildren ? (
+                          <span className="min-w-0 truncate whitespace-nowrap">
+                            {statusLabel}
+                          </span>
+                        ) : null}
+                      </span>
+                    )}
                   </span>
                 </Button>
                 {hasChildren ? (
@@ -253,7 +238,7 @@ export function ThreadNavigation({
         })}
         {!recent.length ? (
           <p className="px-2 py-4 text-xs text-muted-foreground">
-            {search ? "No matching threads." : "No conversations yet."}
+            No conversations yet.
           </p>
         ) : null}
       </div>

@@ -13,11 +13,11 @@ import {
   type ReactNode,
   type Ref,
 } from "react";
-import { ArrowLeft, Check, FileDiff, TriangleAlertIcon } from "lucide-react";
+import { Check, TriangleAlertIcon } from "lucide-react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { ResizeHandle } from "@/components/resize-handle";
+import { ContextTabs, type ContextTab } from "@/components/context-tabs";
 import { PromptForm } from "@/components/prompt-form";
 import { TerminalPane, type SandboxWorkspace } from "@/components/terminal-pane";
 import {
@@ -35,6 +35,7 @@ import type {
   Message,
   PendingPrompt,
   Repository,
+  Thread,
 } from "@/lib/api-types";
 import { chatSidebarText } from "@/lib/chat-sidebar";
 import { number } from "@/lib/format";
@@ -47,19 +48,22 @@ import { useThreadActions } from "./use-thread-actions";
 import { threadActivity } from "./thread-activity";
 import { ThreadStatePanel } from "./thread-state-panel";
 import { ConversationSkeleton } from "./thread-skeletons";
-import { threadsWithObjectives, threadTitle } from "./thread-tree";
+import { subtreeThreads, threadsWithObjectives, threadTitle } from "./thread-tree";
 
 const RepositoryPanel = lazy(
   () => import("@/features/repository/repository-panel"),
 );
 const WorkspacePanel = lazy(() => import("./workspace-panel"));
-type SidebarTab = "workspace" | "changes" | "state" | "terminal";
-const tabLabels: Record<SidebarTab, string> = {
+export const chatViews = ["chat", "terminal", "workspace", "changes", "state"] as const;
+export type ChatView = (typeof chatViews)[number];
+const viewLabels: Record<Exclude<ChatView, "chat">, string> = {
+  terminal: "Terminal",
   workspace: "Workspace",
   changes: "Changes",
   state: "State",
-  terminal: "Terminal",
 };
+// Subagent tabs past this count go into the tab bar's "more" menu.
+const SUBAGENT_TABS = 4;
 const noop = () => {};
 const ignoreRefresh = async () => {};
 
@@ -76,6 +80,8 @@ export function Conversation({
   roster,
   warning,
   leading,
+  view: routedView,
+  onViewChange,
   composerRef,
   onPersist,
   refreshRoster = ignoreRefresh,
@@ -95,6 +101,9 @@ export function Conversation({
   roster?: AgentThreads;
   warning?: string;
   leading?: ReactNode;
+  // The shown tab; the conversation keeps its own when this is not given.
+  view?: ChatView;
+  onViewChange?: (view: ChatView) => void;
   composerRef?: Ref<HTMLTextAreaElement>;
   onPersist?: (agentId: string | null) => Promise<Chat>;
   refreshRoster?: () => Promise<unknown>;
@@ -442,8 +451,10 @@ export function Conversation({
     }
   }
 
-  const [mobileReview, setMobileReview] = useState(false);
-  const [sidebarTab, setSidebarTab] = useState<SidebarTab>("workspace");
+  const [ownView, setOwnView] = useState<ChatView>("chat");
+  const view = routedView ?? ownView;
+  const selectView = (next: ChatView) =>
+    onViewChange ? onViewChange(next) : setOwnView(next);
   const sidebarId = useId();
   const [selectedProposal, setSelectedProposal] = useState("");
   const changes = useApi<Repository>(
@@ -454,20 +465,20 @@ export function Conversation({
   const hasChanges = Boolean(
     detail?.proposals.length || changes.data?.changes.length,
   );
-  const sidebarTabs: SidebarTab[] = [
-    "workspace",
-    ...(hasChanges ? (["changes"] as const) : []),
-    "state",
-    ...(sandboxes.length ? (["terminal"] as const) : []),
-  ];
-  const activeSidebarTab = sidebarTabs.includes(sidebarTab)
-    ? sidebarTab
-    : "workspace";
+  // A draft has only its chat; the rest appear once the chat exists.
+  const views: ChatView[] = persisted
+    ? [
+        "chat",
+        ...(sandboxes.length ? (["terminal"] as const) : []),
+        "workspace",
+        ...(hasChanges ? (["changes"] as const) : []),
+        "state",
+      ]
+    : ["chat"];
+  const activeView = views.includes(view) ? view : "chat";
   const proposal = detail?.proposals.find((p) => p.branch === selectedProposal);
 
   const scrollRef = useRef<HTMLDivElement>(null);
-  const conversationRef = useRef<HTMLElement>(null);
-  const changesRef = useRef<HTMLElement>(null);
   const following = useRef(true);
   useEffect(() => {
     const element = scrollRef.current;
@@ -493,259 +504,248 @@ export function Conversation({
   );
   const statusLabel = stateDetail ? threadActivity(stateDetail).label : "";
 
+  // Tabs for the chat's thread family: the top chat, then its subagents with a
+  // chat, then views of the thread shown now.
+  // Roster order, so tabs keep the sidebar's order.
+  const family = agentThreads.some((item) => item.thread_id === threadId)
+    ? agentThreads
+    : hierarchyThreads;
+  const familyById = new Map(family.map((item) => [item.thread_id, item]));
+  let rootThread = threadId ? familyById.get(threadId) : undefined;
+  const walked = new Set<string>();
+  while (rootThread?.parent_thread_id && !walked.has(rootThread.thread_id)) {
+    walked.add(rootThread.thread_id);
+    const parent = familyById.get(rootThread.parent_thread_id);
+    if (!parent) break;
+    rootThread = parent;
+  }
+  const subagents = rootThread
+    ? subtreeThreads(family, rootThread.thread_id)
+        .slice(1)
+        .filter((item) => item.chat_id && (!item.archived || item.thread_id === threadId))
+    : [];
+  const shownSubagents = subagents.filter(
+    (item, index) => index < SUBAGENT_TABS || item.thread_id === threadId,
+  );
+  const threadTab = (thread: Thread | undefined, label: string): ContextTab =>
+    !thread || thread.thread_id === threadId
+      ? {
+          key: thread?.thread_id ?? "chat",
+          label,
+          title,
+          id: `${sidebarId}-chat-tab`,
+          controls: `${sidebarId}-chat-panel`,
+          selected: activeView === "chat",
+          current: true,
+          onSelect: () => selectView("chat"),
+        }
+      : {
+          key: thread.thread_id,
+          label,
+          title: threadTitle(thread),
+          selected: false,
+          onSelect: () => onThread(thread.thread_id),
+        };
+  const tabs: ContextTab[] = [
+    threadTab(rootThread, "Chat"),
+    ...shownSubagents.map((item) => threadTab(item, threadTitle(item))),
+    ...views
+      .filter((item) => item !== "chat")
+      .map((item, index) => ({
+        key: item,
+        label: viewLabels[item],
+        id: `${sidebarId}-${item}-tab`,
+        controls: `${sidebarId}-${item}-panel`,
+        selected: activeView === item,
+        separated: index === 0,
+        onSelect: () => selectView(item),
+      })),
+  ];
+  const moreTabs = subagents
+    .filter((item) => !shownSubagents.includes(item))
+    .map((item) => threadTab(item, threadTitle(item)));
+
   return (
-    <section
-      ref={conversationRef}
-      className="grid min-h-0 min-w-0 flex-1 grid-cols-1 grid-rows-[minmax(0,1fr)] [--changes-width:44%] lg:grid-cols-[minmax(0,1fr)_1px_var(--changes-width)]"
-      aria-label="Thread"
-    >
-      <div
-        className={`${mobileReview ? "hidden lg:flex" : "flex"} min-h-0 min-w-0 flex-col`}
-      >
-        <header className="flex h-14 shrink-0 items-center gap-3 border-b px-4">
-          {leading}
-          <h2
-            className="min-w-0 flex-1 truncate text-sm font-medium"
-            title={title}
-          >
-            {title}
-          </h2>
-          {stateDetail ? (
-            <span
-              className="text-xs text-muted-foreground"
-              title={`${stateDetail.turns} turns · ${number(stateDetail.input_tokens + stateDetail.output_tokens)} tokens`}
-            >
-              {statusLabel === "Ready for your reply" ? "" : statusLabel}
-            </span>
-          ) : null}
-          {persisted &&
-          !archived &&
-          detail?.live &&
-          detail.status === "idle" &&
-          !queuedPrompts.length &&
-          !working &&
-          !detail.activity?.mailbox_depth ? (
-            <Button
-              size="sm"
-              variant="ghost"
-              title="Archive this idle thread"
-              onClick={() => onArchiveChange(true)}
-            >
-              <Check />
-              Archive
-            </Button>
-          ) : null}
-          {archived ? (
-            <Button size="sm" variant="ghost" onClick={() => onArchiveChange(false)}>
-              Unarchive
-            </Button>
-          ) : null}
-          {detail?.status === "parked" ? (
-            <Button size="sm" disabled={resuming} onClick={() => void resume()}>
-              {resuming ? "Resuming…" : "Resume"}
-            </Button>
-          ) : null}
-          <Button
-            className="lg:hidden"
-            size="icon"
-            variant="ghost"
-            aria-label="Show thread details"
-            onClick={() => setMobileReview(true)}
-          >
-            <FileDiff />
-          </Button>
-        </header>
-        {error || loadError || detail?.error || sending || seenError ? (
-          <p
-            role="alert"
-            className="shrink-0 border-b px-5 py-3 text-sm text-destructive"
-          >
-            {error || loadError?.message || detail?.error || sending || seenError}
-          </p>
-        ) : null}
+    <section className="flex min-h-0 min-w-0 flex-1 flex-col" aria-label="Thread">
+      <ContextTabs label="Chat" leading={leading} tabs={tabs} more={moreTabs} />
+      <Activity mode={activeView === "chat" ? "visible" : "hidden"}>
         <div
-          ref={scrollRef}
-          className="min-h-0 flex-1 overflow-y-auto overscroll-contain [overflow-anchor:none]"
-          aria-label="Messages"
-          role="region"
-          tabIndex={0}
-          onScroll={(event) => {
-            const element = event.currentTarget;
-            following.current =
-              element.scrollHeight - element.scrollTop - element.clientHeight <
-              80;
-          }}
+          id={`${sidebarId}-chat-panel`}
+          role="tabpanel"
+          aria-labelledby={`${sidebarId}-chat-tab`}
+          className="flex min-h-0 min-w-0 flex-1 flex-col"
         >
-          <div
-            className={`mx-auto w-full max-w-3xl px-5 py-8 sm:px-7 ${!messages.length && !responding ? "grid h-full min-h-48 place-content-center" : ""}`}
-          >
-            {warning ? (
-              <Alert className="mb-6">
-                <TriangleAlertIcon />
-                <AlertTitle>GitHub access needed</AlertTitle>
-                <AlertDescription>{warning}</AlertDescription>
-              </Alert>
+          <header className="flex h-12 shrink-0 items-center gap-3 border-b px-4">
+            <h2
+              className="min-w-0 flex-1 truncate text-sm font-medium"
+              title={title}
+            >
+              {title}
+            </h2>
+            {stateDetail ? (
+              <span
+                className="text-xs text-muted-foreground"
+                title={`${stateDetail.turns} turns · ${number(stateDetail.input_tokens + stateDetail.output_tokens)} tokens`}
+              >
+                {statusLabel === "Ready for your reply" ? "" : statusLabel}
+              </span>
             ) : null}
-            {transcript === null ? (
-              <ConversationSkeleton />
-            ) : !messages.length && !responding ? (
-              <div className="space-y-2 text-center">
-                <h3 className="text-xl font-medium tracking-tight">
-                  What are we working on?
-                </h3>
-                <p className="text-sm text-muted-foreground">
-                  {agentId
-                    ? `Message ${agentName} to start a thread.`
-                    : "Send a message; Hatchery picks the agent."}
+            {persisted &&
+            !archived &&
+            detail?.live &&
+            detail.status === "idle" &&
+            !queuedPrompts.length &&
+            !working &&
+            !detail.activity?.mailbox_depth ? (
+              <Button
+                size="sm"
+                variant="ghost"
+                title="Archive this idle thread"
+                onClick={() => onArchiveChange(true)}
+              >
+                <Check />
+                Archive
+              </Button>
+            ) : null}
+            {archived ? (
+              <Button size="sm" variant="ghost" onClick={() => onArchiveChange(false)}>
+                Unarchive
+              </Button>
+            ) : null}
+            {detail?.status === "parked" ? (
+              <Button size="sm" disabled={resuming} onClick={() => void resume()}>
+                {resuming ? "Resuming…" : "Resume"}
+              </Button>
+            ) : null}
+          </header>
+          {error || loadError || detail?.error || sending || seenError ? (
+            <p
+              role="alert"
+              className="shrink-0 border-b px-5 py-3 text-sm text-destructive"
+            >
+              {error || loadError?.message || detail?.error || sending || seenError}
+            </p>
+          ) : null}
+          <div
+            ref={scrollRef}
+            className="min-h-0 flex-1 overflow-y-auto overscroll-contain [overflow-anchor:none]"
+            aria-label="Messages"
+            role="region"
+            tabIndex={0}
+            onScroll={(event) => {
+              const element = event.currentTarget;
+              following.current =
+                element.scrollHeight - element.scrollTop - element.clientHeight <
+                80;
+            }}
+          >
+            <div
+              className={`mx-auto w-full max-w-3xl px-5 py-8 sm:px-7 ${!messages.length && !responding ? "grid h-full min-h-48 place-content-center" : ""}`}
+            >
+              {warning ? (
+                <Alert className="mb-6">
+                  <TriangleAlertIcon />
+                  <AlertTitle>GitHub access needed</AlertTitle>
+                  <AlertDescription>{warning}</AlertDescription>
+                </Alert>
+              ) : null}
+              {transcript === null ? (
+                <ConversationSkeleton />
+              ) : !messages.length && !responding ? (
+                <div className="space-y-2 text-center">
+                  <h3 className="text-xl font-medium tracking-tight">
+                    What are we working on?
+                  </h3>
+                  <p className="text-sm text-muted-foreground">
+                    {agentId
+                      ? `Message ${agentName} to start a thread.`
+                      : "Send a message; Hatchery picks the agent."}
+                  </p>
+                </div>
+              ) : (
+                <Transcript
+                  messages={messages}
+                  owner={agentId ?? undefined}
+                  responding={responding}
+                  respondingLabel={
+                    status === "submitted" ? submissionLabel(agentId) : undefined
+                  }
+                  toolProgress={detail?.tool_progress}
+                  stopped={detail ? !detail.live : false}
+                  threads={directChildren}
+                  parentThread={parentThread}
+                  parentThreadId={detail?.parent_thread_id}
+                  onThread={onThread}
+                />
+              )}
+              {roster?.budget?.exhausted && detailActivity?.budgetHeld ? (
+                <BudgetHoldNotice
+                  agentId={roster.agent_id}
+                  budget={roster.budget}
+                  heldCount={roster.waiting.length}
+                  onGranted={async () => {
+                    await Promise.all([refreshRoster(), mutate()]);
+                  }}
+                />
+              ) : null}
+              {streamError ? (
+                <p role="status" className="mt-4 text-xs text-muted-foreground">
+                  {streamError.message}
                 </p>
+              ) : null}
+            </div>
+          </div>
+          <div className="mx-auto w-full max-w-3xl shrink-0 p-4 pt-2 sm:px-6 sm:pb-5">
+            {archived ? (
+              <Alert>
+                <AlertTitle>This chat is archived</AlertTitle>
+                <AlertDescription className="flex items-center justify-between gap-3">
+                  <span>Unarchive it before posting.</span>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => onArchiveChange(false)}
+                  >
+                    Unarchive
+                  </Button>
+                </AlertDescription>
+              </Alert>
+            ) : detail && !detail.live ? (
+              <div className="flex items-center justify-between gap-3 rounded-xl bg-muted/40 px-4 py-3">
+                <p className="text-xs text-muted-foreground">Thread finished</p>
+                <Button variant="ghost" size="sm" onClick={onNewThread}>
+                  Start a new thread
+                </Button>
               </div>
             ) : (
-              <Transcript
-                messages={messages}
-                owner={agentId ?? undefined}
-                responding={responding}
-                respondingLabel={
-                  status === "submitted" ? submissionLabel(agentId) : undefined
-                }
-                toolProgress={detail?.tool_progress}
-                stopped={detail ? !detail.live : false}
-                threads={directChildren}
-                parentThread={parentThread}
-                parentThreadId={detail?.parent_thread_id}
-                onThread={onThread}
-              />
+              <>
+                <QueuedPrompts prompts={queuedPrompts} />
+                <PromptForm
+                  ref={composerRef}
+                  autoFocus={startedHere}
+                  isBusy={working}
+                  sendDisabled={stopping || persisting}
+                  traceId={chat?.telemetry_span?.trace_id ?? null}
+                  agents={agents}
+                  agentId={detail ? null : agentId}
+                  showAutoAgent={agentId === null && !detail}
+                  showMarkAsRead={Boolean(chat?.attention_reason)}
+                  isMarkingAsRead={markingSeen}
+                  onSubmit={send}
+                  onStop={async () => {
+                    void detach();
+                    if (detail) await stop();
+                  }}
+                  onAgentChange={onAgentChange}
+                  onMarkAsRead={() => void markAsSeen()}
+                />
+              </>
             )}
-            {roster?.budget?.exhausted && detailActivity?.budgetHeld ? (
-              <BudgetHoldNotice
-                agentId={roster.agent_id}
-                budget={roster.budget}
-                heldCount={roster.waiting.length}
-                onGranted={async () => {
-                  await Promise.all([refreshRoster(), mutate()]);
-                }}
-              />
-            ) : null}
-            {streamError ? (
-              <p role="status" className="mt-4 text-xs text-muted-foreground">
-                {streamError.message}
-              </p>
-            ) : null}
           </div>
         </div>
-        <div className="mx-auto w-full max-w-3xl shrink-0 p-4 pt-2 sm:px-6 sm:pb-5">
-          {archived ? (
-            <Alert>
-              <AlertTitle>This chat is archived</AlertTitle>
-              <AlertDescription className="flex items-center justify-between gap-3">
-                <span>Unarchive it before posting.</span>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => onArchiveChange(false)}
-                >
-                  Unarchive
-                </Button>
-              </AlertDescription>
-            </Alert>
-          ) : detail && !detail.live ? (
-            <div className="flex items-center justify-between gap-3 rounded-xl bg-muted/40 px-4 py-3">
-              <p className="text-xs text-muted-foreground">Thread finished</p>
-              <Button variant="ghost" size="sm" onClick={onNewThread}>
-                Start a new thread
-              </Button>
-            </div>
-          ) : (
-            <>
-              <QueuedPrompts prompts={queuedPrompts} />
-              <PromptForm
-                ref={composerRef}
-                autoFocus={startedHere}
-                isBusy={working}
-                sendDisabled={stopping || persisting}
-                traceId={chat?.telemetry_span?.trace_id ?? null}
-                agents={agents}
-                agentId={detail ? null : agentId}
-                showAutoAgent={agentId === null && !detail}
-                showMarkAsRead={Boolean(chat?.attention_reason)}
-                isMarkingAsRead={markingSeen}
-                onSubmit={send}
-                onStop={async () => {
-                  void detach();
-                  if (detail) await stop();
-                }}
-                onAgentChange={onAgentChange}
-                onMarkAsRead={() => void markAsSeen()}
-              />
-            </>
-          )}
-        </div>
-      </div>
-      <ResizeHandle
-        containerRef={conversationRef}
-        paneRef={changesRef}
-        variable="--changes-width"
-        direction={-1}
-        label="Resize thread details"
-        minimum={288}
-        maximum={720}
-        minimumContent={300}
-        defaultValue={480}
-        className="hidden lg:block"
-      />
-      <aside
-        ref={changesRef}
-        className={`${mobileReview ? "flex" : "hidden lg:flex"} min-h-0 min-w-0 flex-col bg-muted/10`}
-        aria-label="Thread details"
-      >
-        <header className="flex h-14 shrink-0 items-center gap-3 border-b px-4">
-          <Button
-            className="lg:hidden"
-            size="icon-sm"
-            variant="ghost"
-            aria-label="Back to chat"
-            onClick={() => setMobileReview(false)}
-          >
-            <ArrowLeft />
-          </Button>
-          <div role="tablist" aria-label="Thread details" className="flex gap-1">
-            {sidebarTabs.map((tab) => (
-              <Button
-                key={tab}
-                id={`${sidebarId}-${tab}-tab`}
-                role="tab"
-                aria-selected={activeSidebarTab === tab}
-                aria-controls={`${sidebarId}-${tab}-panel`}
-                tabIndex={activeSidebarTab === tab ? 0 : -1}
-                variant={activeSidebarTab === tab ? "secondary" : "ghost"}
-                size="sm"
-                onClick={() => setSidebarTab(tab)}
-                onKeyDown={(event) => {
-                  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key))
-                    return;
-                  event.preventDefault();
-                  const current = sidebarTabs.indexOf(tab);
-                  const next =
-                    event.key === "Home"
-                      ? sidebarTabs[0]
-                      : event.key === "End"
-                        ? sidebarTabs.at(-1)!
-                        : sidebarTabs[
-                            (current +
-                              (event.key === "ArrowRight" ? 1 : -1) +
-                              sidebarTabs.length) %
-                              sidebarTabs.length
-                          ];
-                  setSidebarTab(next);
-                  document.getElementById(`${sidebarId}-${next}-tab`)?.focus();
-                }}
-              >
-                {tabLabels[tab]}
-              </Button>
-            ))}
-          </div>
-        </header>
+      </Activity>
         {hasChanges ? (
-          <Activity mode={activeSidebarTab === "changes" ? "visible" : "hidden"}>
+          <Activity mode={activeView === "changes" ? "visible" : "hidden"}>
             <div
               id={`${sidebarId}-changes-panel`}
               role="tabpanel"
@@ -811,7 +811,7 @@ export function Conversation({
             </div>
           </Activity>
         ) : null}
-        <Activity mode={activeSidebarTab === "workspace" ? "visible" : "hidden"}>
+        <Activity mode={activeView === "workspace" ? "visible" : "hidden"}>
           <div
             id={`${sidebarId}-workspace-panel`}
             role="tabpanel"
@@ -829,7 +829,7 @@ export function Conversation({
                 <WorkspacePanel
                   key={chatId}
                   chatId={chatId}
-                  visible={activeSidebarTab === "workspace"}
+                  visible={activeView === "workspace"}
                   waitForCreation={startedHere && !detail.base_sha}
                 />
               </Suspense>
@@ -842,7 +842,7 @@ export function Conversation({
             )}
           </div>
         </Activity>
-        {activeSidebarTab === "state" ? (
+        {activeView === "state" ? (
           <div
             id={`${sidebarId}-state-panel`}
             role="tabpanel"
@@ -866,7 +866,7 @@ export function Conversation({
           </div>
         ) : null}
         {sandboxes.length ? (
-          <Activity mode={activeSidebarTab === "terminal" ? "visible" : "hidden"}>
+          <Activity mode={activeView === "terminal" ? "visible" : "hidden"}>
             <div
               id={`${sidebarId}-terminal-panel`}
               role="tabpanel"
@@ -881,7 +881,6 @@ export function Conversation({
             </div>
           </Activity>
         ) : null}
-      </aside>
     </section>
   );
 }

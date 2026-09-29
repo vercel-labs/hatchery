@@ -72,7 +72,7 @@ it("bounds active bots to four, counts overflow and finished descendants, and ex
   render(
     <ThreadNavigation
       threads={[root, ...workers, ...finished, attention]}
-      selected="Poem"
+      selected={null}
       onSelect={vi.fn()}
     />,
   );
@@ -108,19 +108,19 @@ it("replaces the status text as children arrive and keeps disclosure separate fr
     activity: active,
   });
   const { rerender } = render(
-    <ThreadNavigation threads={[parent]} selected="Poem" onSelect={onSelect} />,
+    <ThreadNavigation threads={[parent]} selected={null} onSelect={onSelect} />,
   );
   expect(screen.getByText("Thinking")).toBeTruthy();
-  const search = screen.getByRole("textbox", { name: "Search threads" });
+  const list = screen.getByRole("tree", { name: "Thread list" });
   rerender(
     <ThreadNavigation
       threads={[parent, child]}
-      selected="Poem"
+      selected={null}
       onSelect={onSelect}
     />,
   );
   expect(screen.queryByText("Thinking")).toBeNull();
-  expect(screen.getByRole("textbox", { name: "Search threads" })).toBe(search);
+  expect(screen.getByRole("tree", { name: "Thread list" })).toBe(list);
   expect(screen.getByRole("img", { name: "Working" })).toBeTruthy();
   await userEvent.click(
     screen.getByRole("button", { name: "Expand subagents for Poem" }),
@@ -144,7 +144,7 @@ it("replaces the status text as children arrive and keeps disclosure separate fr
           activity: undefined,
         },
       ]}
-      selected="Poem"
+      selected={null}
       onSelect={onSelect}
     />,
   );
@@ -234,7 +234,7 @@ it("uses the same live badges for parents and leaves and replaces stale work wit
     screen.queryByRole("img", { name: "Running command badge" }),
   ).toBeNull();
   expect(screen.getByRole("img", { name: "Completed badge" })).toBeTruthy();
-  expect(screen.getAllByText("Completed")).toHaveLength(1);
+  expect(screen.getByRole("button", { name: /Writer/ }).title).toBe("Writer · Completed");
   rerender(
     <ThreadNavigation
       threads={[parent, { ...completed, archived: true }]}
@@ -247,7 +247,7 @@ it("uses the same live badges for parents and leaves and replaces stale work wit
     screen.getByRole("img", { name: "Archived", exact: true }),
   ).toBeTruthy();
   expect(screen.queryByRole("img", { name: "Completed badge" })).toBeNull();
-  expect(screen.getAllByText("Archived")).toHaveLength(1);
+  expect(screen.getByRole("button", { name: /Writer/ }).title).toBe("Writer · Archived");
 });
 
 // agentmesh: [[subagents#Console]]
