@@ -327,19 +327,6 @@ export default function RepositoryPanel({
           </div>
         </div>
       )}
-      {!compact ? (
-        <footer className="flex shrink-0 items-center gap-3 border-t px-4 py-2 text-[10px] text-muted-foreground">
-          <span
-            className="min-w-0 flex-1 truncate"
-            title={data.checkout?.path ?? data.remote}
-          >
-            {data.checkout?.path ?? data.remote}
-          </span>
-          <code title={`${data.branch} · ${data.sha}`}>
-            {data.sha.slice(0, 8)}
-          </code>
-        </footer>
-      ) : null}
     </section>
   );
 }

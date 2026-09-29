@@ -92,44 +92,35 @@ export function RepositoryPanelSkeleton({
           ))}
         </div>
       ) : (
-        <>
-          <div className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[minmax(0,0.45fr)_minmax(0,1fr)] md:grid-cols-[240px_minmax(0,1fr)] md:grid-rows-[minmax(0,1fr)]">
-            <aside className="flex min-h-0 flex-col border-b md:border-r md:border-b-0">
-              <div className="border-b p-3">
-                <Skeleton className="h-8 w-full rounded-lg" />
-              </div>
-              <div className="space-y-4 p-4">
-                <Skeleton className="h-3 w-24" />
-                <Skeleton className="ml-3 h-3 w-32" />
-                <Skeleton className="ml-3 h-3 w-24" />
-                <Skeleton className="h-3 w-28" />
-                <Skeleton className="ml-3 h-3 w-36" />
-                <Skeleton className="ml-6 h-3 w-28" />
-              </div>
-            </aside>
-            <div className="flex min-h-0 flex-col">
-              <div
-                className={cn(
-                  "flex items-center gap-1 border-b px-4",
-                  showModeToggle ? "py-2" : "py-2.5",
-                )}
-              >
-                <Skeleton className="h-3 w-56 max-w-[70%]" />
-                {showModeToggle ? (
-                  <div className="ml-auto flex gap-1">
-                    <Skeleton className="h-7 w-12 rounded-lg" />
-                    <Skeleton className="h-7 w-12 rounded-lg" />
-                  </div>
-                ) : null}
-              </div>
-              <CodeLines />
+        <div className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[minmax(0,0.45fr)_minmax(0,1fr)] md:grid-cols-[240px_minmax(0,1fr)] md:grid-rows-[minmax(0,1fr)]">
+          <aside className="flex min-h-0 flex-col border-b md:border-r md:border-b-0">
+            <div className="space-y-4 p-4">
+              <Skeleton className="h-3 w-24" />
+              <Skeleton className="ml-3 h-3 w-32" />
+              <Skeleton className="ml-3 h-3 w-24" />
+              <Skeleton className="h-3 w-28" />
+              <Skeleton className="ml-3 h-3 w-36" />
+              <Skeleton className="ml-6 h-3 w-28" />
             </div>
+          </aside>
+          <div className="flex min-h-0 flex-col">
+            <div
+              className={cn(
+                "flex items-center gap-1 border-b px-4",
+                showModeToggle ? "py-2" : "py-2.5",
+              )}
+            >
+              <Skeleton className="h-3 w-56 max-w-[70%]" />
+              {showModeToggle ? (
+                <div className="ml-auto flex gap-1">
+                  <Skeleton className="h-7 w-12 rounded-lg" />
+                  <Skeleton className="h-7 w-12 rounded-lg" />
+                </div>
+              ) : null}
+            </div>
+            <CodeLines />
           </div>
-          <div className="flex shrink-0 items-center gap-3 border-t px-4 py-2">
-            <Skeleton className="h-2.5 w-2/5" />
-            <Skeleton className="ml-auto h-2.5 w-16" />
-          </div>
-        </>
+        </div>
       )}
     </section>
   );
