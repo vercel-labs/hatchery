@@ -360,6 +360,8 @@ class WorkspaceRepo:
                             f"Rotor-Operation: {operation}\n"
                         ),
                     )
+                    # The storage repo may require verified signatures; GitHub signs it.
+                    sha = git.sign(sha)
                     if git.push(sha, branch, head):
                         return sha
             raise workspace_git.GitError("checkpoint push failed after bounded retries")
@@ -606,6 +608,7 @@ class WorkspaceRepo:
                         return dataclasses.replace(
                             outcome, proposal=proposal
                         )  # a redelivered activation
+                    sha = git.sign(sha)
                     if git.push(sha, proposal, existing):
                         return dataclasses.replace(outcome, proposal=proposal)
             raise workspace_git.GitError("proposal push failed after bounded retries")
@@ -695,6 +698,7 @@ class WorkspaceRepo:
                     message=f"Refresh {owner} from {'main' if upstream == 'main' else 'parent'}\n",
                     extra_parents=(upstream_tip,),
                 )
+                sha = git.sign(sha)
                 if not git.push(sha, branch, head):
                     raise workspace_git.MainChanged("thread advanced while refreshing")
                 return Refresh(
@@ -1112,6 +1116,7 @@ class WorkspaceRepo:
                         ),
                         extra_parents=(head,),
                     )
+                    sha = git.sign(sha)
                     if git.push(sha, "main", main):
                         return sha
             raise workspace_git.GitError("main merge push failed after bounded retries")
@@ -1251,6 +1256,7 @@ class WorkspaceRepo:
                     ),
                     extra_parents=(proposal_sha,),
                 )
+                sha = git.sign(sha)
                 if not git.push(sha, branch, head):
                     raise workspace_git.MainChanged("thread advanced while accepting proposal")
                 changed = tuple(sorted(source + path.removeprefix(target) for path in changes))
@@ -1296,6 +1302,7 @@ class WorkspaceRepo:
                         owner=owner,
                         message=f"Join workspace {owner}\n",
                     )
+                    sha = git.sign(sha)
                     attempted = sha
                     if git.push(sha, "main", main):
                         return sha
