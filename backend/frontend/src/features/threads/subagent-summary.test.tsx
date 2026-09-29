@@ -111,7 +111,7 @@ it("replaces the status text as children arrive and keeps disclosure separate fr
     <ThreadNavigation threads={[parent]} selected={null} onSelect={onSelect} />,
   );
   expect(screen.getByText("Thinking")).toBeTruthy();
-  const newThread = screen.getByRole("button", { name: "New thread" });
+  const list = screen.getByRole("tree", { name: "Thread list" });
   rerender(
     <ThreadNavigation
       threads={[parent, child]}
@@ -120,7 +120,7 @@ it("replaces the status text as children arrive and keeps disclosure separate fr
     />,
   );
   expect(screen.queryByText("Thinking")).toBeNull();
-  expect(screen.getByRole("button", { name: "New thread" })).toBe(newThread);
+  expect(screen.getByRole("tree", { name: "Thread list" })).toBe(list);
   expect(screen.getByRole("img", { name: "Working" })).toBeTruthy();
   await userEvent.click(
     screen.getByRole("button", { name: "Expand subagents for Poem" }),

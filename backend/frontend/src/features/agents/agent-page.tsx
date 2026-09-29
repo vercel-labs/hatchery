@@ -117,7 +117,7 @@ function AgentsDocument({ agentId }: { agentId: string }) {
 }
 
 // Retire cancels every thread (each sandbox is checkpointed and stopped);
-// removing deletes the agent record once it has no chats.
+// deleting also archives the agent's chats and hides the agent.
 function RetireAgent({
   agentId,
   onRemove,
@@ -149,7 +149,7 @@ function RetireAgent({
       </Button>
       <Button variant="ghost" size="sm" onClick={onRemove}>
         <Trash2Icon />
-        Remove agent
+        Delete agent
       </Button>
       {status ? (
         <p role="status" className="w-full text-xs text-muted-foreground">

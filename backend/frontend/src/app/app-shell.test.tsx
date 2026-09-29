@@ -204,19 +204,22 @@ it("restores a deep-linked destination and writes navigable view paths", async (
     within(chatTabs).getByRole("tab", { name: "Workspace" }).getAttribute("aria-selected"),
   ).toBe("true");
 
-  // Agent context: opened from the agent selector, with its own tabs.
-  await user.click(screen.getByRole("button", { name: "Current agent: Mira. Switch agent" }));
-  await user.click(await screen.findByRole("menuitem", { name: "Agent workspace" }));
-  await waitFor(() => expect(window.location.pathname).toBe("/agents/mira"));
-  const agentTabs = screen.getByRole("tablist", { name: "Mira agent" });
-  expect(within(agentTabs).getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
+  // Agent context: opened from the sidebar menu above the chats, with no tabs.
+  const agentMenu = screen.getByRole("navigation", { name: "Mira agent" });
+  expect(within(agentMenu).getAllByRole("button").map((item) => item.textContent)).toEqual([
     "Workspace",
     "Files",
     "API",
   ]);
-  await user.click(within(agentTabs).getByRole("tab", { name: "Files" }));
+  await user.click(within(agentMenu).getByRole("button", { name: "Workspace" }));
+  await waitFor(() => expect(window.location.pathname).toBe("/agents/mira"));
+  expect(screen.queryByRole("tablist", { name: "Mira agent" })).toBeNull();
+  await user.click(within(agentMenu).getByRole("button", { name: "Files" }));
   await waitFor(() => expect(window.location.pathname).toBe("/agents/mira/files"));
-  await user.click(within(agentTabs).getByRole("tab", { name: "API" }));
+  expect(
+    within(agentMenu).getByRole("button", { name: "Files" }).getAttribute("aria-current"),
+  ).toBe("page");
+  await user.click(within(agentMenu).getByRole("button", { name: "API" }));
   await waitFor(() => expect(window.location.pathname).toBe("/agents/mira/api"));
   await screen.findByRole("heading", { name: "Routes" });
 
@@ -228,6 +231,28 @@ it("restores a deep-linked destination and writes navigable view paths", async (
   await waitFor(() =>
     expect(screen.getByText("Plan saved.").closest('[style*="display: none"]')).toBeNull(),
   );
+});
+
+it("switches the sidebar list to the archive and offers New thread only for chats", async () => {
+  const archived = { ...chat("chat_old", "Old plan"), archived_at: "2026-09-26T00:00:00Z" };
+  serve({
+    chats: [chat("chat_closed", "Completed planning"), archived],
+    roster: { agent_id: "mira", waiting: [], budget: null, threads: [closed] },
+    transcripts: { chat_closed: planSaved },
+  });
+  mount("/chats/chat_closed");
+  const user = userEvent.setup();
+  await screen.findByText("Plan saved.");
+  expect(screen.getByRole("button", { name: "New thread", exact: true })).toBeTruthy();
+
+  await user.click(screen.getByRole("button", { name: "Showing chats. Switch list" }));
+  await user.click(await screen.findByRole("menuitem", { name: /archive/i }));
+  expect(await screen.findByRole("button", { name: "Old plan" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "New thread", exact: true })).toBeNull();
+
+  await user.click(screen.getByRole("button", { name: "Showing archived chats. Switch list" }));
+  await user.click(await screen.findByRole("menuitem", { name: /chats/i }));
+  expect(await screen.findByRole("button", { name: "New thread", exact: true })).toBeTruthy();
 });
 
 it("opens a focused new conversation from a closed thread and preserves the draft on repeated New thread clicks", async () => {
@@ -269,8 +294,11 @@ it("opens a focused new conversation from a closed thread and preserves the draf
   await user.click(screen.getByRole("button", { name: "New thread", exact: true }));
   expect(input.value).toBe("Plan the launch");
   await waitFor(() => expect(document.activeElement).toBe(input));
-  await user.click(screen.getByRole("button", { name: "Current agent: Mira. Switch agent" }));
-  await user.click(await screen.findByRole("menuitem", { name: "Agent workspace" }));
+  await user.click(
+    within(screen.getByRole("navigation", { name: "Mira agent" })).getByRole("button", {
+      name: "Workspace",
+    }),
+  );
   await waitFor(() => expect(window.location.pathname).toBe("/agents/mira"));
   await user.click(screen.getByRole("button", { name: "New thread", exact: true }));
   await waitFor(() => expect(window.location.pathname).toBe("/"));

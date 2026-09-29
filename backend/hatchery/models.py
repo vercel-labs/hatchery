@@ -51,6 +51,8 @@ class Agent(pydantic.BaseModel):
     resources: list[Resource] = []  # extra links; repos show up alongside these
     color: AccentColor
     created_at: str  # utc isoformat, same as Event.meta.at
+    # Set when the agent is deleted: it leaves the list, its chats stay archived.
+    deleted_at: str | None = None
 
     @pydantic.field_validator("repos")
     @classmethod

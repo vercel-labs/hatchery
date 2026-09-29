@@ -1,4 +1,4 @@
-import { Bot, Braces, Check, ChevronsUpDown, FolderOpen, Plus } from "lucide-react";
+import { Bot, Check, ChevronsUpDown, Plus, Trash2 } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -16,21 +16,21 @@ function threadCount(count: number) {
 }
 
 // Ported from the agentmesh console; agents keep Hatchery's names and colors.
-// Besides switching, it opens the agent context and adds agents.
+// Besides switching, it adds and deletes agents.
 export function AgentSwitcher({
   agents,
   agent,
   threadCounts,
   onSelect,
-  onOpen = () => {},
   onAdd = () => {},
+  onDelete = () => {},
 }: {
   agents: Agent[];
   agent: Agent;
   threadCounts: Record<string, number>;
   onSelect: (agentId: string) => void;
-  onOpen?: (view: "workspace" | "api") => void;
   onAdd?: () => void;
+  onDelete?: (agent: Agent) => void;
 }) {
   return (
     <DropdownMenu>
@@ -62,40 +62,41 @@ export function AgentSwitcher({
         <DropdownMenuGroup>
           <DropdownMenuLabel>Switch agent</DropdownMenuLabel>
           {agents.map((item) => (
-            <DropdownMenuItem
-              key={item.id}
-              className="gap-3 px-2 py-2"
-              onClick={() => onSelect(item.id)}
-            >
-              <span className="grid size-7 shrink-0 place-items-center rounded-md bg-muted">
-                <Bot
-                  className="size-3.5"
-                  style={{ color: resolveAgentColor(item.color) }}
-                  aria-hidden
-                />
-              </span>
-              <span className="min-w-0 flex-1">
-                <span className="block truncate font-medium">{item.name}</span>
-                <span className="block text-xs text-muted-foreground">
-                  {threadCount(threadCounts[item.id] ?? 0)}
+            <div key={item.id} className="flex items-center gap-0.5">
+              <DropdownMenuItem
+                className="min-w-0 flex-1 gap-3 px-2 py-2"
+                onClick={() => onSelect(item.id)}
+              >
+                <span className="grid size-7 shrink-0 place-items-center rounded-md bg-muted">
+                  <Bot
+                    className="size-3.5"
+                    style={{ color: resolveAgentColor(item.color) }}
+                    aria-hidden
+                  />
                 </span>
-              </span>
-              {item.id === agent.id ? (
-                <Check className="size-4 shrink-0" aria-label="Selected" />
-              ) : null}
-            </DropdownMenuItem>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate font-medium">{item.name}</span>
+                  <span className="block text-xs text-muted-foreground">
+                    {threadCount(threadCounts[item.id] ?? 0)}
+                  </span>
+                </span>
+                {item.id === agent.id ? (
+                  <Check className="size-4 shrink-0" aria-label="Selected" />
+                ) : null}
+              </DropdownMenuItem>
+              {/* The last agent stays: chats always need somewhere to land. */}
+              <DropdownMenuItem
+                variant="destructive"
+                className="shrink-0 self-stretch px-2 opacity-60 focus:opacity-100"
+                aria-label={`Delete ${item.name}`}
+                title={agents.length > 1 ? `Delete ${item.name}` : "The last agent cannot be deleted"}
+                disabled={agents.length <= 1}
+                onClick={() => onDelete(item)}
+              >
+                <Trash2 className="size-3.5" />
+              </DropdownMenuItem>
+            </div>
           ))}
-        </DropdownMenuGroup>
-        <DropdownMenuSeparator />
-        <DropdownMenuGroup>
-          <DropdownMenuItem onClick={() => onOpen("workspace")}>
-            <FolderOpen />
-            Agent workspace
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => onOpen("api")}>
-            <Braces />
-            API
-          </DropdownMenuItem>
         </DropdownMenuGroup>
         <DropdownMenuSeparator />
         <DropdownMenuItem onClick={onAdd}>

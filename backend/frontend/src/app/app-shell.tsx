@@ -2,11 +2,15 @@ import { useLocation, useNavigate } from "@tanstack/react-router";
 import { Activity, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArchiveIcon,
+  BracesIcon,
   CheckIcon,
   ChevronsUpDown,
+  FolderOpenIcon,
+  FolderTreeIcon,
   GitBranchIcon,
   LogOutIcon,
   MessageSquareIcon,
+  PlusIcon,
   XIcon,
 } from "lucide-react";
 
@@ -31,7 +35,6 @@ import {
 } from "@/components/new-chat-state";
 import { AgentColorPicker } from "@/components/agent-color-picker";
 import { ChatOriginIcon } from "@/components/chat-origin-icon";
-import { ContextTabs } from "@/components/context-tabs";
 import { ResizeHandle } from "@/components/resize-handle";
 import { AgentApiView } from "@/features/agents/agent-api-view";
 import { AgentPage } from "@/features/agents/agent-page";
@@ -82,7 +85,8 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 
-// The main pane shows one context: an agent or a chat, each with its tabs.
+// The main pane shows one context: an agent view (picked in the sidebar menu)
+// or a chat with its tabs.
 type AgentView = "workspace" | "files" | "api";
 type Selection =
   | { kind: "agent"; id: string; view: AgentView }
@@ -91,10 +95,10 @@ type Selection =
   | null;
 
 const AGENT_KEY = "hatchery:agent";
-const agentTabs = [
-  { view: "workspace", label: "Workspace", to: "/agents/$agentId" },
-  { view: "files", label: "Files", to: "/agents/$agentId/files" },
-  { view: "api", label: "API", to: "/agents/$agentId/api" },
+const agentMenu = [
+  { view: "workspace", label: "Workspace", icon: FolderOpenIcon, to: "/agents/$agentId" },
+  { view: "files", label: "Files", icon: FolderTreeIcon, to: "/agents/$agentId/files" },
+  { view: "api", label: "API", icon: BracesIcon, to: "/agents/$agentId/api" },
 ] as const;
 
 function parseSelection(pathname: string): Selection {
@@ -166,6 +170,17 @@ function SidebarResize({
       defaultValue={256}
       className="-ml-px hidden md:block"
     />
+  );
+}
+
+// Agent views have no top bar; this one only brings a hidden sidebar back.
+function SidebarReopen() {
+  const { state, isMobile } = useSidebar();
+  if (state === "expanded" && !isMobile) return null;
+  return (
+    <div className="flex h-12 shrink-0 items-center border-b px-3">
+      <SidebarTrigger />
+    </div>
   );
 }
 
@@ -382,16 +397,29 @@ export function AppShell() {
     openNewChat(created.id);
   };
 
+  // Deleting stops the agent's threads and archives its chats; they stay in Archive.
   const deleteAgent = async (target: Agent) => {
-    if (!window.confirm(`Remove ${target.name}?`)) return;
-    const res = await apiFetch(`/api/agents/${target.id}`, { method: "DELETE" });
-    if (res.status === 409) {
-      window.alert("Remove this agent's chats first.");
+    if (
+      !window.confirm(
+        `Delete ${target.name}? Its threads stop and its chats move to the archive.`,
+      )
+    )
+      return;
+    const res = await apiFetch(`/api/agents/${encodeURIComponent(target.id)}`, {
+      method: "DELETE",
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      window.alert(body.detail ?? `Could not delete ${target.name}.`);
       return;
     }
-    if (!res.ok) return;
-    setAgents((current) => current?.filter((item) => item.id !== target.id) ?? null);
-    void navigate({ to: "/" });
+    const rest = agents?.filter((item) => item.id !== target.id) ?? [];
+    setAgents(rest);
+    void refreshChats();
+    if (target.id === agentId) {
+      if (rest[0]) setPreferredAgent(rest[0].id);
+      openNewChat(rest[0]?.id ?? null);
+    }
   };
 
   const refreshingChats = useRef(false);
@@ -560,16 +588,7 @@ export function AppShell() {
     const view = selection.view;
     content = (
       <section className="flex min-h-0 min-w-0 flex-1 flex-col" aria-label={agent.name}>
-        <ContextTabs
-          label={`${agent.name} agent`}
-          leading={leading}
-          tabs={agentTabs.map((tab) => ({
-            key: tab.view,
-            label: tab.label,
-            selected: tab.view === view,
-            onSelect: () => void navigate({ to: tab.to, params: { agentId: agent.id } }),
-          }))}
-        />
+        <SidebarReopen />
         {view === "api" ? (
           <AgentApiView key={agent.id} agentId={agent.id} />
         ) : (
@@ -661,13 +680,8 @@ export function AppShell() {
                 if (latest) void navigate({ to: "/chats/$chatId", params: { chatId: latest.id } });
                 else openNewChat(id);
               }}
-              onOpen={(view) =>
-                void navigate({
-                  to: view === "api" ? "/agents/$agentId/api" : "/agents/$agentId",
-                  params: { agentId: agent.id },
-                })
-              }
               onAdd={() => setAddingAgent(true)}
+              onDelete={(target) => void deleteAgent(target)}
             />
           ) : null}
           {addingAgent || (agents !== null && !agents.length) ? (
@@ -708,26 +722,67 @@ export function AppShell() {
               <AgentColorPicker value={agentColor} onValueChange={setAgentColor} allowUnselected />
             </form>
           ) : null}
-          <div role="group" aria-label="Chat list" className="grid grid-cols-2 gap-0.5 rounded-lg bg-sidebar-accent p-0.5">
-            {[false, true].map((archive) => (
-              <Button
-                key={String(archive)}
-                size="sm"
-                variant="ghost"
-                aria-pressed={archiveOpen === archive}
-                className={
-                  archiveOpen === archive
-                    ? "bg-background shadow-xs hover:bg-background"
-                    : "text-muted-foreground"
-                }
-                onClick={() => setArchiveOpen(archive)}
+          {agent ? (
+            <nav aria-label={`${agent.name} agent`}>
+              <SidebarMenu>
+                {agentMenu.map((item) => {
+                  const active =
+                    selection?.kind === "agent" && selection.view === item.view;
+                  return (
+                    <SidebarMenuItem key={item.view}>
+                      <SidebarMenuButton
+                        isActive={active}
+                        aria-current={active ? "page" : undefined}
+                        onClick={() =>
+                          void navigate({ to: item.to, params: { agentId: agent.id } })
+                        }
+                      >
+                        <item.icon />
+                        <span>{item.label}</span>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  );
+                })}
+              </SidebarMenu>
+            </nav>
+          ) : null}
+          <div className="flex h-7 items-center gap-1 px-2 pt-1">
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                className="-ms-1.5 flex h-6 items-center gap-1 rounded-md px-1.5 text-xs font-medium text-sidebar-foreground/70 outline-none transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground focus-visible:ring-3 focus-visible:ring-ring/50 data-popup-open:bg-sidebar-accent"
+                aria-label={`Showing ${archiveOpen ? "archived chats" : "chats"}. Switch list`}
               >
-                {archive ? "Archive" : "Chats"}
-                {archive && archivedChats.length ? (
-                  <span className="tabular-nums text-muted-foreground">{archivedChats.length}</span>
-                ) : null}
+                {archiveOpen ? "Archive" : "Chats"}
+                <ChevronsUpDown className="size-3" aria-hidden />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" sideOffset={4} className="min-w-36">
+                {[false, true].map((archive) => (
+                  <DropdownMenuItem key={String(archive)} onClick={() => setArchiveOpen(archive)}>
+                    <span className="flex-1">{archive ? "Archive" : "Chats"}</span>
+                    {archive && archivedChats.length ? (
+                      <span className="tabular-nums text-xs text-muted-foreground">
+                        {archivedChats.length}
+                      </span>
+                    ) : null}
+                    {archiveOpen === archive ? (
+                      <CheckIcon aria-label="Selected" />
+                    ) : null}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+            {!archiveOpen ? (
+              <Button
+                size="icon-xs"
+                variant="ghost"
+                className="ml-auto"
+                aria-label="New thread"
+                title="New thread"
+                onClick={() => openNewChat()}
+              >
+                <PlusIcon />
               </Button>
-            ))}
+            ) : null}
           </div>
         </SidebarHeader>
 
@@ -785,7 +840,7 @@ export function AppShell() {
                   threads={threads}
                   selected={selectedThread}
                   optimisticallyAwake={optimisticallyAwake}
-                  onSelect={(id) => (id ? openThread(id) : openNewChat())}
+                  onSelect={openThread}
                 />
               )}
             </>

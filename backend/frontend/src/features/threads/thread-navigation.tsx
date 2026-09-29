@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ChatOriginIcon } from "@/components/chat-origin-icon";
 import { chatAttentionLabel } from "@/lib/chat-sidebar";
@@ -56,17 +55,6 @@ export function ThreadNavigation({
       className="flex min-h-0 min-w-0 flex-1 flex-col"
       aria-label="Threads"
     >
-      <div className="flex shrink-0 items-center justify-end gap-1 px-3 pb-2">
-        <Button
-          size="icon-sm"
-          variant="ghost"
-          aria-label="New thread"
-          title="New thread"
-          onClick={() => onSelect("")}
-        >
-          <Plus />
-        </Button>
-      </div>
       <div
         className="scrollbar-thin flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto overscroll-contain px-3 pb-4"
         role="tree"
