@@ -278,7 +278,7 @@ async def test_two_users_share_one_agent(monkeypatch):
             "turn_1", "run_1", origin, task_id, 0, kwargs["actor_user_id"]
         )
 
-    async def to_sse(_run_id, _turn_id):
+    async def to_sse(_chat_id, _run_id, _turn_id):
         yield "data: [DONE]\n\n"
 
     monkeypatch.setattr(server.auth, "current_user", current_user)
@@ -981,7 +981,7 @@ async def test_ui_post_uses_actor_in_another_users_chat(monkeypatch):
             "turn_1", "run_1", origin, task_id, 0, "user_test"
         )
 
-    async def to_sse(_run_id, _turn_id):
+    async def to_sse(_chat_id, _run_id, _turn_id):
         yield "data: [DONE]\n\n"
 
     monkeypatch.setattr(server.supervisor, "start_turn", start_turn)
@@ -1627,7 +1627,7 @@ async def test_resume_chat_stream_uses_registered_process(monkeypatch):
             "turn_1", "process_1", "worker", "task_1", 0
         )
 
-    async def to_sse(process_id, turn_id):
+    async def to_sse(_chat_id, process_id, turn_id):
         seen.append((process_id, turn_id))
         yield "data: [DONE]\n\n"
 
@@ -1660,7 +1660,7 @@ async def test_first_ui_prompt_classifies_before_thread(monkeypatch):
             turn_id, "run_1", origin, task_id, 0, actor_user_id
         )
 
-    async def durable_sse(run_id, turn_id):
+    async def durable_sse(_chat_id, run_id, turn_id):
         seen["stream"] = (run_id, turn_id)
         yield 'data: {"type":"finish"}\n\n'
 
@@ -1722,7 +1722,7 @@ async def test_ui_turn_is_mirrored_to_bound_channel(monkeypatch):
             turn_id, "run_1", origin, task_id, 0, actor_user_id
         )
 
-    async def durable_sse(_run_id, _turn_id):
+    async def durable_sse(_chat_id, _run_id, _turn_id):
         yield 'data: {"type":"finish"}\n\n'
 
     monkeypatch.setattr(server.supervisor, "start_turn", start_turn)
@@ -2574,15 +2574,40 @@ async def test_channel_delivery_key_skips_completed_binding_on_retry():
     assert len(await events.read(chat.id, "deliveries")) == 1
 
 
-async def test_preview_http_does_not_activate_rotor(monkeypatch):
+@pytest.mark.parametrize(
+    ("bound_to", "expected"),
+    [
+        # Fresh or preview-bound database: the preview takes it over.
+        ("prj_test/preview", [True]),
+        # Database bound to production: never take it.
+        ("prj_test/production", []),
+    ],
+)
+async def test_preview_takes_rotor_only_from_a_preview_database(
+    monkeypatch, bound_to, expected
+):
     activated = []
+    store = server.rotor_runtime.worker.backends.store
+
+    async def setup():
+        return None
+
+    async def active_deployment():
+        return "dpl_other"
+
+    async def bind_runtime(namespace):
+        if namespace != bound_to:
+            raise server.rotor.errors.ConfigurationError("bound elsewhere")
 
     async def activate(_worker):
         activated.append(True)
 
     monkeypatch.setenv("VERCEL_ENV", "preview")
     monkeypatch.setenv("VERCEL_DEPLOYMENT_ID", "dpl_preview")
-    monkeypatch.setenv("HATCHERY_PUBLIC_URL", "https://preview.example")
+    monkeypatch.setenv("VERCEL_PROJECT_ID", "prj_test")
+    monkeypatch.setattr(store, "setup", setup)
+    monkeypatch.setattr(store, "active_deployment", active_deployment)
+    monkeypatch.setattr(store, "bind_runtime", bind_runtime)
     monkeypatch.setattr(server.rotor_runtime.platform, "activate", activate)
     request = server.fastapi.Request(
         {
@@ -2597,7 +2622,7 @@ async def test_preview_http_does_not_activate_rotor(monkeypatch):
 
     await server._ensure_rotor_deployment(request)
 
-    assert activated == []
+    assert activated == expected
 
 
 async def test_production_canonical_request_activates_rotor(monkeypatch):
@@ -2668,7 +2693,7 @@ async def test_ui_retry_reuses_turn_identity(monkeypatch):
         turns.append(turn_id)
         return server.turns.ActiveTurn(turn_id, "process_1", origin, task_id, 0)
 
-    async def to_sse(_process_id, _turn_id):
+    async def to_sse(_chat_id, _process_id, _turn_id):
         yield "data: [DONE]\n\n"
 
     monkeypatch.setattr(server.supervisor, "start_turn", start_turn)

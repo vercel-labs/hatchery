@@ -33,19 +33,7 @@ dependencies = [
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
-    "uvicorn>=0.30",
 ]
-
-[tool.vercel]
-entrypoint = "hatchery.app.server:app"
-
-[[tool.vercel.subscribers]]
-entrypoint = "hatchery.app.server:worker_event"
-topics = ["hatchery-worker-events-v1"]
-
-[[tool.vercel.subscribers]]
-entrypoint = "hatchery.agent.runtime"
-topics = ["hatchery-dispatcher-v1", "hatchery-dispatcher-maintenance-v1"]
 
 [tool.uv]
 exclude-newer-package = { rotorcore = "2026-09-17T00:00:00Z" }

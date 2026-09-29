@@ -1,12 +1,12 @@
-"""Vercel entrypoint (see [tool.vercel] in pyproject.toml).
+"""The FastAPI app, exported by the deploying wrapper repo's `app.py`.
 
 Health check, channel webhooks, and the thread chat:
 - /channels/v1/slack   needs SLACK_CONNECTOR (connect uid, e.g. "slack/hatchery")
 - /channels/v1/github  needs GITHUB_CONNECTOR + GITHUB_APP_SLUG
 - /api/chat            thread turn, AI SDK UI message stream (SSE)
 
-Application projections live in the store (Postgres via DATABASE_URL, local
-files without). Rotor checkpoints the canonical thread conversation; the
+Application projections live in the store (Postgres via DATABASE_URL; tests
+use files). Rotor checkpoints the canonical thread conversation; the
 (chat_id, "messages") stream feeds the UI and bootstraps existing chats.
 Slack/GitHub inbound lands in its chat through _StoreHub, then enters the
 chat's Rotor mailbox.
@@ -28,10 +28,10 @@ import typing
 import urllib.parse
 
 import fastapi
-import fastapi.middleware.cors
 import fastapi.responses
 import pydantic
 import rotor
+import rotor.errors
 import rotor.stores.base
 import websockets.asyncio.client
 
@@ -342,25 +342,44 @@ def _configured_host(value: str | None) -> str | None:
 
 
 async def _ensure_rotor_deployment(request: fastapi.Request) -> None:
-    """Activate only the deployment reached through a promoted app URL."""
+    """Give Rotor to the deployment that should run background work.
+
+    Production takes it only through a promoted app URL, so old deployments
+    cannot take it back. Previews share one preview database: the preview
+    serving a request takes it, so the latest one used runs background work. A
+    preview never takes a database bound to production.
+    """
     deployment = os.environ.get("VERCEL_DEPLOYMENT_ID")
-    if not deployment or os.environ.get("VERCEL_ENV") != "production":
+    environment = os.environ.get("VERCEL_ENV")
+    if not deployment or environment not in ("production", "preview"):
         return
-    allowed = {
-        host
-        for host in (
-            _configured_host(os.environ.get("HATCHERY_PUBLIC_URL")),
-            _configured_host(os.environ.get("VERCEL_PROJECT_PRODUCTION_URL")),
-        )
-        if host is not None
-    }
-    if request.url.hostname not in allowed:
-        return
+    if environment == "production":
+        allowed = {
+            host
+            for host in (
+                _configured_host(os.environ.get("HATCHERY_PUBLIC_URL")),
+                _configured_host(os.environ.get("VERCEL_PROJECT_PRODUCTION_URL")),
+            )
+            if host is not None
+        }
+        if request.url.hostname not in allowed:
+            return
     async with _rotor_promotion_lock:
-        store = rotor_runtime.worker.backends.store
-        await store.setup()
-        if await store.active_deployment() != deployment:
-            await rotor_runtime.platform.activate(rotor_runtime.worker)
+        rotor_store = rotor_runtime.worker.backends.store
+        await rotor_store.setup()
+        if await rotor_store.active_deployment() == deployment:
+            return
+        if environment == "preview":
+            namespace = rotor_runtime.backends.runtime_namespace()
+            try:
+                await rotor_store.bind_runtime(namespace)
+            except rotor.errors.ConfigurationError:
+                log.warning(
+                    "preview database is bound to another environment; "
+                    "connect a separate preview database"
+                )
+                return
+        await rotor_runtime.platform.activate(rotor_runtime.worker)
 
 
 @app.middleware("http")
@@ -391,15 +410,6 @@ async def browser_session(request: fastapi.Request, call_next):
     return await call_next(request)
 
 
-# Local development keeps streams and WebSockets direct to :8000 while Vite
-# serves the UI on :3000.
-app.add_middleware(
-    fastapi.middleware.cors.CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-    allow_credentials=True,
-)
 # Outermost: `<agent>.<HATCHERY_SERVE_DOMAIN>` goes to the agent's published routes
 # before session auth; malformed agent hosts fail closed.
 app.add_middleware(
@@ -1401,7 +1411,7 @@ async def chat(
             actor_user_id=user["id"],
         )
     return fastapi.responses.StreamingResponse(
-        agent_stream.to_sse(turn.run_id, turn.turn_id),
+        agent_stream.to_sse(request.chat_id, turn.run_id, turn.turn_id),
         headers=ai.ui.ai_sdk.UI_MESSAGE_STREAM_HEADERS,
     )
 
@@ -1415,7 +1425,7 @@ async def resume_chat_stream(chat_id: str):
     if turn is None:
         return fastapi.Response(status_code=204)
     return fastapi.responses.StreamingResponse(
-        agent_stream.to_sse(turn.run_id, turn.turn_id),
+        agent_stream.to_sse(chat_id, turn.run_id, turn.turn_id),
         headers=ai.ui.ai_sdk.UI_MESSAGE_STREAM_HEADERS,
     )
 

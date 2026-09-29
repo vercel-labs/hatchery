@@ -14,7 +14,6 @@ import {
 } from "lucide-react";
 
 import {
-  apiBase,
   apiFetch,
   type Agent,
   type AgentWarning,
@@ -518,7 +517,7 @@ export function AppShell() {
           <EmptyHeader>
             <EmptyTitle>Backend unreachable</EmptyTitle>
             <EmptyDescription>
-              Could not load agents and chats. Locally: run `uv run dev.py` in backend/ and reload.
+              Could not load agents and chats. Reload the page.
             </EmptyDescription>
           </EmptyHeader>
         </Empty>
@@ -792,7 +791,7 @@ export function AppShell() {
                     size="sm"
                     className="justify-start text-muted-foreground"
                     nativeButton={false}
-                    render={<a href={`${apiBase()}/api/connections/github/authorize`} />}
+                    render={<a href="/api/connections/github/authorize" />}
                   >
                     <GitBranchIcon />
                     Connect GitHub
@@ -809,7 +808,7 @@ export function AppShell() {
                     size="sm"
                     className="justify-start text-muted-foreground"
                     nativeButton={false}
-                    render={<a href={`${apiBase()}/api/connections/slack/authorize`} />}
+                    render={<a href="/api/connections/slack/authorize" />}
                   >
                     <MessageSquareIcon />
                     Connect Slack

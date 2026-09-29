@@ -6,8 +6,8 @@ Work is organized into **agents**, which share repositories, reference material,
 
 ## How to use
 
-1. Get into the allowlist
-2. Go to https://hatchery.playground-vercel.tools/
+1. Get onto the instance's allowlist (`HATCHERY_ALLOWED_EMAILS`)
+2. Open the instance's URL
 
 Note that everybody from the allowlist can view and participate in everybody else's chats through any channel. Use your own judgement when choosing what kind of work to do there.
 
@@ -26,25 +26,31 @@ Upgrading from 0.1 keeps the old data and queue topics. Nothing is dropped. Chat
 
 ## Configuration
 
-Set these on the Vercel project, in addition to the existing database, sign-in, and Connect variables:
+Set these on the Vercel project. Production and Preview are set separately; see [`docs/deployments.md`](docs/deployments.md) for what Preview has.
 
 | Variable | What it does |
 | --- | --- |
-| `HATCHERY_STORAGE_REPO` | Storage repo, `vercel-internal-playground/hatchery-storage`. Without it, agents have no Git files. |
+| `DATABASE_URL`, `DATABASE_URL_UNPOOLED` | Postgres: pooled for the app, direct for Rotor's LISTEN/NOTIFY. Production and Preview need separate databases. |
+| `VERCEL_APP_CLIENT_ID`, `VERCEL_APP_CLIENT_SECRET` | The Sign in with Vercel app. |
+| `HATCHERY_ALLOWED_EMAILS` | Comma-separated emails that may sign in. Missing or empty denies everyone. |
+| `HATCHERY_APP_ORIGIN` | Production only: the public origin used for sign-in redirects and origin checks. Previews use their own URL. |
+| `CRON_SECRET` | Production only: Vercel sends it to the minute heartbeat at `/api/cron`. |
+| `ROTOR_RELEASE_SECRET` | Bearer token for `POST /api/rotor/activate`, which forces a deployment to take Rotor over. |
+| `HATCHERY_STORAGE_REPO` | Storage repo for agent files, as `<owner>/<repo>`. Without it, agents have no Git files. |
 | `GITHUB_CONNECTOR` | The Connect GitHub app (`github/hatchery`). Its installation needs read and write access (contents, pull requests) to the storage repo. `HATCHERY_GITHUB_INSTALLATION_ID` picks an installation; `GITHUB_TOKEN` is a fallback. |
+| `GITHUB_APP_SLUG` | The GitHub app's slug, used by the GitHub channel. |
+| `SLACK_CONNECTOR` | The Connect Slack app (`slack/hatchery`). |
 | `HATCHERY_SERVE_DOMAIN` | Domain for agent web addresses. The project also needs the wildcard domain `*.<HATCHERY_SERVE_DOMAIN>` (a project setting, not `vercel.json`). |
 | `HATCHERY_SECRETS_KEY` | 32-byte key (base64url) that encrypts agent secrets. Keep it stable: a new key can't read old secrets. |
+| `BRAINTRUST_API_KEY`, `BRAINTRUST_PARENT` | Traces go to Braintrust when both are set. |
+| `VERCEL_TOKEN`, `VERCEL_TEAM_ID` | Sandbox auth fallback when Vercel OIDC isn't available. |
 | `HATCHERY_<SECTION>_<FIELD>` | Optional limits, defaulting to agentmesh's values: `MODEL` (`ID`, `MAX_OUTPUT_TOKENS`, `CONTEXT_WINDOW_TOKENS`), `THREAD` (`MAX_TURNS`, `BASH_CALLS_PER_TURN`, `COMMAND_TIMEOUT_SECONDS`, `SANDBOX_IDLE_SECONDS`, `COMPACT_ABOVE_TOKENS`, `KEEP_RECENT_MESSAGES`, `MAX_DELEGATION_DEPTH`, `MAX_DELEGATIONS_PER_THREAD`), `BUDGET` (`TOKENS_PER_DAY`), `REVIEW` (`WORKSPACE`, `SERVE`, `WIKI`: `auto` or `review`), `SERVE` (`REVISION_TTL_SECONDS`, `REQUEST_TIMEOUT_SECONDS`, `JOB_TIMEOUT_SECONDS`, `MAX_REQUEST_BYTES`). See `backend/hatchery/config.py`. |
 
 ## Development
 
-Hatchery is developed and tested through Vercel preview deployments. Running the application locally is not supported.
+Hatchery is developed and tested only through Vercel preview deployments. Locally you run the tests (`make ci`), not the app.
 
-Point Slack and GitHub triggers at the branch when testing integrations:
-
-```sh
-./scripts/triggers.sh
-```
+This repo builds the `vercel-hatchery` package. It does not deploy the app: an instance deploys from a wrapper repo that pins the package. Never run `vercel deploy` from this repo. See [`docs/deployments.md`](docs/deployments.md) for previews, production releases, and what previews can't do.
 
 Use [`docs/use-agent-browser.md`](docs/use-agent-browser.md) for browser-driven testing and [`docs/use-braintrust.md`](docs/use-braintrust.md) to inspect agent runs.
 

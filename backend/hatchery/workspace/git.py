@@ -5,14 +5,18 @@ import collections.abc
 import dataclasses
 import hashlib
 import json
+import logging
 import os
 import pathlib
 import re
 import shlex
 import subprocess
 import tempfile
+import time
 import types
 import urllib.parse
+
+import httpx
 
 from hatchery.workspace import files as workspace_files
 from hatchery.workspace import git_runtime
@@ -213,6 +217,7 @@ class Git:
         """Refresh command configuration without retaining an obsolete credential."""
         if token is not None:
             validate_text(token, "token", 16384)
+        self._token = token
         count = int(self.env.get("GIT_CONFIG_COUNT", "0"))
         for index in range(count):
             self.env.pop(f"GIT_CONFIG_KEY_{index}", None)
@@ -334,18 +339,126 @@ class Git:
 
     def push(self, sha: str, branch: str, expected: str | None) -> bool:
         ref = f"refs/heads/{branch}"
-        return (
-            self.command(
-                "push",
-                "--porcelain",
-                *self.pack("receive"),
-                f"--force-with-lease={ref}:{expected or ''}",
-                self.remote,
-                f"{sha}:{ref}",
-                check=False,
-            ).returncode
-            == 0
+        result = self.command(
+            "push",
+            "--porcelain",
+            *self.pack("receive"),
+            f"--force-with-lease={ref}:{expected or ''}",
+            self.remote,
+            f"{sha}:{ref}",
+            check=False,
         )
+        if result.returncode:
+            # A lost lease is normal contention; anything else (rules, auth) shows up here.
+            logging.getLogger(__name__).warning(
+                "push to %s rejected: %s", ref, result.stderr.decode(errors="replace")[-1000:]
+            )
+        return result.returncode == 0
+
+    def sign(self, sha: str, *, client: httpx.Client | None = None) -> str:
+        """Recreate a local commit on GitHub so GitHub signs it, and return the signed copy.
+
+        Repositories can require verified signatures, and the worker has no signing key.
+        GitHub signs commits that a GitHub App creates through its Git database API with
+        no custom author, committer, or signature. The commit is rebuilt there with the
+        same tree, parents, and message; the signed object is then reproduced locally and
+        checked against GitHub's id, so `push` works unchanged. Parents must already be on
+        GitHub. Local remotes, and tokens GitHub does not sign for, keep the commit as is.
+        """
+        if self.kind != "github" or not self._token:
+            return sha
+        header, _, message = self.run("cat-file", "commit", sha).partition(b"\n\n")
+        fields = [line.decode().split(" ", 1) for line in header.split(b"\n")]
+        tree = next(value for key, value in fields if key == "tree")
+        parents = [value for key, value in fields if key == "parent"]
+        if parents:
+            records = self.run("diff-tree", "-r", "-z", "--no-renames", parents[0], sha)
+            parts = records.split(b"\0")
+            changes = []
+            for meta, path in zip(parts[0::2], parts[1::2], strict=False):
+                old_mode, new_mode, _, oid, status = meta.decode().lstrip(":").split()
+                deleted = status == "D"
+                changes.append(
+                    (path.decode(), old_mode if deleted else new_mode, None if deleted else oid)
+                )
+        else:
+            changes = [(path, entry.mode, entry.oid) for path, entry in self.entries(tree).items()]
+
+        _, repository = parse_remote(self.remote)
+        endpoint = f"https://api.github.com/repos/{repository}/git"
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        http = client or httpx.Client(timeout=30, follow_redirects=False)
+
+        def post(kind: str, body: dict) -> dict:
+            # Blobs and trees are content-addressed; a repeated commit POST only leaves
+            # an unreferenced object behind, so every create is safe to retry.
+            for attempt in range(MAX_ATTEMPTS):
+                try:
+                    response = http.post(f"{endpoint}/{kind}", json=body, headers=headers)
+                except httpx.TransportError:
+                    response = None
+                if response is not None and response.status_code == 201:
+                    return response.json()
+                if response is not None and response.status_code < 500 and (
+                    response.status_code != 429
+                ):
+                    detail = response.text[:300]
+                    raise GitError(
+                        f"GitHub {kind} create failed (HTTP {response.status_code}): {detail}"
+                    )
+                time.sleep(0.05 * (2**attempt))
+            raise GitError(f"GitHub {kind} create failed after bounded retries")
+
+        try:
+            if parents and not changes:
+                github_tree = tree  # same tree as the parent, already on GitHub
+            else:
+                entries: list[dict] = []
+                for path, mode, oid in changes:
+                    entry: dict = {"path": path, "mode": mode, "type": "blob", "sha": oid}
+                    if oid is not None:
+                        content = self.blob(oid)
+                        try:
+                            # Text travels inline in the tree request; binary needs a blob.
+                            text = content.decode("utf-8")
+                            entry = {"path": path, "mode": mode, "type": "blob", "content": text}
+                        except UnicodeDecodeError:
+                            encoded = base64.b64encode(content).decode()
+                            blob = post("blobs", {"content": encoded, "encoding": "base64"})
+                            if blob["sha"] != oid:
+                                raise GitError("GitHub stored a different blob") from None
+                    entries.append(entry)
+                body: dict = {"tree": entries}
+                if parents:
+                    base_tree = self.run("rev-parse", "--verify", f"{parents[0]}^{{tree}}")
+                    body["base_tree"] = base_tree.decode().strip()
+                github_tree = post("trees", body)["sha"]
+            if github_tree != tree:
+                raise GitError("GitHub built a different tree than the local commit")
+            created = post(
+                "commits", {"message": message.decode(), "tree": tree, "parents": parents}
+            )
+        finally:
+            if client is None:
+                http.close()
+        if [parent["sha"] for parent in created["parents"]] != parents:
+            raise GitError("GitHub created a commit with different parents")
+        verification = created.get("verification") or {}
+        payload, signature = verification.get("payload"), verification.get("signature")
+        if not payload or not signature:
+            return sha  # GitHub only signs for App tokens; push the local commit instead
+        # Git stores the signature as a header whose continuation lines start with a space.
+        head, _, body_text = payload.partition("\n\n")
+        continued = signature.replace("\n", "\n ")
+        signed = f"{head}\ngpgsig {continued}\n\n{body_text}"
+        oid = self.run("hash-object", "-t", "commit", "-w", "--stdin", data=signed.encode())
+        if oid.decode().strip() != created["sha"]:
+            raise GitError("could not reproduce GitHub's signed commit locally")
+        return created["sha"]
 
     def delete(self, branch: str, expected: str) -> bool:
         """Delete a remote branch only while it still points at `expected`."""

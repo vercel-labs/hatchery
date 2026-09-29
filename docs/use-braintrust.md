@@ -10,9 +10,9 @@ Ask the user to complete `bt auth login` if the CLI is not authenticated. Then s
 
 ```sh
 pnpm --package=braintrust dlx bt view logs \
-  --profile "anbuzin's projects" \
+  --profile "<profile>" \
   --prefer-profile \
-  --project braintrust-coffee-flame \
+  --project <project> \
   --window 1h \
   --search "$ID" \
   --list-mode spans \

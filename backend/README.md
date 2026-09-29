@@ -7,7 +7,7 @@ Hatchery is an agent deployed to Vercel, reachable from its web UI, Slack, and G
 - Postgres (`DATABASE_URL`, `DATABASE_URL_UNPOOLED`) for users, agents, chats, and Rotor state. Tables are created on startup. Upgrading from 0.1 drops and alters nothing; see `docs/arch/store.md` for which tables are new.
 - A Git storage repo for agent files (`HATCHERY_STORAGE_REPO`), reached through the Connect GitHub app (`GITHUB_CONNECTOR`).
 - `HATCHERY_SECRETS_KEY` for agent secrets, and `HATCHERY_SERVE_DOMAIN` plus its wildcard domain for agent web addresses.
-- Queue subscribers for `hatchery.agent.runtime` (topics `hatchery-dispatcher-v1`, `hatchery-dispatcher-maintenance-v1`) and `hatchery.app.server:worker_event` (topic `hatchery-worker-events-v1`), as in `pyproject.toml`. A wrapper project must declare the same topics. These are the same topics as 0.1.
+- Queue subscribers for `hatchery.agent.runtime` (topics `hatchery-dispatcher-v1`, `hatchery-dispatcher-maintenance-v1`) and `hatchery.app.server:worker_event` (topic `hatchery-worker-events-v1`). The deploying wrapper repo declares them. These are the same topics as 0.1.
 
 See the repository's top-level README for what each setting does.
 
@@ -23,4 +23,6 @@ One-time setup:
 2. On PyPI, register a GitHub trusted publisher with owner `vercel-labs`, repository `hatchery`, workflow filename `publish.yml`, and environment `pypi`. For the first release of `vercel-hatchery`, use a [pending publisher](https://docs.pypi.org/trusted-publishers/creating-a-project-through-oidc/) under your PyPI account's Publishing settings; for an existing project, use its [Publishing settings](https://docs.pypi.org/trusted-publishers/adding-a-publisher/). A pending publisher does not reserve the name.
 3. Run the workflow manually from GitHub Actions, selecting `main`. The PyPI fields and workflow filename/environment must match exactly. No token or GitHub secret is required.
 
-The Python package is imported as `hatchery`; the PyPI distribution is `vercel-hatchery`. For local development instructions, see the repository's top-level README and `frontend/README.md`.
+A published version reaches an instance only when its wrapper repo pins it; see `docs/deployments.md` in the repository.
+
+The Python package is imported as `hatchery`; the PyPI distribution is `vercel-hatchery`.

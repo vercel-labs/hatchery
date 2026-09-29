@@ -65,13 +65,7 @@ def valid_origin(request: fastapi.Request | fastapi.WebSocket) -> bool:
         return True
     configured = os.environ.get("HATCHERY_APP_ORIGIN")
     expected = configured.rstrip("/") if configured else request_origin(request)
-    supplied = origin.rstrip("/")
-    if secrets.compare_digest(supplied, expected):
-        return True
-    return supplied in {"http://localhost:3000", "http://127.0.0.1:3000"} and expected in {
-        "http://localhost:8000",
-        "http://127.0.0.1:8000",
-    }
+    return secrets.compare_digest(origin.rstrip("/"), expected)
 
 
 async def begin(request: fastapi.Request) -> fastapi.responses.RedirectResponse:

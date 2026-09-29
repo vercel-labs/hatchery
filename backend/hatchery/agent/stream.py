@@ -41,32 +41,54 @@ def dump_event(event: StreamEvent) -> dict[str, typing.Any]:
 async def get_readable(
     process_id: str,
 ) -> collections.abc.AsyncIterator[rotor.Chunk | rotor.Settled | rotor.Gap]:
-    """Replay the in-flight spool, then follow one thread process live."""
+    """Replay the in-flight spool, then follow one thread process live.
+
+    A new chat's thread exists only once its supervisor spawned it, so wait for it.
+    """
     from hatchery.agent import runtime
 
-    async for item in runtime.client.live(process_id=process_id, replay_inflight=True):
-        yield item
+    while True:
+        try:
+            async for item in runtime.client.live(process_id=process_id, replay_inflight=True):
+                yield item
+            return
+        except rotor.ProcessNotFound:
+            await asyncio.sleep(0.5)
 
 
-async def get_terminal(process_id: str, turn_id: str) -> LifecycleEvent:
-    """Wait for the turn's committed Rotor lifecycle record."""
+async def get_terminal(chat_id: str, process_id: str, turn_id: str) -> LifecycleEvent:
+    """Wait for the turn's end: the thread's Rotor lifecycle record, or the chat's
+    turn record when the turn ended before a thread ran it (the supervisor rejected it)."""
     from hatchery.agent import runtime
+    from hatchery.store import events
 
-    async for event in runtime.client.tail(process_id=process_id, poll="0.1s"):
-        if event.kind not in _TERMINAL or not isinstance(event.data, dict):
-            continue
-        if event.data.get("turn_id") != turn_id:
-            continue
-        return LifecycleEvent(
-            type=event.kind,
-            turn_id=turn_id,
-            chat_id=str(event.data.get("chat_id", "")),
-            error=typing.cast(str | None, event.data.get("error")),
-        )
-    raise RuntimeError("Rotor event tail stopped before the turn completed")
+    cursor = 0
+    while True:
+        async for event in runtime.client.tail(
+            process_id=process_id, cursor=cursor, follow=False
+        ):
+            cursor = event.seq
+            if event.kind not in _TERMINAL or not isinstance(event.data, dict):
+                continue
+            if event.data.get("turn_id") != turn_id:
+                continue
+            return LifecycleEvent(
+                type=event.kind,
+                turn_id=turn_id,
+                chat_id=chat_id,
+                error=typing.cast(str | None, event.data.get("error")),
+            )
+        for _, data in await events.read(chat_id, "turns"):
+            if data.get("turn_id") == turn_id and data.get("type") in _TERMINAL:
+                return LifecycleEvent(
+                    type=data["type"], turn_id=turn_id, chat_id=chat_id, error=data.get("error")
+                )
+        await asyncio.sleep(0.1)
 
 
-async def to_sse(process_id: str, turn_id: str) -> collections.abc.AsyncIterator[str]:
+async def to_sse(
+    chat_id: str, process_id: str, turn_id: str
+) -> collections.abc.AsyncIterator[str]:
     """Translate one Rotor turn's provisional events to AI SDK UI SSE."""
     queue: asyncio.Queue[
         ai.ui.ai_sdk.ui_events.UIMessageStreamEvent | Exception | None
@@ -80,7 +102,7 @@ async def to_sse(process_id: str, turn_id: str) -> collections.abc.AsyncIterator
     async def agent_events() -> collections.abc.AsyncIterator[ai.events.AgentEvent]:
         readable = get_readable(process_id)
         live = asyncio.create_task(anext(readable))
-        terminal = asyncio.create_task(get_terminal(process_id, turn_id))
+        terminal = asyncio.create_task(get_terminal(chat_id, process_id, turn_id))
         try:
             while True:
                 done, _ = await asyncio.wait(

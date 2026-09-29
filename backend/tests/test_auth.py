@@ -50,12 +50,12 @@ def test_request_origin_uses_browser_facing_origin(monkeypatch):
     assert auth.request_origin(request()) == "https://hatchery.example"
 
 
-def test_origin_validation_accepts_direct_local_backend(monkeypatch):
+def test_origin_validation_accepts_only_the_app_origin(monkeypatch):
     monkeypatch.delenv("HATCHERY_APP_ORIGIN", raising=False)
-    local = request(headers={"host": "localhost:8000", "origin": "http://localhost:3000"})
-    forged = request(headers={"host": "localhost:8000", "origin": "https://evil.example"})
+    same = request(headers={"host": "hatchery.example", "origin": "http://hatchery.example"})
+    forged = request(headers={"host": "hatchery.example", "origin": "https://evil.example"})
 
-    assert auth.valid_origin(local) is True
+    assert auth.valid_origin(same) is True
     assert auth.valid_origin(forged) is False
 
 

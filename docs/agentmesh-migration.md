@@ -18,7 +18,7 @@ Port what agentmesh implements. Keep what Hatchery already has. Build nothing el
 - Rename spaces to **agents** throughout the product, API, models, and stores. There is no second grouping concept.
 - Agents stay **shared and named**, like spaces today. Agent ID stays separate from display name.
 - App and execution data stay in the DB. Agent files and their history live in Git.
-- Storage repo: `vercel-internal-playground/hatchery-storage`, reached through the existing Connect GitHub App. The canonical branch is `main`, same as agentmesh.
+- Storage repo: set by `HATCHERY_STORAGE_REPO`, reached through the existing Connect GitHub App. The canonical branch is `main`, same as agentmesh.
 - Each agent's directory has `AGENTS.md`, which takes the role of agentmesh's `SOUL.md`. All other agentmesh workspace features come too.
 - Keep Hatchery's FastAPI service, Python AI SDK, Rotor, Vercel Sandbox, queues, fx workers, Vite, TanStack Router, and Base UI.
 - An agentmesh thread becomes a Hatchery durable AI SDK loop. Both are already AI SDK loops on Rotor, so this adds no second runtime.
@@ -71,7 +71,7 @@ Notes move to Git memory. Old notes are not migrated. The space description beco
 ### 4.3 Repository and sandbox layout
 
 ```text
-hatchery-storage/
+storage-repo/
   agents/<agent-id>/
     AGENTS.md  USER.md  MEMORY.md  memories/
     skills/<name>/SKILL.md  scripts/  requirements.txt  lib/
@@ -217,7 +217,7 @@ Each phase is done when its gate passes.
 
 ## 9. Configuration
 
-- `HATCHERY_STORAGE_REPO` = `vercel-internal-playground/hatchery-storage`.
+- `HATCHERY_STORAGE_REPO` set to the storage repo.
 - The existing GitHub Connect connector. Check read/write access to the storage repo.
 - `HATCHERY_SERVE_DOMAIN` plus a wildcard domain (agentmesh `serve.domain`).
 - `HATCHERY_SECRETS_KEY` (agentmesh `MESH_SECRETS_KEY`).
@@ -305,7 +305,7 @@ Phase 6-7 open items: serving, wildcard hosts, and scheduled delivery were not r
 - Other old-only code removed: `Agent.about` and its default text, legacy agent colors (aliases and custom values, backend and UI), `WorkerSpec` `vcpus`/`memory` and the `legacy` size label, the list-time Slack title cleanup, the transcript's duplicate-tool-part repair, and `agent/dispatcher.py` (folded into the thread prompt; spans are now `hatchery.thread.turn`/`hatchery.thread.tool`).
 - Seed: the first call that lists agents on a fresh deployment (`_agents()` in `app/server.py`) creates `hatchery` and commits the template through the same `join` as `POST /api/agents`. A failed commit removes the row, so the next call retries; a commit that already landed is found (`FileExistsError`) and not repeated. The startup hook no longer creates the row without its files. Gate: `tests/app/test_server.py::test_default_agent_seed_commits_the_template_once_and_retries_after_failure`.
 - Wiki: as in agentmesh, `wiki/PROMPT.md` and `wiki/skills/` are optional and nothing seeds them at runtime (agentmesh only has `wiki/README.md` from its `init` scaffold, which §3 drops). A thread on a `main` without `wiki/` works, and the first reviewed wiki proposal creates it. Gate: `tests/agent/test_thread.py::test_fresh_storage_without_wiki_gets_it_from_the_first_reviewed_proposal`.
-- Live: the Vercel project `hatchery` deploys from `vercel-internal-playground/hatchery-storage`, a wrapper that pins the `vercel-hatchery` wheel and declares its own queue subscribers. That repo is also the storage repo, so it needs a new wheel (0.2.0.dev0; its topics are unchanged), and agentmesh's `ignoreCommand` (skip builds for thread branches and for `main` commits that only touch `agents/` and `wiki/`), or every agent publish redeploys production.
+- Live: the Vercel project `hatchery` deploys from the storage repo (`HATCHERY_STORAGE_REPO`), a wrapper that pins the `vercel-hatchery` wheel and declares its own queue subscribers. That repo is also the storage repo, so it needs a new wheel (0.2.0.dev0; its topics are unchanged), and agentmesh's `ignoreCommand` (skip builds for thread branches and for `main` commits that only touch `agents/` and `wiki/`), or every agent publish redeploys production.
 
 ### Phase 5 notes
 

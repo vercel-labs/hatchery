@@ -819,22 +819,6 @@ async def test_snapshot_create_and_restore(monkeypatch):
     ]
 
 
-def test_daemon_env_bridges_vercel_dev_queue_through_public_origin(monkeypatch):
-    monkeypatch.setenv("VERCEL_QUEUE_TOKEN", "vc-dev-token")
-    monkeypatch.setenv("VERCEL_QUEUE_BASE_URL", "http://127.0.0.1:3000/_svc/_queues")
-    monkeypatch.setenv("VERCEL_REGION", "dev1")
-    monkeypatch.setenv("HATCHERY_PUBLIC_URL", "https://hatchery.vgrok.example/")
-
-    env = sandbox._daemon_env("wrk_1", models.WorkerSpec(), "secret")
-
-    assert env["VERCEL_QUEUE_TOKEN"] == "vc-dev-token"
-    assert env["VERCEL_QUEUE_BASE_URL"] == (
-        "https://hatchery.vgrok.example/_svc/_queues"
-    )
-    assert env["VERCEL_REGION"] == "dev1"
-    assert "VERCEL_DEPLOYMENT_ID" not in env
-
-
 def test_daemon_env_uses_placeholder_without_exposing_cloud_identity(monkeypatch):
     monkeypatch.setenv("VERCEL_OIDC_TOKEN", "oidc")
     monkeypatch.setenv("VERCEL_REGION", "iad1")
@@ -858,18 +842,6 @@ def test_daemon_env_uses_sandbox_region_when_runtime_region_is_missing(monkeypat
     env = sandbox._daemon_env("wrk_1", models.WorkerSpec(), "secret", region="iad1")
 
     assert env["VERCEL_REGION"] == "iad1"
-
-
-def test_daemon_env_requires_public_origin_for_vercel_dev(monkeypatch):
-    monkeypatch.setenv("VERCEL_QUEUE_TOKEN", "vc-dev-token")
-    monkeypatch.delenv("HATCHERY_PUBLIC_URL", raising=False)
-
-    try:
-        sandbox._daemon_env("wrk_1", models.WorkerSpec(), "secret")
-    except RuntimeError as error:
-        assert "HATCHERY_PUBLIC_URL" in str(error)
-    else:
-        raise AssertionError("missing public origin should fail")
 
 
 # The agentmesh provider contract (ported from agentmesh tests/unit/test_vercel_sandbox.py).

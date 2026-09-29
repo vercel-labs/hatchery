@@ -133,8 +133,17 @@ class SupervisorState:
 class Supervisor(rotor.DurableProcess[SupervisorState]):
     @rotor.on
     async def start(self, msg: rotor.Start) -> None:
+        self._begin(msg.input["agent_id"])
+
+    def _begin(self, agent_id: str) -> None:
+        """Take the agent id and the day's budget.
+
+        Rotor delivers `Start` once and rolls back a failed handler, so a supervisor
+        whose start failed (say, no Environment installed) has no agent id. Its next
+        turn runs this again instead of failing forever.
+        """
         env = environment.Environment.current()
-        self.state.agent_id = msg.input["agent_id"]
+        self.state.agent_id = agent_id
         self.state.budget.ceiling = env.config.budget.tokens_per_day
         self._roll_day()
 
@@ -224,21 +233,12 @@ class Supervisor(rotor.DurableProcess[SupervisorState]):
         s = self.state
         if msg.turn_id in s.requests:
             return
+        if not s.agent_id:
+            self._begin(msg.agent_id)
         existing = self._chat_thread(msg.chat_id)
         if s.retiring or (existing is not None and not existing.live):
-            reason = "the agent is retiring" if s.retiring else "the chat's thread has ended"
-            rotor.record("turn_rejected", {"turn_id": msg.turn_id, "reason": reason})
-            self.spawn(
-                thread.finish_turn,
-                input={
-                    "chat_id": msg.chat_id,
-                    "turn_id": msg.turn_id,
-                    "process_id": rotor.child_id(self.ref.id, root_key(msg.chat_id)),
-                    "state": "failed",
-                    "task_id": msg.task_id,
-                    "error": reason,
-                },
-                key=f"reject:{msg.turn_id}",
+            self._fail_turn(
+                msg, "the agent is retiring" if s.retiring else "the chat's thread has ended"
             )
             return
         if existing is None:
@@ -252,6 +252,31 @@ class Supervisor(rotor.DurableProcess[SupervisorState]):
             thread_id = existing.thread_id
         s.requests[msg.turn_id] = thread_id
         rotor.record("turn_routed", {"turn_id": msg.turn_id, "thread_id": thread_id})
+
+    def _fail_turn(self, msg: messages.TurnInput, reason: str) -> None:
+        """End a turn no thread will run, so the chat shows `reason` instead of waiting."""
+        rotor.record("turn_rejected", {"turn_id": msg.turn_id, "reason": reason})
+        self.spawn(
+            thread.finish_turn,
+            input={
+                "chat_id": msg.chat_id,
+                "turn_id": msg.turn_id,
+                "process_id": rotor.child_id(self.ref.id, root_key(msg.chat_id)),
+                "state": "failed",
+                "task_id": msg.task_id,
+                "error": reason,
+            },
+            key=f"reject:{msg.turn_id}",
+        )
+
+    @rotor.on(thread.finish_turn.Done)
+    async def turn_failed(self, msg: rotor.ChildDone) -> None:
+        """`_fail_turn` recorded the turn's end; nothing left to track."""
+
+    @rotor.on(thread.finish_turn.Failed)
+    async def turn_failure_lost(self, msg: rotor.ChildFailed) -> None:
+        log.error("could not record the end of turn %s: %s", msg.key, msg.reason)
+        rotor.record("turn_failure_lost", {"key": msg.key, "reason": str(msg.reason)})
 
     @rotor.on
     async def report(self, msg: messages.ThreadReport) -> None:
@@ -715,6 +740,8 @@ class Supervisor(rotor.DurableProcess[SupervisorState]):
             msg.error.detail[:1000],
         )
         rotor.record("agent_error", {"error": msg.error.detail})
+        if isinstance(msg.original, messages.TurnInput):
+            self._fail_turn(msg.original, f"{msg.error.type}: {msg.error.detail[:500]}")
 
     # Projections
 
@@ -833,6 +860,7 @@ async def start_turn(
         linked=bool(await chats.bindings(chat_id)),
         task_id=task_id,
         actor_user_id=actor_user_id,
+        agent_id=agent_id,
     )
     async with turns.run(chat_id):
         await handle.send(payload, idempotency_key=resolved_turn_id)

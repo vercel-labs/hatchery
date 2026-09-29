@@ -1,10 +1,10 @@
 # Use agent-browser
 
-Use `agent-browser` to reproduce and inspect behavior on the live Hatchery deployment.
+Use `agent-browser` to reproduce and inspect behavior on a live Hatchery deployment or a preview (see [`deployments.md`](deployments.md)). Previews use their own database, so sign in there separately.
 
 ## Authenticate
 
-Use the persistent profile at `~/.agent-browser/hatchery-vercel`. If it is not authenticated, ask the user to open a headed browser with that profile, complete Vercel login, and close the browser to release the profile lock.
+Use the persistent profile at `~/.agent-browser/hatchery-vercel`. If it is not authenticated, or a page stops at the Okta "Verifying your identity" step, ask the user to open a headed browser with that profile, complete Vercel login, and close the browser to release the profile lock.
 
 ## Inspect Hatchery
 
@@ -14,7 +14,7 @@ Run all commands in one persistent shell so the browser session survives:
 export AGENT_BROWSER_SESSION="$(agent-browser session id --scope worktree --prefix hatchery-live)"
 export AGENT_BROWSER_PROFILE="$HOME/.agent-browser/hatchery-vercel"
 
-agent-browser open https://hatchery-prod.playground-vercel.tools
+agent-browser open <deployment url>
 agent-browser get text body
 ```
 

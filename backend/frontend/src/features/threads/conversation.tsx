@@ -29,7 +29,7 @@ import { RepositoryPanelSkeleton } from "@/features/repository/repository-skelet
 import { EmptyChanges } from "@/features/repository/empty-changes";
 import { BudgetHoldNotice } from "@/features/agents/budget-hold-notice";
 import { useApi } from "@/hooks/use-api";
-import { apiBase, apiFetch, type Agent, type Chat } from "@/lib/api";
+import { apiFetch, type Agent, type Chat } from "@/lib/api";
 import type {
   AgentThreads,
   Message,
@@ -115,13 +115,13 @@ export function Conversation({
   const transport = useMemo(
     () =>
       new DefaultChatTransport<ChatUIMessage>({
-        api: `${apiBase()}/api/chat`,
+        api: "/api/chat",
         credentials: "include",
         prepareSendMessagesRequest: ({ id, messages }) => ({
           body: { chat_id: id, messages },
         }),
         prepareReconnectToStreamRequest: ({ id }) => ({
-          api: `${apiBase()}/api/chat/${id}/stream`,
+          api: `/api/chat/${id}/stream`,
           credentials: "include",
         }),
       }),
@@ -228,7 +228,7 @@ export function Conversation({
   useEffect(() => {
     if (!persisted) return;
     const frame = requestAnimationFrame(() => void loadSandboxes());
-    const source = new EventSource(`${apiBase()}/api/chats/${chatId}/events`, {
+    const source = new EventSource(`/api/chats/${chatId}/events`, {
       withCredentials: true,
     });
     source.onmessage = (message) => {
